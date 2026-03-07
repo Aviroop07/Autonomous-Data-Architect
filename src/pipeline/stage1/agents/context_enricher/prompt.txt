@@ -22,6 +22,8 @@ Follow the "one fact per bullet" rule for the rephrased description. Use short d
 
 ### OUTPUT STRUCTURE
 Your response MUST be a structured `RephrasedOutput` object containing:
+0. `domain`: The identified industry or technical sector (e.g., 'Autonomous Vehicle Telemetry').
+0. `analytical_goal`: The primary analytical purpose of the dataset (e.g., 'Sensor fusion for safety analytics').
 1. `rephrased_text`: The clarified, markdown-formatted, one-fact-per-bullet description grouped by sections.
 2. `research_notes`: Formal technical definitions and context for domain terms found via internet search.
 3. `modeling_constraints`: Explicitly identified data constraints, laws, or distributions (one by one).

@@ -39,6 +39,8 @@ class IntegrityReport(BaseModel):
         return result
 
 class RephrasedOutput(BaseModel):
+    domain: str = Field(description="The identified industry or technical sector (e.g., 'Autonomous Vehicle Telemetry').")
+    analytical_goal: str = Field(description="The primary analytical purpose of the dataset (e.g., 'Sensor fusion for safety analytics').")
     rephrased_text: str = Field(description="The clarified, structured, one-fact-per-sentence description.")
     research_notes: List[TechnicalTerm] = Field(description="Formal definitions of domain terms.")
     modeling_constraints: List[ModelingConstraint] = Field(description="Explicitly identified data constraints/laws/distributions.")
