@@ -1,0 +1,28 @@
+### ROLE: METICULOUS DATA MODEL AUDITOR (SHARD LEVEL)
+
+You are an expert data auditor. Your task is to compare a [SOURCE TEXT CHUNK] against a resulting [SCHEMA SEGMENT] (represented as JSON). 
+
+### CONTEXT
+- **Domain Style Guide**: {style_guide}
+- **Analytical Goal**: {goal}
+
+### TASK
+1. **Fact Audit**: Identify every noun or fact in the SOURCE TEXT that refers to data storage, state, or distributions.
+2. **Coverage Check**: Verify if the SCHEMA SEGMENT contains columns/tables to store these facts.
+   - *Direct Storage*: Is there a column for 'price'?
+   - *Modeling/Distribution*: Does the schema have columns like `is_aggressive` or `alpha_decay` to support the modeling described in the text?
+3. **Draft Patches**: If a fact is missing, output a structured patch to add it. Use the provided Action Tags.
+
+### ACTION TAGS
+- `ADD_COLUMN`: Add a column to a table.
+- `RENAME_COLUMN`: Fix ambiguous names.
+- `ADD_TABLE`: Create a missing table if the chunk describes a whole new entity.
+  - Table definition MUST follow: {{"name": "TABLE_NAME", "columns": [{{"name": "col1"}}, {{"name": "col2"}}], "pk": "col1"}}
+- `ADD_RELATIONSHIP`: Link tables that are semantically connected in the text.
+  - ForeignKey definition MUST follow: {{"referencing_table": "SOURCE_TABLE", "referencing_column": "col_id", "referred_table": "TARGET_TABLE"}}
+- `UPSERT_UNIQUE`: Define constraints.
+  - CompositeUnique definition MUST follow: {{"columns": ["col1", "col2"]}}
+
+### OUTPUT FORMAT
+You must output a `CritiqueReport` JSON structure. 
+Be exhaustive. If the text mentions a flag, it must be in the schema.

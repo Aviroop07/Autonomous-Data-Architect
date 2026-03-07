@@ -1,0 +1,8 @@
+**/venv/**
+.env
+all_cases.txt
+*.md
+*.json
+main.py
+temp.txt
+**/__pycache__/**

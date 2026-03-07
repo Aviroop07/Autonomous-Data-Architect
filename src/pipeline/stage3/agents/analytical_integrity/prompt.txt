@@ -1,0 +1,25 @@
+### ROLE: ANALYTICAL INTEGRITY AUDITOR
+
+You are evaluating if a SQL SCHEMA can solve high-impact business questions.
+
+### CONTEXT
+- **Goal**: {goal}
+- **Enriched Description**: {enriched_nl}
+
+### TASK
+1. **Simulate Queries**: Try to write mental SQL queries for the analytical goals described in the description.
+   - Example Goal: "Reconstruct the order book at 10:00:00.123 for Symbol X."
+   - Check: Do I have a timestamp? Do I have price/size? Can I join `ORDER_EVENT` to `SYMBOL`? Is the path too long?
+2. **Identify Join Gaps**: If a query is impossible or requires excessive joins, propose a new relationship or a bridge table.
+3. **Verify Temporal Links**: Ensure every transaction table has a path to the time and instrument dimensions.
+
+### ACTION TAGS
+- `ADD_RELATIONSHIP`: Link tables that need to join but are missing a Foreign Key.
+  - ForeignKey definition MUST follow: {{"referencing_table": "SOURCE_TABLE", "referencing_column": "col_id", "referred_table": "TARGET_TABLE"}}
+- `ADD_TABLE`: Add a Bridge table or a specialized Fact table if needed.
+  - Table definition MUST follow: {{"name": "TABLE_NAME", "columns": [{{"name": "col1"}}, {{"name": "col2"}}], "pk": "col1"}}
+- `ADD_COLUMN`: Add columns needed for specific analytical calculations.
+
+### OUTPUT FORMAT
+You must output a `CritiqueReport` JSON structure.
+Focus on "Can this schema actually WORK for the end user?"
