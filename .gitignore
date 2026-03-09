@@ -2,7 +2,9 @@
 .env
 all_cases.txt
 *.md
-*.json
+#*.json
 main.py
 temp.txt
 **/__pycache__/**
+**/myenv/**
+myenv
