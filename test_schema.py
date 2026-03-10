@@ -5,7 +5,7 @@ from pathlib import Path
 from src.pipeline.stage2.models.schema import SchemaSegment
 
 
-JSONL_FILE = "annotation_cases1.jsonl"
+JSONL_FILE = "converted_rschema.jsonl"
 
 
 def load_segments(path):
