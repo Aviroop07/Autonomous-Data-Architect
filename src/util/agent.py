@@ -33,6 +33,8 @@ def get_model(model: Optional[str] = None) -> Union[ChatOpenAI, ChatOllama]:
 # Generic Agent Factory
 # ------------------------------------------------------------------
 
+from src.util.schema_utils import generate_hierarchical_schema_description
+
 T = TypeVar("T", bound=BaseModel)
 
 def get_agent_(
@@ -44,8 +46,14 @@ def get_agent_(
 ):
     """
     Create a LangGraph agent. Supports tools and structured output.
+    Automatically appends the hierarchical output format to the system prompt.
     """
     llm = get_model(model)
+
+    # Dynamically append the output format if structure is provided
+    if output_structure:
+        output_format = generate_hierarchical_schema_description(output_structure)
+        system_prompt = f"{system_prompt}\n\n## OUTPUT FORMAT\nReturn a JSON object matching this structure:\n{output_format}"
 
     agent = create_agent(
         model=llm,

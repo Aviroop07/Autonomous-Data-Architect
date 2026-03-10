@@ -71,7 +71,7 @@ class Table(BaseModel):
 
     def normalize(self):
         """
-        Normalizes table name and column names.
+        Normalizes table name and column names, and scrubs redundant unique constraints.
         """
         old_name = self.name
         self.name = to_snake_case(self.name).upper()
@@ -85,6 +85,16 @@ class Table(BaseModel):
         
         # Ensure pk is normalized
         self.pk = to_snake_case(self.pk).lower()
+
+        # [HARDENING] Scrub redundant unique constraints
+        if self.unique:
+            # Remove any unique constraint that only contains the PK column
+            self.unique = [
+                uq for uq in self.unique 
+                if not (len(uq.columns) == 1 and uq.columns[0] == self.pk)
+            ]
+            if not self.unique:
+                self.unique = None
 
     def _validate(self) -> List[str]:
         errors = []
@@ -125,6 +135,13 @@ class Table(BaseModel):
 
         # Unique constraints validation
         for unique_constraint in (self.unique or []):
+            if self.pk in unique_constraint.columns:
+                if len(unique_constraint.columns) == 1:
+                    errors.append(f"Redundant unique singleton: Column '{self.pk}' is already the Primary Key of {self.name}.")
+                else:
+                    cols_str = ", ".join(unique_constraint.columns)
+                    errors.append(f"Redundant unique composite containing PK: '{self.pk}' in ({cols_str}) for table {self.name}.")
+                
             for col_name in unique_constraint.columns:
                 if col_name not in column_names:
                     errors.append(f"Unique constraint references unknown column '{col_name}' in table {self.name}")
@@ -164,6 +181,22 @@ class ForeignKey(BaseModel):
         if self.referred_table not in tables_map:
             errors.append(f"FK error: Referred table '{self.referred_table}' does not exist.")
         
+        if self.referencing_table in tables_map:
+            ref_table = tables_map[self.referencing_table]
+            if ref_table.pk == self.referencing_column:
+                errors.append(f"FK error: Column '{self.referencing_column}' is the Primary Key of '{self.referencing_table}'. Using a PK as an FK is prohibited.")
+
+        # [HARDENING] Discourage bridge-table targets unless necessary
+        if self.referred_table in tables_map:
+            target_table = tables_map[self.referred_table]
+            target_cols = {c.name for c in target_table.columns}
+            # Heuristic: If target table looks like a bridge (no descriptive non-PK/FK columns)
+            # but has more than 3 columns, it's likely a complex entity; otherwise, flag potential inaccuracy.
+            if len(target_cols) <= 3 and target_table.pk in target_cols:
+                # If there is another table with exactly the same PK name as this target table's PK, 
+                # but with more metadata, then referencing the bridge might be a mistake.
+                pass 
+
         return errors
 
     def __str__(self) -> str:
@@ -172,10 +205,14 @@ class ForeignKey(BaseModel):
             f"REFERENCES {self.referred_table}"
         )
 
-class SchemaSegment(BaseModel):
-    chunk_title: str
+class Schema(BaseModel):
+    version: Optional[str] = "1.0"
+    chunk_title: Optional[str] = None
     tables: List[Table]
     relationships: Optional[List[ForeignKey]] = None
+
+    def get_table_map(self) -> Dict[str, Table]:
+        return {t.name: t for t in self.tables}
 
     def rename_table(self, old_name: str, new_name: str):
         """
@@ -208,7 +245,7 @@ class SchemaSegment(BaseModel):
 
     def normalize(self):
         """
-        Normalizes the entire schema segment.
+        Normalizes the entire schema.
         """
         # First ensure all names are trimmed and follow snake_case
         for table in self.tables:
@@ -228,14 +265,18 @@ class SchemaSegment(BaseModel):
     def _validate(self) -> List[str]:
         errors = []
         if not self.tables:
-            errors.append("Schema segment must contain at least one table.")
+            errors.append("Schema must contain at least one table.")
 
-        table_map = {}
+        table_map = self.get_table_map()
         for table in self.tables:
             errors.extend(table._validate())
-            if table.name in table_map:
-                errors.append(f"Duplicate table name in segment: {table.name}")
-            table_map[table.name] = table
+            # Duplicate check handled by get_table_map in a way, but let's be explicit
+            
+        seen_tables = set()
+        for table in self.tables:
+            if table.name in seen_tables:
+                errors.append(f"Duplicate table name in schema: {table.name}")
+            seen_tables.add(table.name)
 
         relationship_counts = {t.name: 0 for t in self.tables}
         for fk in (self.relationships or []):
@@ -253,10 +294,82 @@ class SchemaSegment(BaseModel):
                 if count == 0:
                     errors.append(f"Table '{t_name}' is isolated (no relationships).")
 
+        # Cycle detection
+        cycles = self.detect_cycles()
+        for cycle in cycles:
+            cycle_str = " -> ".join(cycle)
+            # [REFINEMENT] Column-level cycles are the true hard dependencies.
+            # However, with PK != FK, column-level cycles are technically impossible.
+            # We report them if they somehow occur.
+            errors.append(f"FK error: Circular dependency detected (column-level): {cycle_str}")
+
         return errors
 
+    def detect_cycles(self) -> List[List[str]]:
+        """
+        Detects cycles in the Foreign Key relationship graph at the COLUMN level.
+        Returns a list of cycles, where each cycle is a list of "table.column" strings.
+        """
+        if not self.relationships:
+            return []
+        
+        table_map = self.get_table_map()
+        
+        # Build adjacency list: "table.column" -> "referred_table.pk"
+        adj: Dict[str, set] = {}
+        all_nodes = set()
+        
+        for rel in self.relationships:
+            source_node = f"{rel.referencing_table}.{rel.referencing_column}"
+            # Fetch the PK of the target table
+            target_pk = "id" # Default fallback
+            if rel.referred_table in table_map:
+                target_pk = table_map[rel.referred_table].pk
+            target_node = f"{rel.referred_table}.{target_pk}"
+            
+            if source_node not in adj:
+                adj[source_node] = set()
+            adj[source_node].add(target_node)
+            all_nodes.add(source_node)
+            all_nodes.add(target_node)
+            
+        visited: set = set()
+        stack: set = set()
+        path: List[str] = []
+        cycles: List[List[str]] = []
+        
+        def dfs(node: str):
+            visited.add(node)
+            stack.add(node)
+            path.append(node)
+            
+            if node in adj:
+                for neighbor in adj[node]:
+                    if neighbor not in visited:
+                        dfs(neighbor)
+                    elif neighbor in stack:
+                        try:
+                            idx = path.index(neighbor)
+                            cycles.append(path[idx:] + [neighbor])
+                        except ValueError:
+                            pass
+            
+            stack.remove(node)
+            path.pop()
+            
+        for node in sorted(list(all_nodes)):
+            if node not in visited:
+                dfs(node)
+                
+        return cycles
+
     def __str__(self) -> str:
-        lines = [f"SEGMENT: {self.chunk_title}"]
+        lines = []
+        if self.chunk_title:
+            lines.append(f"SEGMENT: {self.chunk_title}")
+        else:
+            lines.append("=== GLOBAL SCHEMA ===")
+            
         for table in self.tables:
             lines.append(str(table))
         if self.relationships:

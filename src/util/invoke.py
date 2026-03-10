@@ -7,12 +7,22 @@ T = TypeVar("T", bound=BaseModel)
 def get_response(
     agent,
     output_structure: Optional[Type[T]],
-    query: str
+    query: Union[str, list]
 ) -> Tuple[Union[T, str], int]:
     """
     Standardized caller for agents with optional Pydantic validation and token tracking.
     Returns (parsed_content, total_tokens)
     """
+    if isinstance(query, list):
+        # Convert list (likely AtomicFact objects) to string
+        parts = []
+        for item in query:
+            if hasattr(item, "fact"):
+                parts.append(f"- {item.fact}")
+            else:
+                parts.append(str(item))
+        query = "\n".join(parts)
+
     response = agent.invoke(
         {
             "messages": [

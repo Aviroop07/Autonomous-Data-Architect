@@ -1,4 +1,4 @@
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Union
 from pydantic import BaseModel
 from src.util.agent import get_agent_
 from src.util.invoke import get_response
@@ -21,20 +21,24 @@ def get_agent(model: Optional[str] = None):
     )
 
 def extract_facts(
-    text: str,
+    input_data: Union[str, List[AtomicFact]],
     extractor = None,
     model: Optional[str] = None
 ) -> Tuple[List[AtomicFact], int]:
     """
-    Extracts a list of atomic/discrete facts from the provided text.
+    Extracts facts from a string, or returns the list directly if already processed.
     """
+    if isinstance(input_data, list):
+        return input_data, 0
+
     if not extractor:
         extractor = get_agent(model)
         
     parsed, tokens = get_response(
         agent=extractor,
         output_structure=FactList,
-        query=text
+        query=input_data
     )
+    assert isinstance(parsed, FactList)
     
     return parsed.facts, tokens

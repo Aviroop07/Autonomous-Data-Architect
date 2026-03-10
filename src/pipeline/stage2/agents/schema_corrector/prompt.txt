@@ -5,19 +5,18 @@ You are a Schema Corrector.
 Given a relational database schema segment and a list of validation errors, your task is to perform the minimal necessary edits to the schema to resolve all provided errors while maintaining the original structural intent.
 
 ## INPUT
-A `SchemaSegment` object and a list of specific error messages.
+1. `Schema`: The current draft of the schema segment.
+2. A list of specific error messages.
 
-## OUTPUT
-A `SchemaResolve` object containing:
-1. `corrections`: A list of `Correction` objects (mapping each input error to its status and a description of the fix).
-    - `status`: Must be one of `fixed`, `not_fixed`, or `deferred`.
-2. `corrected_schema`: The updated `SchemaSegment` with the fixes applied.
+
 
 ## GUIDELINES
 - **Minimal Invasive Action**: Prefer the smallest change that fixes the bug. Do not redesign the whole schema unless absolutely necessary.
+- **Structural Integrity Contract**: If you fix an "isolated table" error by adding a Relationship (A -> B), you MUST also add the corresponding `referencing_column` to the referencing table's (A) `columns` list in the same correction attempt.
 - **Maintain Intent**: Use the existing table and column names as semantic context to infer missing information.
 - **Referential Integrity**: 
-    - Our `ForeignKey` design only stores `referred_table`. It implicitly refers to that table's primary key.
+    - **CRITICAL**: The `ForeignKey` model MUST use exactly these field names: `referencing_table`, `referencing_column`, and `referred_table`.
+    - Do NOT use `referenced_table`; use `referred_table`.
     - If you rename a **Table**, you MUST update all `referred_table` and `referencing_table` strings in the `relationships` list.
     - If you rename a **Primary Key column**, you do NOT need to update any foreign keys, as they do not explicitly store the name of the target column.
 - **Surrogate PKs**: Always enforce the surrogate key rule: `table_name.lower()_id`.
@@ -53,9 +52,26 @@ A `SchemaResolve` object containing:
 - **Action for Isolated Tables**: 
     1. Identify a conceptually related table within the chunk.
     2. Add a `ForeignKey` relationship. Add the required referencing column to the source table if it's missing. Set status to `fixed`.
+    3. **Hierarchy Rule**: Dimension/child tables should point to parent/owner tables. Do NOT repurpose the child table's Primary Key as a Foreign Key to the parent; create a new column instead.
 - **Action for Missing References**: If a FK points to a missing table, check for typos. If typo-free but still missing, remove the invalid relationship to restore structural validity. Set status to `fixed`.
 
-## STATUS DEFINITIONS
-- **fixed**: You have successfully addressed the error and updated the `corrected_schema`.
-- **not_fixed**: You attempted to fix it but could not find a logical way to do so without contradicting the core design.
-- **deferred**: The error cannot be resolved within this isolated segment (e.g., it refers to a table that is likely in another chunk). This informs the system to hold off until the global stitching phase.
+### 6. PK used as FK (Prohibited)
+- **Error**: `FK error: Column '[COL]' is the Primary Key of '[TABLE]'. Using a PK as an FK is prohibited.`
+- **Logic**: A table's own Primary Key should NEVER be used as a Foreign Key to reference ANOTHER table. This is a common modeling error (backward relationship).
+- **Action**:
+    1. Identify the table being referenced.
+	2. Instead of using the PK of the referencing table, create a NEW column in the referencing table named after the referred table (lower_snake_case with _id suffix).
+	3. Update the `referencing_column` in the `relationships` list to point to this new column.
+	4. Ensure the new column is also added to the `columns` list of the referencing table.
+
+### 7. Redundant Unique Constraints
+- **Situation A: Singleton Redundancy** (`Redundant unique singleton`)
+    - **Logic**: A unique constraint on only the Primary Key is mathematically redundant.
+    - **Action**: Remove the `CompositeUnique` object from the table's `unique` list entirely.
+- **Situation B: Composite Redundancy** (`Redundant unique composite containing PK`)
+    - **Logic**: The Primary Key 'shadows' the rest of the members. Removing the PK reveals the intended natural key constraint.
+    - **Action**: 
+        1. Remove the PK column from the `columns` list of the `CompositeUnique` constraint.
+        2. **Optimization**: If this removal results in a constraint that is now identical to another existing `UNIQUE` constraint in the same table, delete the redundant one entirely to avoid shadowing.
+
+

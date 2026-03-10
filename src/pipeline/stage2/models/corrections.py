@@ -1,7 +1,7 @@
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Any, Dict
 from enum import Enum
-from src.pipeline.stage2.models.schema import SchemaSegment
+from src.pipeline.stage2.models.schema import Schema
 
 class CorrectionStatus(str, Enum):
     FIXED = "fixed"
@@ -15,7 +15,7 @@ class Correction(BaseModel):
 
 class SchemaResolve(BaseModel):
     corrections: List[Correction]
-    corrected_schema: SchemaSegment
+    corrected_schema: Schema
 
     def get_errors_by_status(self, status: CorrectionStatus) -> List[str]:
         return [c.error_message for c in self.corrections if c.status == status]
@@ -29,3 +29,9 @@ class SchemaResolve(BaseModel):
     def has_not_fixed(self) -> bool:
         """Returns True if there are any errors that the agent tried to fix but failed."""
         return any(c.status == CorrectionStatus.NOT_FIXED for c in self.corrections)
+
+class FixHistoryStep(BaseModel):
+    attempt: int
+    errors: List[str]
+    corrections: List[Correction]
+    fixed_schema: str

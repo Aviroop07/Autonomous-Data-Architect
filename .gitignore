@@ -6,3 +6,5 @@ all_cases.txt
 main.py
 temp.txt
 **/__pycache__/**
+**.png
+generated_generator.py

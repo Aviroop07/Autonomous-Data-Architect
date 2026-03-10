@@ -61,6 +61,7 @@ def generate_system_prompt(
         output_structure=structure_to_use,
         query=query
     )
+    assert isinstance(parsed, structure_to_use)
     
     # Append manual examples if provided
     if examples:

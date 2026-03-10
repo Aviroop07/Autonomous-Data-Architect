@@ -38,5 +38,6 @@ def verify_integrity(
         output_structure=IntegrityReport,
         query=query
     )
+    assert isinstance(report, IntegrityReport)
     
     return report, tokens
