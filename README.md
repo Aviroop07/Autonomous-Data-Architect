@@ -63,7 +63,7 @@ ScribbleDB is a four-stage pipeline: *Fact Extraction*, *Schema Generation*, *Co
 <a id="fig-1"></a>
 <p align="center"><img src="image.png" alt="ScribbleDB Architecture Diagram" width="480"/></p>
 
-<p align="center">*[Figure 1](#fig-1): ScribbleDB Architecture: Fact extraction ([§2.1](#21-fact-extraction)) is followed by schema generation ([§2.2](#22-schema-generation)). Subsequently, structured constraints are produced ([§2.3](#23-constraint-modeling)), and finally code is synthesized to materialize the database ([§2.4](#24-code-generation)).*</p>
+<p align="center"><em><a href="#fig-1">Figure 1</a>: ScribbleDB Architecture: Fact extraction (<a href="#21-fact-extraction">§2.1</a>) is followed by schema generation (<a href="#22-schema-generation">§2.2</a>). Subsequently, structured constraints are produced (<a href="#23-constraint-modeling">§2.3</a>), and finally code is synthesized to materialize the database (<a href="#24-code-generation">§2.4</a>).</em></p>
 
 ---
 
