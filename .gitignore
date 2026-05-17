@@ -7,6 +7,7 @@ main.py
 temp.txt
 **/__pycache__/**
 **.png
+!image.png
 generated_generator.py
 research/
 output/
