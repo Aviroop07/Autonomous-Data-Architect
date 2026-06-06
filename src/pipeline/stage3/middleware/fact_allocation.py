@@ -1,7 +1,7 @@
 from typing import List, Dict, Set, Tuple
 from src.pipeline.stage1.models.rephrased_nl import AtomicFact
 from src.pipeline.stage2.models.registry import TableFactRegistry
-from src.pipeline.stage2.middleware.schema_merging.similarity import TokenSimilarity
+from src.pipeline.stage2.middleware.schema_merging.similarity import SemanticSimilarity
 
 def allocate_facts_to_shards(
     all_facts: List[AtomicFact],
@@ -15,7 +15,7 @@ def allocate_facts_to_shards(
     2. Similarity Expansion: Context-based expansion.
     3. Orphan Recovery: Global safety net.
     """
-    similarity_engine = TokenSimilarity()
+    similarity_engine = SemanticSimilarity()
     fact_map = {f.id: f for f in all_facts}
     global_fact_ids = [f.id for f in all_facts]
 
