@@ -1,0 +1,41 @@
+[project]
+name = "scribbledb"
+version = "0.1.0"
+description = "Reproducibility artifact for generating relational databases from natural language specifications."
+requires-python = ">=3.14"
+dependencies = [
+    "graphviz",
+    "langchain",
+    "langchain-core",
+    "langchain-openai",
+    "langgraph",
+    "networkx",
+    "nltk",
+    "numpy",
+    "openai",
+    "pandas",
+    "psutil",
+    "pydantic",
+    "requests",
+    "scipy",
+    "sentence-transformers",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+"*" = ["*.txt"]

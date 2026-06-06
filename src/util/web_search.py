@@ -1,7 +1,28 @@
-from typing import Tuple
+"""
+Web search tool for use with langgraph agents.
 
-def get_search_tool():
+OpenAI's built-in web_search_preview tool requires the Responses API.
+When ChatOpenAI is configured with use_responses_api=True, this tool
+spec can be passed directly to create_react_agent.
+
+Integration point: src/pipeline/stage1/agents/context_enricher/agent.py
+should pass get_web_search_tool() to get_agent_(tools=[...]).
+"""
+
+
+def get_web_search_tool() -> dict:
     """
-    Returns the built-in web search tool specification for LangChain agents.
+    Returns the OpenAI built-in web search tool specification.
+
+    Usage with langgraph:
+        from src.util.web_search import get_web_search_tool
+        agent = create_react_agent(
+            model=ChatOpenAI(model="gpt-4o", use_responses_api=True),
+            tools=[get_web_search_tool()],
+            ...
+        )
     """
-    return {"type": "web_search_preview"}
+    return {
+        "type": "web_search_preview",
+        "search_context_size": "medium",
+    }

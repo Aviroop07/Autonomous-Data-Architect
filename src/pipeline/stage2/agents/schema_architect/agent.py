@@ -1,26 +1,28 @@
+from pathlib import Path
 from typing import List, Optional, Tuple
-from src.util.agent import get_agent_
+from src.util.agent import get_agent_, AgentType
 from src.util.invoke import get_response
 from src.pipeline.stage2.models.schema import Schema
 from src.pipeline.stage1.models.rephrased_nl import AtomicFact
 
-PROMPT_FILE_URL = "src/pipeline/stage2/agents/schema_architect/prompt.txt"
+PROMPT_PATH = Path(__file__).parent / "prompt.txt"
 
-def get_agent(model: Optional[str] = None):
-    with open(PROMPT_FILE_URL, 'r', encoding='utf-8') as f:
+def get_agent(model: Optional[str] = None) -> AgentType:
+    with PROMPT_PATH.open(encoding='utf-8') as f:
         system_prompt = f.read()
 
     return get_agent_(
         system_prompt=system_prompt,
         output_structure=Schema,
         model=model,
-        name='Schema Architect'
+        name='schema_architect'
     )
 
-def run_schema_architect(
+async def run_schema_architect(
     chunk_facts: List[AtomicFact],
-    full_facts: Optional[List[AtomicFact]] = None,
-    architect = None,
+    base_schema: Optional[Schema] = None,
+    errors: Optional[List[str]] = None,
+    architect: Optional[AgentType] = None,
     model: Optional[str] = None
 ) -> Tuple[Schema, int]:
     """
@@ -30,17 +32,20 @@ def run_schema_architect(
     if not architect:
         architect = get_agent(model)
 
-    query = f"TARGET CHUNK FACTS:\n" + "\n".join([f"- {f.fact} (Category: {f.tag})" for f in chunk_facts])
-    if full_facts:
-        query += "\n\nFULL ARCHITECTURAL CONTEXT (All Facts):\n" + "\n".join([f"- {f.fact}" for f in full_facts])
+    query = "TARGET CHUNK FACTS:\n" + "\n".join([f"- {f.fact} (Tags: {', '.join(f.tags)})" for f in chunk_facts])
 
-    schema, tokens = get_response(
+    if base_schema:
+        query += f"\n\nCURRENT SCHEMA STATE (JSON):\n{base_schema.model_dump_json(indent=2)}"
+
+    if errors:
+        query += "\n\nCRITICAL STRUCTURAL ERRORS TO FIX:\n" + "\n".join([f"- {e}" for e in errors])
+        query += "\n\nMISSION: Repair the schema to resolve all errors while preserving the intent of the original facts."
+
+    schema, tokens = await get_response(
         agent=architect,
         output_structure=Schema,
         query=query
     )
     assert isinstance(schema, Schema)
-    
+
     return schema, tokens
-
-

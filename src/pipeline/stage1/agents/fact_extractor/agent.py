@@ -1,44 +1,37 @@
-from typing import Tuple, List, Optional, Union
-from pydantic import BaseModel
-from src.util.agent import get_agent_
+from pathlib import Path
+from typing import Optional, Tuple
+from src.util.agent import get_agent_, AgentType
 from src.util.invoke import get_response
-from src.pipeline.stage1.models.rephrased_nl import AtomicFact
+from src.pipeline.stage1.models.rephrased_nl import RephrasedOutput
 
-PROMPT_FILE_URL = "src/pipeline/stage1/agents/fact_extractor/prompt.txt"
+PROMPT_PATH = Path(__file__).parent / "prompt.txt"
 
-class FactList(BaseModel):
-    facts: List[AtomicFact]
-
-def get_agent(model: Optional[str] = None):
-    with open(PROMPT_FILE_URL, 'r', encoding='utf-8') as f:
+def get_agent(model: Optional[str] = None) -> AgentType:
+    with PROMPT_PATH.open(encoding='utf-8') as f:
         system_prompt = f.read()
-    
+
     return get_agent_(
         system_prompt=system_prompt,
-        output_structure=FactList,
+        output_structure=RephrasedOutput,
         model=model,
-        name='Atomic Fact Extractor'
+        name='atomic_fact_extractor'
     )
 
-def extract_facts(
-    input_data: Union[str, List[AtomicFact]],
-    extractor = None,
-    model: Optional[str] = None
-) -> Tuple[List[AtomicFact], int]:
-    """
-    Extracts facts from a string, or returns the list directly if already processed.
-    """
-    if isinstance(input_data, list):
-        return input_data, 0
-
+async def extract_facts(
+    nl_description: str,
+    extractor: Optional[AgentType] = None,
+    model: Optional[str] = None,
+) -> Tuple[RephrasedOutput, int]:
     if not extractor:
         extractor = get_agent(model)
-        
-    parsed, tokens = get_response(
+
+    query = f"Extract atomic facts from the following description:\n{nl_description}"
+
+    parsed, tokens = await get_response(
         agent=extractor,
-        output_structure=FactList,
-        query=input_data
+        output_structure=RephrasedOutput,
+        query=query
     )
-    assert isinstance(parsed, FactList)
-    
-    return parsed.facts, tokens
+    assert isinstance(parsed, RephrasedOutput)
+
+    return parsed, tokens

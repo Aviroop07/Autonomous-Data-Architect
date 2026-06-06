@@ -1,14 +1,9 @@
-from pydantic import BaseModel, Field
-from typing import List, Optional, Any, Union, Literal
-
-class TechnicalTerm(BaseModel):
-    term: str = Field(description="The technical or domain-specific term identified.")
-    definition: str = Field(description="The precise definition or context found via research.")
-    citation: Optional[str] = Field(default=None, description="A URL link to the source of the definition, if available.")
-
-class ModelingConstraint(BaseModel):
-    name: str = Field(description="Short name for the constraint or distribution rule.")
-    description: str = Field(description="Detailed formal description of the constraint.")
+from pydantic import BaseModel, Field, field_validator
+from typing import List, Optional, Any, Union
+from .raw_fact import RawFact
+from .atomic_fact import AtomicFact, FactTag
+from .technical_term import TechnicalTerm
+from .integrity_report import IntegrityReport
 
 class Interpretation(BaseModel):
     meaning: str = Field(description="One specific possible meaning of the ambiguous text.")
@@ -19,31 +14,52 @@ class Ambiguity(BaseModel):
     potential_interpretations: List[Interpretation] = Field(description="List of possible interpretations and their impacts.")
     status: str = Field(description="Reported as 'Unresolved' to preserve accuracy.")
 
-class AtomicFact(BaseModel):
-    id: int
-    fact: str = Field(description="A single declarative sentence expressing exactly one fact.")
-    tag: Literal["SCHEMATIC", "DISTRIBUTIONAL", "CONSTRAINT", "ANALYTICAL"] = Field(description="Categorical tag for the fact: SCHEMATIC (tables/columns), DISTRIBUTIONAL (stats/patterns), CONSTRAINT (logic/rules), ANALYTICAL (queries/goals).")
-
 class RephrasedOutput(BaseModel):
-    domain: str = Field(description="The identified industry or technical sector (e.g., 'Autonomous Vehicle Telemetry').")
-    analytical_goal: str = Field(description="The primary analytical purpose of the dataset (e.g., 'Sensor fusion for safety analytics').")
-    rephrased_text: List[AtomicFact] = Field(description="An exhaustive list of clarifying, structured atomic facts.")
-    research_notes: List[TechnicalTerm] = Field(description="Formal definitions of domain terms.")
-    modeling_constraints: List[ModelingConstraint] = Field(description="Explicitly identified data constraints/laws/distributions.")
-    ambiguities: List[Ambiguity] = Field(description="Unresolved ambiguities found in original text.")
+    domain: Optional[str] = Field(default="Unknown", description="The identified industry or technical sector.")
+    analytical_goal: Optional[str] = Field(default="General Purpose", description="The primary analytical purpose of the dataset.")
+    facts: List[RawFact] = Field(description="An exhaustive list of extracted raw facts.")
+    definitions: List[TechnicalTerm] = Field(description="List of technical terms defined in the facts.")
+    ambiguities: List[Ambiguity] = Field(default_factory=list, description="List of ambiguous terms or phrases found in the text.")
 
-class Issue(BaseModel):
-    fact_id: Optional[int] = None
-    description: str
-    severity: Literal["low", "medium", "high"]
-
-class IntegrityReport(BaseModel):
-    is_safe: bool = Field(description="True if no actual information loss or hallucination found.")
-    missing_information: List[Issue] = Field(description="Facts present in original but missing/altered in rephrased.")
-    introduced_information: List[Issue] = Field(description="New information/inferences introduced in rephrased.")
-    changed_constraints: List[Issue] = Field(description="Numeric values or statistical constraints that changed.")
+    @field_validator('domain', 'analytical_goal', mode='before')
+    @classmethod
+    def ensure_string(cls, v: Any) -> Any:
+        if v is None:
+            return "Unknown"
+        return v
 
 class EnrichedNL(BaseModel):
-    rephrased_output: RephrasedOutput = Field(description="The structured output from the technical editor.")
-    original_facts: List[AtomicFact] = Field(description="Atomic facts extracted from original text.")
-    integrity_report: Optional[IntegrityReport] = None
+    extracted_output: RephrasedOutput = Field(description="The structured facts extracted by the agent.")
+    integrity_report: Optional[Union[str, IntegrityReport]] = Field(default=None, description="Detailed validation of the extraction accuracy.")
+
+    def __str__(self) -> str:
+        report_str = str(self.integrity_report) if self.integrity_report else "No integrity report."
+        facts_count = len(self.extracted_output.facts)
+        return f"EnrichedNL(Report: {report_str}, Facts: {facts_count})"
+
+class FactList(BaseModel):
+    facts: List[RawFact] = Field(description="A sequential list of extracted raw facts.")
+
+class TaggedFact(BaseModel):
+    id: int = Field(description="Original fact identifier.")
+    tags: List[str] = Field(description="List of applied semantic tags (e.g., RELATIONAL, LOGICAL).")
+
+class TaggerOutput(BaseModel):
+    facts: List[TaggedFact] = Field(description="List of all fact mappings to their newly identified tags.")
+
+def convert_to_atomic(facts: List[RawFact], tag_results: List[TaggedFact]) -> List[AtomicFact]:
+    """Converts RawFacts to AtomicFacts using tagger output for tag assignment."""
+    result = []
+    for raw in facts:
+        tag_result = next((t for t in tag_results if str(t.id) == str(raw.id)), None)
+        tags = []
+        if tag_result:
+            for t_str in tag_result.tags:
+                try:
+                    tags.append(FactTag(t_str.upper()))
+                except ValueError:
+                    continue
+        if not tags:
+            tags = [FactTag.STRUCTURAL]
+        result.append(AtomicFact.from_raw(raw, tags))
+    return result

@@ -1,43 +1,81 @@
-from typing import Tuple, List, Optional
-from src.util.agent import get_agent_
+from pathlib import Path
+from typing import List, Optional, Tuple
+from src.util.agent import get_agent_, AgentType
 from src.util.invoke import get_response
-from src.pipeline.stage1.models.rephrased_nl import IntegrityReport, AtomicFact
+from src.pipeline.stage1.models.integrity_report import IntegrityReport
+from src.util.retry_loop import ValidationResult, ErrorType, ErrorRecord, Severity
+from src.pipeline.stage1.models.raw_fact import RawFact
 
-PROMPT_FILE_URL = "src/pipeline/stage1/agents/verifier/prompt.txt"
+PROMPT_PATH = Path(__file__).parent / "prompt.txt"
 
-def get_agent(model: Optional[str] = None):
-    with open(PROMPT_FILE_URL, 'r', encoding='utf-8') as f:
+def get_agent(model: Optional[str] = None) -> AgentType:
+    with PROMPT_PATH.open(encoding='utf-8') as f:
         system_prompt = f.read()
-    
+
     return get_agent_(
         system_prompt=system_prompt,
         output_structure=IntegrityReport,
         model=model,
-        name='Integrity Verifier'
+        name='integrity_verifier'
     )
 
-def verify_integrity(
-    original_facts: List[AtomicFact],
-    rephrased_facts: List[AtomicFact],
-    verifier = None,
-    model: Optional[str] = None
-) -> Tuple[IntegrityReport, int]:
-    """
-    Compares two lists of atomic facts to detect information loss or additions.
-    """
+async def verify_integrity(
+    nl_description: str,
+    facts: List[RawFact],
+    verifier: Optional[AgentType] = None,
+    model: Optional[str] = None,
+) -> Tuple[ValidationResult[IntegrityReport], int]:
     if not verifier:
         verifier = get_agent(model)
-        
-    query = (
-        "### ORIGINAL FACTS:\n" + "\n".join([f"{f.id}. {f.fact}" for f in original_facts]) + "\n\n"
-        "### REPHRASED FACTS:\n" + "\n".join([f"{f.id}. {f.fact}" for f in rephrased_facts])
-    )
-    
-    report, tokens = get_response(
+
+    facts_text = "\n".join([
+        f"{f.id}. {f.fact}\n   [Origin: \"{f.origin}\"]" + (f" | External: {f.is_external}" if f.is_external else "")
+        for f in facts
+    ])
+
+    query = f"""## ORIGINAL DESCRIPTION
+{nl_description}
+
+## EXTRACTED FACTS
+{facts_text}"""
+
+    report, tokens = await get_response(
         agent=verifier,
         output_structure=IntegrityReport,
         query=query
     )
     assert isinstance(report, IntegrityReport)
-    
-    return report, tokens
+
+    errors = []
+    for issue in report.missing_information:
+        errors.append(ErrorRecord(
+            iteration=0,
+            error_type=ErrorType.MISSING,
+            severity=Severity(issue.severity.value),
+            description=issue.description,
+            fact_id=issue.fact_id
+        ))
+
+    for issue in report.introduced_information:
+        errors.append(ErrorRecord(
+            iteration=0,
+            error_type=ErrorType.INTRODUCED,
+            severity=Severity(issue.severity.value),
+            description=issue.description,
+            fact_id=issue.fact_id
+        ))
+
+    for issue in report.changed_constraints:
+        errors.append(ErrorRecord(
+            iteration=0,
+            error_type=ErrorType.CHANGED,
+            severity=Severity(issue.severity.value),
+            description=issue.description,
+            fact_id=issue.fact_id
+        ))
+
+    return ValidationResult(
+        is_valid=report.is_safe,
+        errors=errors,
+        validation_output=report
+    ), tokens
