@@ -17,7 +17,7 @@ AgentType = Union["StructuredAgent", Runnable]
 # Model Factory
 # ------------------------------------------------------------------
 
-def get_model(model: Optional[str] = None) -> ChatOpenAI:
+def get_model(model: Optional[str] = None, use_responses_api: bool = False) -> ChatOpenAI:
     """Returns a ChatOpenAI instance. Reads config from environment."""
     load_dotenv()
     api_key = os.getenv("OPENAI_API_KEY", "")
@@ -27,6 +27,7 @@ def get_model(model: Optional[str] = None) -> ChatOpenAI:
     return ChatOpenAI(
         api_key=SecretStr(api_key),
         model=model or default_model,
+        use_responses_api=use_responses_api,
     )
 
 
@@ -76,6 +77,7 @@ def get_agent_(
     output_structure: Optional[Type[T]] = None,
     model: Optional[str] = None,
     name: Optional[str] = None,
+    use_responses_api: bool = False,
 ) -> AgentType:
     """
     Create an agent. Returns an object supporting ainvoke({"messages": [...]}).
@@ -85,7 +87,7 @@ def get_agent_(
 
     In both cases, the OUTPUT FORMAT section is dynamically appended to the prompt.
     """
-    llm = get_model(model)
+    llm = get_model(model, use_responses_api=use_responses_api)
 
     # Dynamically append the output schema description
     if output_structure:

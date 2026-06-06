@@ -6,7 +6,7 @@ When ChatOpenAI is configured with use_responses_api=True, this tool
 spec can be passed directly to create_react_agent.
 
 Integration point: src/pipeline/stage1/agents/context_enricher/agent.py
-should pass get_web_search_tool() to get_agent_(tools=[...]).
+passes get_web_search_tool() to get_agent_(tools=[...], use_responses_api=True).
 """
 
 
