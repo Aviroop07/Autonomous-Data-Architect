@@ -1,81 +1,88 @@
 from pathlib import Path
-from typing import List, Optional, Tuple
-from src.util.agent import get_agent_, AgentType
-from src.util.invoke import get_response
+from typing import Optional
+
+from src.util.core.agent import AgentType, get_agent_
+from src.util.core.invoke import get_response
+from src.util.orchestration.loop_types import (
+    HistoryEntry,
+    LoopAgent,
+    LoopContext,
+    LoopOutputModel,
+)
 from src.pipeline.stage1.models.integrity_report import IntegrityReport
-from src.util.retry_loop import ValidationResult, ErrorType, ErrorRecord, Severity
-from src.pipeline.stage1.models.raw_fact import RawFact
+from src.pipeline.stage1.models.rephrased_nl import RephrasedOutput
 
 PROMPT_PATH = Path(__file__).parent / "prompt.txt"
 
-def get_agent(model: Optional[str] = None) -> AgentType:
-    with PROMPT_PATH.open(encoding='utf-8') as f:
-        system_prompt = f.read()
 
-    return get_agent_(
-        system_prompt=system_prompt,
-        output_structure=IntegrityReport,
-        model=model,
-        name='integrity_verifier'
-    )
+class VerifierLoopAgent(LoopAgent):
+    """LoopAgent for the integrity verifier node."""
 
-async def verify_integrity(
-    nl_description: str,
-    facts: List[RawFact],
-    verifier: Optional[AgentType] = None,
-    model: Optional[str] = None,
-) -> Tuple[ValidationResult[IntegrityReport], int]:
-    if not verifier:
-        verifier = get_agent(model)
+    def __init__(self, model: Optional[str] = None) -> None:
+        self._model = model
+        self._agent: Optional[AgentType] = None
 
-    facts_text = "\n".join([
-        f"{f.id}. {f.fact}\n   [Origin: \"{f.origin}\"]" + (f" | External: {f.is_external}" if f.is_external else "")
-        for f in facts
-    ])
+    def _get_agent(self) -> AgentType:
+        if self._agent is None:
+            system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
+            self._agent = get_agent_(
+                system_prompt=system_prompt,
+                output_structure=IntegrityReport,
+                model=self._model,
+                name="integrity_verifier",
+            )
+        return self._agent
 
-    query = f"""## ORIGINAL DESCRIPTION
-{nl_description}
+    async def invoke(self, query: str) -> tuple[LoopOutputModel, int]:
+        parsed, tokens = await get_response(
+            agent=self._get_agent(),
+            output_structure=IntegrityReport,
+            query=query,
+        )
+        assert isinstance(parsed, IntegrityReport)
+        return parsed, tokens
 
-## EXTRACTED FACTS
-{facts_text}"""
+    def build_context(self, ctx: LoopContext) -> str:
+        extractor_output = ctx.node_outputs.get("extractor")
+        if not isinstance(extractor_output, RephrasedOutput):
+            facts_text = "(none yet)"
+        else:
+            facts_text = "\n".join(
+                f'{f.id}. {f.fact}\n   [Origin: "{f.origin}"]'
+                + (f" | External: {f.is_external}" if f.is_external else "")
+                for f in extractor_output.facts
+            )
+        return (
+            f"## ORIGINAL DESCRIPTION\n{ctx.initial_context}\n\n"
+            f"## EXTRACTED FACTS\n{facts_text}"
+        )
 
-    report, tokens = await get_response(
-        agent=verifier,
-        output_structure=IntegrityReport,
-        query=query
-    )
-    assert isinstance(report, IntegrityReport)
-
-    errors = []
-    for issue in report.missing_information:
-        errors.append(ErrorRecord(
-            iteration=0,
-            error_type=ErrorType.MISSING,
-            severity=Severity(issue.severity.value),
-            description=issue.description,
-            fact_id=issue.fact_id
-        ))
-
-    for issue in report.introduced_information:
-        errors.append(ErrorRecord(
-            iteration=0,
-            error_type=ErrorType.INTRODUCED,
-            severity=Severity(issue.severity.value),
-            description=issue.description,
-            fact_id=issue.fact_id
-        ))
-
-    for issue in report.changed_constraints:
-        errors.append(ErrorRecord(
-            iteration=0,
-            error_type=ErrorType.CHANGED,
-            severity=Severity(issue.severity.value),
-            description=issue.description,
-            fact_id=issue.fact_id
-        ))
-
-    return ValidationResult(
-        is_valid=report.is_safe,
-        errors=errors,
-        validation_output=report
-    ), tokens
+    def emit_history(
+        self,
+        output: LoopOutputModel,
+        prior: Optional[LoopOutputModel],
+        round_num: int,
+        node: str,
+    ) -> HistoryEntry:
+        assert isinstance(output, IntegrityReport)
+        issues = [
+            *[
+                f"[MISSING][{i.severity.upper()}] {i.description}"
+                for i in output.missing_information
+            ],
+            *[
+                f"[INTRODUCED][{i.severity.upper()}] {i.description}"
+                for i in output.introduced_information
+            ],
+            *[
+                f"[CHANGED][{i.severity.upper()}] {i.description}"
+                for i in output.changed_constraints
+            ],
+            *[f"[AMBIGUITY] {i.description}" for i in output.unresolved_ambiguities],
+        ]
+        return HistoryEntry(
+            round=round_num,
+            node=node,
+            changes_summary="safe" if output.is_safe else f"{len(issues)} issues",
+            was_improvement=output.is_safe,
+        )

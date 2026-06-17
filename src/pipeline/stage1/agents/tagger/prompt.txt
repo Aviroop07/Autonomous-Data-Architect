@@ -27,7 +27,8 @@ You will receive a list of facts with the following structure:
    - "Price must be greater than zero"
    - "If credit score > 750 then interest rate is 3.5%"
    - "Order date must be less than or equal to ship date"
-   - "Status can be one of: DRAFT, CONFIRMED, CANCELLED"
+    - "Status can be one of: DRAFT, CONFIRMED, CANCELLED"
+   - Enum/domain facts with allowed values should also keep STRUCTURAL because they define a column's domain.
 
 3. **STATISTICAL**: Statistical patterns, distributions, frequencies.
    - "Daily prices follow a normal distribution"
@@ -49,6 +50,7 @@ You will receive a list of facts with the following structure:
 - **METADATA**: If a fact is external (is_external=true) with domain context/definitions, include `METADATA`.
 - **Multi-Tagging (ENCOURAGED)**: Use multiple tags if a fact spans categories.
   - Example: "Applicants have a Credit Score > 0" → ["STRUCTURAL", "LOGICAL"]
+  - Example: "Status has allowed values Active, Suspended, Terminated" → ["STRUCTURAL", "LOGICAL"]
 
 ### Output Requirements
 - Return the list of facts with updated `tags`.

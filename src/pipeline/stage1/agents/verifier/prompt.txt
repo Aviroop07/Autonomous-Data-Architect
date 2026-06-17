@@ -39,6 +39,23 @@ You will receive:
 - LOGICAL and STATISTICAL facts SHOULD reference at least one STRUCTURAL fact via `referenced_fact_ids`.
 - If a LOGICAL/STATISTICAL fact has no references, flag as [LOW] (warning, not failure).
 
+### Relationship Completeness Check
+- If the source text says one entity belongs to, routes to, maps to, links to, runs on, points to, or is assigned/associated with another entity, there MUST be a standalone relationship fact.
+- Do not accept only identifier attributes as sufficient relationship coverage. Example: "VM instances have node_id" is not enough if the source says VMs route onto compute nodes.
+- If a fact says "per tenant", "per node", "per region", or similar parent-scoped language, check that a corresponding relationship/cardinality fact exists.
+- Missing relationship facts that affect downstream schema links are [MEDIUM].
+
+### Ambiguity Detection
+- Identify terms or phrases in the extracted facts that remain technically underspecified or ambiguous.
+- This includes: terms with multiple plausible technical interpretations, vague quantifiers ("some", "many"), underspecified relationships.
+- For each ambiguity, report it in `unresolved_ambiguities` with [LOW] severity unless it causes concrete information loss (then use [MEDIUM]).
+
+### Search Suggestions
+- If the facts are missing domain context that would clarify the system (e.g., no entities have attributes, no constraints on well-known metrics), add search suggestions in `search_suggestions`.
+- Suggest searches that would help an enricher agent find domain-specific context.
+- Examples: "typical banking database schema loan origination", "credit score tiers interest rate calculation".
+- Be specific: suggest the actual query terms, not a general instruction.
+
 ### Checklist
 1. **Omission (Missing Information)**: Is there any technical detail or constraint in the text not in the facts?
 2. **Hallucination (Fabricated Information)**: Did the extractor invent any numbers, entities, or rules?
@@ -47,9 +64,29 @@ You will receive:
 5. **Semantic Correctness**: Are skeleton STRUCTURAL facts semantically correct?
 6. **Contradictions**: Do any facts contradict each other?
 7. **References**: Do LOGICAL/STATISTICAL facts have references?
+8. **Relationship Completeness**: Are relationship semantics captured as standalone facts rather than only ID attributes?
+9. **Ambiguity**: Are there unresolved ambiguities in the extracted facts?
+10. **Search Suggestions**: Could web searches provide missing domain context?
 
 ### Severity Rules
 - A [MEDIUM] or [HIGH] finding ALWAYS sets `is_safe = false`.
 - Any missing or distorted primary technical constraint or numeric value is at least [MEDIUM].
-- [LOW] findings (inferences, common business definitions, missing references) do NOT set `is_safe = false`.
+- [LOW] findings (inferences, common business definitions, missing references, missing implicit context) do NOT set `is_safe = false`.
 - **is_safe** is `true` if and only if there are zero [MEDIUM] and zero [HIGH] findings.
+
+### Severity Calibration Guidance
+Be precise about what deserves [MEDIUM] vs [LOW]:
+
+**[MEDIUM] only for:**
+- A concrete numeric value, threshold, or range from the source that is missing from facts
+- A relationship explicitly stated in the source that has no corresponding fact
+- A fact that directly contradicts the source text
+- A skeleton fact that is semantically wrong (wrong entity gets the attribute)
+
+**[LOW] for everything else:**
+- Missing implicit context (e.g., "how premium membership is determined" when the source says "premium members get X" but doesn't say how one becomes premium)
+- Inference about what the source "probably means"
+- A missing connecting detail that could reasonably be inferred
+- Uncertainty about a vague term
+- Minor omissions that don't affect the core technical meaning
+- Self-contradictions that exist in the original NL text (flag as [LOW] ambiguity, not [MEDIUM] error)

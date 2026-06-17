@@ -20,6 +20,8 @@ class AtomicFact(RawFact):
             origin=raw.origin,
             referenced_fact_ids=raw.referenced_fact_ids,
             is_external=raw.is_external,
+            external_kind=raw.external_kind,
+            novelty_reason=raw.novelty_reason,
             tags=tags or []
         )
 

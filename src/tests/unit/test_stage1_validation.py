@@ -18,7 +18,7 @@ from src.pipeline.stage1.middleware.validation import (
 )
 from src.pipeline.stage1.models.raw_fact import RawFact
 from src.pipeline.stage1.models.rephrased_nl import RephrasedOutput
-from src.util.retry_loop import ErrorRecord, ErrorType, Severity
+from src.util.orchestration.retry_loop import ErrorRecord, ErrorType, Severity
 
 
 def _facts(*specs):
@@ -212,7 +212,7 @@ def test_verbatim_substring_backfills_origin_on_match():
 # --------------------------------------------------------------------------- #
 
 def _output(facts):
-    return RephrasedOutput(facts=facts, definitions=[])
+    return RephrasedOutput(facts=facts)
 
 
 def test_validator_clean_output_no_errors():
