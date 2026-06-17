@@ -26,7 +26,6 @@ SchemaAgent/
 baselines/
 tmp/
 !README.md
-!PROGRESS.md
 diagram_to_base64.py
 .claude/
 requirements.txt
