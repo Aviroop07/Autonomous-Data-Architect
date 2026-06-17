@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Reproducibility artifact for generating relational databases from natural language specifications."
 requires-python = ">=3.14"
 dependencies = [
+    "faiss-cpu",
     "graphviz",
     "langchain",
     "langchain-core",
@@ -18,7 +19,6 @@ dependencies = [
     "pydantic",
     "requests",
     "scipy",
-    "sentence-transformers",
     "tqdm",
 ]
 

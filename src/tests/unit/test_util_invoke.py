@@ -10,9 +10,32 @@ The helper sums total_tokens from a heterogeneous list of messages:
   - plain dicts falling back to ["response_metadata"]["token_usage"]["total_tokens"]
 """
 
+import asyncio
+from pydantic import BaseModel
 from langchain_core.messages import AIMessage, HumanMessage
 
-from src.util.invoke import _extract_token_usage
+from src.util.core.invoke import _extract_token_usage, get_response
+from src.util.observability.llm_trace import LLMTraceCollector, activate_trace_collector, reset_trace_collector
+
+
+class SimpleResponse(BaseModel):
+    value: str
+
+
+class FakeTracedAgent:
+    name = "fake_traced_agent"
+
+    async def ainvoke(self, payload: object):
+        return {
+            "structured_response": SimpleResponse(value="ok"),
+            "messages": [
+                HumanMessage(content="hello"),
+                AIMessage(
+                    content="world",
+                    usage_metadata={"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+                ),
+            ],
+        }
 
 
 def test_empty_list_returns_zero():
@@ -78,3 +101,26 @@ def test_empty_usage_metadata_falls_through_to_response_metadata():
     # response_metadata fallback branch for plain dicts.
     msg = {"usage_metadata": {}, "response_metadata": {"token_usage": {"total_tokens": 9}}}
     assert _extract_token_usage([msg]) == 9
+
+
+def test_get_response_records_trace_when_collector_is_active():
+    collector = LLMTraceCollector()
+    token = activate_trace_collector(collector)
+    try:
+        parsed, tokens = asyncio.run(get_response(
+            agent=FakeTracedAgent(),
+            output_structure=SimpleResponse,
+            query="trace me",
+        ))
+    finally:
+        reset_trace_collector(token)
+
+    assert isinstance(parsed, SimpleResponse)
+    assert tokens == 3
+    assert len(collector.traces) == 1
+    trace = collector.traces[0]
+    assert trace.agent_name == "fake_traced_agent"
+    assert trace.output_structure_name == "SimpleResponse"
+    assert trace.parsed_response_type == "SimpleResponse"
+    assert trace.token_usage == 3
+    assert "trace me" in trace.input_messages[0]

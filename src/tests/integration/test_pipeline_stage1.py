@@ -19,7 +19,7 @@ import pytest
 from src.orchestration.stage1.entry import orchestrate
 from src.orchestration.stage1.models import Output
 from src.pipeline.stage1.models.atomic_fact import AtomicFact
-from src.util.ablation import AblationConfig
+from src.util.config.ablation import AblationConfig
 
 SIMPLE_NL = (
     "We need to simulate loan applications. Applicants have a credit score and annual income. "

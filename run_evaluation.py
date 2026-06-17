@@ -316,7 +316,7 @@ def _print_aggregate(agg: Dict[str, Any], label: str = "ScribbleDB") -> None:
 # ---------------------------------------------------------------------------
 
 async def evaluate(args: argparse.Namespace) -> None:
-    from src.util.ablation import AblationConfig
+    from src.util.config.ablation import AblationConfig
     from src.pipeline.stage4.smoke_test import run_smoke_test
 
     ablation = AblationConfig(

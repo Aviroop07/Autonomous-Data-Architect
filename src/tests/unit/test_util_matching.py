@@ -11,7 +11,7 @@ from typing import List, Optional, Tuple
 
 import pytest
 
-from src.util.matching import gale_shapley_matching
+from src.util.algorithms.matching import gale_shapley_matching
 
 
 def _row_prefers(

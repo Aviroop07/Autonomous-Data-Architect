@@ -19,7 +19,7 @@ from src.orchestration.stage3.entry import orchestrate as stage3
 from src.orchestration.stage4.entry import orchestrate as stage4
 from src.pipeline.stage3.models.manifest import AlgebraicManifest
 from src.pipeline.stage4.models import SynthesisResult
-from src.util.ablation import AblationConfig
+from src.util.config.ablation import AblationConfig
 
 SHORT_NL = (
     "Build a simple employee database. "

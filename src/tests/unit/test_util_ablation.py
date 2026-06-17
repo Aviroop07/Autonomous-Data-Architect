@@ -4,7 +4,7 @@ Deterministic, offline. Verifies each factory classmethod toggles exactly
 the intended flag(s) and that the model has sane defaults.
 """
 
-from src.util.ablation import AblationConfig
+from src.util.config.ablation import AblationConfig
 
 
 def test_default_construction_all_enabled():

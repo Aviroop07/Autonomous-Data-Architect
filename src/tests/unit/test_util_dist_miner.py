@@ -13,7 +13,7 @@ top*, not strictly best -- matching the documented "best or near top" intent.
 import numpy as np
 import pytest
 
-from src.util.dist_miner import (
+from src.util.analysis.dist_miner import (
     DistributionFit,
     MiningResult,
     _clean,

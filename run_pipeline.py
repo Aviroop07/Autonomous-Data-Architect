@@ -51,17 +51,21 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # Lazy stage imports
 # ---------------------------------------------------------------------------
 
+
 def _import_stage1() -> Callable[..., Any]:
     mod = importlib.import_module("src.orchestration.stage1.entry")
     return mod.orchestrate  # type: ignore[return-value]
+
 
 def _import_stage2() -> Callable[..., Any]:
     mod = importlib.import_module("src.orchestration.stage2.entry")
     return mod.orchestrate  # type: ignore[return-value]
 
+
 def _import_stage3() -> Callable[..., Any]:
     mod = importlib.import_module("src.orchestration.stage3.entry")
     return mod.orchestrate  # type: ignore[return-value]
+
 
 def _import_stage4() -> Callable[..., Any]:
     mod = importlib.import_module("src.orchestration.stage4.entry")
@@ -75,11 +79,11 @@ def _import_stage4() -> Callable[..., Any]:
 DATASET_ROOT = PROJECT_ROOT / "dataset"
 
 DATASET_PATHS: Dict[str, Path] = {
-    "rschema":           DATASET_ROOT / "RSchema" / "annotation.jsonl",
-    "handcrafted":       DATASET_ROOT / "handcrafted" / "cases.jsonl",
-    "benchmark_imdb":    DATASET_ROOT / "benchmark" / "imdb" / "ground_truth.jsonl",
-    "benchmark_tpch":    DATASET_ROOT / "benchmark" / "tpch" / "ground_truth.jsonl",
-    "benchmark_tpcds":   DATASET_ROOT / "benchmark" / "tpcds" / "ground_truth.jsonl",
+    "rschema": DATASET_ROOT / "RSchema" / "annotation.jsonl",
+    "handcrafted": DATASET_ROOT / "handcrafted" / "cases.jsonl",
+    "benchmark_imdb": DATASET_ROOT / "benchmark" / "imdb" / "ground_truth.jsonl",
+    "benchmark_tpch": DATASET_ROOT / "benchmark" / "tpch" / "ground_truth.jsonl",
+    "benchmark_tpcds": DATASET_ROOT / "benchmark" / "tpcds" / "ground_truth.jsonl",
     "benchmark_mimiciv": DATASET_ROOT / "benchmark" / "mimiciv" / "ground_truth.jsonl",
 }
 
@@ -96,7 +100,9 @@ def _load_nl_from_rschema(case_idx: int) -> str:
     raise IndexError(f"RSchema: case index {case_idx} out of range for {path}")
 
 
-def _load_nl_from_jsonl(dataset_key: str, case_id: Optional[str], case_idx: Optional[int]) -> str:
+def _load_nl_from_jsonl(
+    dataset_key: str, case_id: Optional[str], case_idx: Optional[int]
+) -> str:
     path = DATASET_PATHS.get(dataset_key)
     if path is None:
         raise ValueError(f"Unknown dataset: {dataset_key!r}")
@@ -109,12 +115,17 @@ def _load_nl_from_jsonl(dataset_key: str, case_id: Optional[str], case_idx: Opti
                 return str(data.get("nl_description", data.get("question", "")))
             if case_idx is not None and i == case_idx:
                 return str(data.get("nl_description", data.get("question", "")))
-    raise ValueError(f"No matching case in {path} (case_id={case_id}, case_idx={case_idx})")
+    raise ValueError(
+        f"No matching case in {path} (case_id={case_id}, case_idx={case_idx})"
+    )
 
 
 def resolve_nl(args: argparse.Namespace) -> str:
     if args.nl:
         return args.nl
+
+    if args.nl_file:
+        return Path(args.nl_file).read_text(encoding="utf-8").strip()
 
     dataset = (args.dataset or "").lower()
 
@@ -132,6 +143,7 @@ def resolve_nl(args: argparse.Namespace) -> str:
 # ---------------------------------------------------------------------------
 # Output helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_run_id(args: argparse.Namespace) -> str:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -193,11 +205,14 @@ def _print_summary(
 # Pipeline runner
 # ---------------------------------------------------------------------------
 
+
 async def run_pipeline(args: argparse.Namespace) -> None:
-    from src.util.ablation import AblationConfig
+    from src.util.config.ablation import AblationConfig
 
     stages_to_run: Set[int] = (
-        {int(s.strip()) for s in args.stages.split(",")} if args.stages else {1, 2, 3, 4}
+        {int(s.strip()) for s in args.stages.split(",")}
+        if args.stages
+        else {1, 2, 3, 4}
     )
 
     ablation = AblationConfig(
@@ -214,9 +229,11 @@ async def run_pipeline(args: argparse.Namespace) -> None:
     print(f"\n[Pipeline] Run ID  : {run_id}")
     print(f"[Pipeline] Model   : {model}")
     print(f"[Pipeline] Stages  : {sorted(stages_to_run)}")
-    print(f"[Pipeline] Ablation: enrichment={ablation.enable_enrichment}, "
-          f"sharding={ablation.enable_sharding}, "
-          f"logical_constraints={ablation.enable_logical_constraints}")
+    print(
+        f"[Pipeline] Ablation: enrichment={ablation.enable_enrichment}, "
+        f"sharding={ablation.enable_sharding}, "
+        f"logical_constraints={ablation.enable_logical_constraints}"
+    )
     print(f"[Pipeline] Output  : {out_dir}\n")
 
     total_tokens = 0
@@ -225,6 +242,7 @@ async def run_pipeline(args: argparse.Namespace) -> None:
 
     # --- Stage 1: Fact Extraction ---
     s1_output = None
+    s1_trace_collector = None
 
     if args.from_stage2:
         s1_path = Path(args.from_stage2)
@@ -233,17 +251,23 @@ async def run_pipeline(args: argparse.Namespace) -> None:
             sys.exit(1)
         print(f"[Pipeline] Skipping Stage 1 -- loading from {s1_path}")
         from src.orchestration.stage1.models import Output as Stage1Output
+
         raw = json.loads(s1_path.read_text(encoding="utf-8"))
         s1_output = Stage1Output(**raw)
     elif 1 in stages_to_run:
         print("[Pipeline] --- Stage 1: Fact Extraction ---")
         t0 = time.time()
         try:
+            if args.trace_llm:
+                from src.util.observability.llm_trace import LLMTraceCollector
+
+                s1_trace_collector = LLMTraceCollector()
             stage1_orchestrate = _import_stage1()
             s1_output, s1_tokens = await stage1_orchestrate(
                 nl_description=nl,
                 model=model,
                 ablation_config=ablation,
+                trace_collector=s1_trace_collector,
             )
             elapsed = time.time() - t0
             total_tokens += s1_tokens
@@ -251,12 +275,18 @@ async def run_pipeline(args: argparse.Namespace) -> None:
             stages_run.append(1)
             print(f"[Stage 1] Done in {elapsed:.1f}s ({s1_tokens} tokens)")
             _save_json(out_dir / "stage1_output.json", _model_to_dict(s1_output))
+            if s1_trace_collector is not None:
+                s1_trace_collector.write_artifacts(out_dir, prefix="stage1_llm")
         except Exception as exc:
             elapsed = time.time() - t0
             stages_time["stage1"] = elapsed
             print(f"[Stage 1] FAILED after {elapsed:.1f}s: {exc}")
-            _save_json(out_dir / "stage1_error.json", {"error": str(exc), "elapsed": elapsed})
-            _save_run_summary(out_dir, run_id, nl, total_tokens, stages_time, stages_run, None)
+            _save_stage1_error(out_dir, exc, elapsed)
+            if s1_trace_collector is not None:
+                s1_trace_collector.write_artifacts(out_dir, prefix="stage1_llm")
+            _save_run_summary(
+                out_dir, run_id, nl, total_tokens, stages_time, stages_run, None
+            )
             raise
 
     if s1_output is None and 2 in stages_to_run:
@@ -297,8 +327,12 @@ async def run_pipeline(args: argparse.Namespace) -> None:
             elapsed = time.time() - t0
             stages_time["stage2"] = elapsed
             print(f"[Stage 2] FAILED after {elapsed:.1f}s: {exc}")
-            _save_json(out_dir / "stage2_error.json", {"error": str(exc), "elapsed": elapsed})
-            _save_run_summary(out_dir, run_id, nl, total_tokens, stages_time, stages_run, None)
+            _save_json(
+                out_dir / "stage2_error.json", {"error": str(exc), "elapsed": elapsed}
+            )
+            _save_run_summary(
+                out_dir, run_id, nl, total_tokens, stages_time, stages_run, None
+            )
             raise
 
     if s2_output is None and 3 in stages_to_run:
@@ -348,8 +382,12 @@ async def run_pipeline(args: argparse.Namespace) -> None:
             elapsed = time.time() - t0
             stages_time["stage3"] = elapsed
             print(f"[Stage 3] FAILED after {elapsed:.1f}s: {exc}")
-            _save_json(out_dir / "stage3_error.json", {"error": str(exc), "elapsed": elapsed})
-            _save_run_summary(out_dir, run_id, nl, total_tokens, stages_time, stages_run, None)
+            _save_json(
+                out_dir / "stage3_error.json", {"error": str(exc), "elapsed": elapsed}
+            )
+            _save_run_summary(
+                out_dir, run_id, nl, total_tokens, stages_time, stages_run, None
+            )
             raise
 
     if s3_output is None and 4 in stages_to_run:
@@ -398,19 +436,27 @@ async def run_pipeline(args: argparse.Namespace) -> None:
 
             smoke_passed = s4_result.success
             print(f"[SmokeTest] {'PASSED' if smoke_passed else 'FAILED'}")
-            for log_line in (s4_result.verification_logs or []):
+            for log_line in s4_result.verification_logs or []:
                 print(f"  {log_line}")
 
         except Exception as exc:
             elapsed = time.time() - t0
             stages_time["stage4"] = elapsed
             print(f"[Stage 4] FAILED after {elapsed:.1f}s: {exc}")
-            _save_json(out_dir / "stage4_error.json", {"error": str(exc), "elapsed": elapsed})
-            _save_run_summary(out_dir, run_id, nl, total_tokens, stages_time, stages_run, smoke_passed)
+            _save_json(
+                out_dir / "stage4_error.json", {"error": str(exc), "elapsed": elapsed}
+            )
+            _save_run_summary(
+                out_dir, run_id, nl, total_tokens, stages_time, stages_run, smoke_passed
+            )
             raise
 
-    _save_run_summary(out_dir, run_id, nl, total_tokens, stages_time, stages_run, smoke_passed)
-    _print_summary(run_id, nl, stages_run, stages_time, total_tokens, smoke_passed, out_dir)
+    _save_run_summary(
+        out_dir, run_id, nl, total_tokens, stages_time, stages_run, smoke_passed
+    )
+    _print_summary(
+        run_id, nl, stages_run, stages_time, total_tokens, smoke_passed, out_dir
+    )
 
 
 def _save_run_summary(
@@ -434,9 +480,40 @@ def _save_run_summary(
     _save_json(out_dir / "run_summary.json", summary)
 
 
+def _save_stage1_error(out_dir: Path, exc: Exception, elapsed: float) -> None:
+    from src.util.orchestration.retry_loop import RetryExhaustedError
+
+    if isinstance(exc, RetryExhaustedError):
+        last_output = exc.last_output
+        _save_json(
+            out_dir / "stage1_error.json",
+            {
+                "error": str(exc),
+                "elapsed": elapsed,
+                "total_tokens_before_failure": exc.total_tokens,
+                "unresolved_errors": [
+                    {
+                        "signature": error.signature(),
+                        "iteration": error.iteration,
+                        "error_type": error.error_type.value,
+                        "severity": error.severity.value,
+                        "description": error.description,
+                        "fact_id": error.fact_id,
+                    }
+                    for error in exc.errors
+                ],
+                "last_output": _model_to_dict(last_output),
+            },
+        )
+        return
+
+    _save_json(out_dir / "stage1_error.json", {"error": str(exc), "elapsed": elapsed})
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -444,30 +521,87 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    p.add_argument("--nl", type=str, default=None,
-                   help="Natural language description (direct input)")
-    p.add_argument("--dataset", type=str, default=None,
-                   help="Dataset: rschema | handcrafted | benchmark_imdb | "
-                        "benchmark_tpch | benchmark_tpcds | benchmark_mimiciv")
-    p.add_argument("--case-id", type=str, default=None, dest="case_id",
-                   help="Case ID string (e.g. handcrafted-001, tpch-001)")
-    p.add_argument("--case-idx", type=int, default=None, dest="case_idx",
-                   help="0-based line index (for rschema)")
-    p.add_argument("--model", type=str, default="gpt-4o",
-                   help="LLM model name (default: gpt-4o)")
-    p.add_argument("--output-dir", type=str, default=None, dest="output_dir",
-                   help="Output directory (default: output/runs/{timestamp})")
-    p.add_argument("--no-enrichment", action="store_true", dest="no_enrichment",
-                   help="Disable Stage 1 context enrichment")
-    p.add_argument("--no-sharding", action="store_true", dest="no_sharding",
-                   help="Disable Stage 2 fact sharding")
-    p.add_argument("--no-logical-constraints", action="store_true",
-                   dest="no_logical_constraints",
-                   help="Disable Stage 4 logical constraint overrides")
-    p.add_argument("--stages", type=str, default=None,
-                   help="Comma-separated stages to run: 1,2,3,4 (default: all)")
-    p.add_argument("--from-stage2", type=str, default=None, dest="from_stage2",
-                   help="Skip Stage 1, load Stage 1 output JSON from this path")
+    p.add_argument(
+        "--nl",
+        type=str,
+        default=None,
+        help="Natural language description (direct input)",
+    )
+    p.add_argument(
+        "--nl-file",
+        type=str,
+        default=None,
+        dest="nl_file",
+        help="Path to a .txt file containing the NL description",
+    )
+    p.add_argument(
+        "--dataset",
+        type=str,
+        default=None,
+        help="Dataset: rschema | handcrafted | benchmark_imdb | "
+        "benchmark_tpch | benchmark_tpcds | benchmark_mimiciv",
+    )
+    p.add_argument(
+        "--case-id",
+        type=str,
+        default=None,
+        dest="case_id",
+        help="Case ID string (e.g. handcrafted-001, tpch-001)",
+    )
+    p.add_argument(
+        "--case-idx",
+        type=int,
+        default=None,
+        dest="case_idx",
+        help="0-based line index (for rschema)",
+    )
+    p.add_argument(
+        "--model", type=str, default="gpt-4o", help="LLM model name (default: gpt-4o)"
+    )
+    p.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        dest="output_dir",
+        help="Output directory (default: output/runs/{timestamp})",
+    )
+    p.add_argument(
+        "--no-enrichment",
+        action="store_true",
+        dest="no_enrichment",
+        help="Disable Stage 1 context enrichment",
+    )
+    p.add_argument(
+        "--no-sharding",
+        action="store_true",
+        dest="no_sharding",
+        help="Disable Stage 2 fact sharding",
+    )
+    p.add_argument(
+        "--no-logical-constraints",
+        action="store_true",
+        dest="no_logical_constraints",
+        help="Disable Stage 4 logical constraint overrides",
+    )
+    p.add_argument(
+        "--stages",
+        type=str,
+        default=None,
+        help="Comma-separated stages to run: 1,2,3,4 (default: all)",
+    )
+    p.add_argument(
+        "--from-stage2",
+        type=str,
+        default=None,
+        dest="from_stage2",
+        help="Skip Stage 1, load Stage 1 output JSON from this path",
+    )
+    p.add_argument(
+        "--trace-llm",
+        action="store_true",
+        dest="trace_llm",
+        help="Persist LLM message traces for supported stages",
+    )
     return p
 
 
@@ -480,9 +614,9 @@ def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
 
-    if not args.nl and not args.dataset and not args.from_stage2:
+    if not args.nl and not args.nl_file and not args.dataset and not args.from_stage2:
         parser.error(
-            "Provide one of: --nl, --dataset with --case-id/--case-idx, "
+            "Provide one of: --nl, --nl-file, --dataset with --case-id/--case-idx, "
             "or --from-stage2 FILE"
         )
 

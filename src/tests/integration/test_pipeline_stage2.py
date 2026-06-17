@@ -21,7 +21,7 @@ from src.orchestration.stage2.models import Output
 from src.pipeline.stage2.models.registry import TableFactRegistry
 from src.pipeline.stage2.models.schema import Schema
 from src.tests.fixtures import sample_data
-from src.util.ablation import AblationConfig
+from src.util.config.ablation import AblationConfig
 
 _FACTS = sample_data.fintech_facts()
 _DOMAIN = sample_data.FINTECH_DOMAIN
