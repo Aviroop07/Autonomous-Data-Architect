@@ -2,7 +2,7 @@ import json
 import numpy as np
 from typing import List, Dict, Optional, Tuple, Set, Any, Union
 from src.pipeline.stage3.models import (
-    AlgebraicManifest, TableConstraintManifest, IfNode, LogicalNode,
+    AlgebraicManifest, IfNode, LogicalNode,
     CombinationNode, UnivariateDist, NumericRange, DateRange,
     NormalDist, LogNormalDist, PoissonDist, ZipfDist, CategoricalDist
 )
@@ -58,10 +58,11 @@ class MinimalCompiler:
             self._compile_table(table_name, schema)
 
         # 2. Apply Global Constraints (if any) — skipped when logical constraints are disabled
-        if self.enable_logical_constraints and self.manifest.global_rules:
+        global_rules = getattr(self.manifest, "global_rules", [])
+        if self.enable_logical_constraints and global_rules:
             self.emit("")
             self.emit("# --- GLOBAL CONSTRAINTS ---")
-            for rule in self.manifest.global_rules:
+            for rule in global_rules:
                 if not isinstance(rule, IfNode):
                     continue
                 t_target: Optional[str] = None
@@ -161,8 +162,9 @@ class MinimalCompiler:
                 if is_fk: continue
 
                 # Check for explicit bounds in manifest FIRST to avoid logic-breaking defaults
-                manifest = self.manifest.table_manifests.get(table_name)
-                bound = manifest.numeric_bounds.get(c_name) if manifest else None
+                manifest = self.manifest.get_table_manifest(table_name)
+                numeric_bounds = getattr(manifest, "numeric_bounds", {}) if manifest else {}
+                bound = numeric_bounds.get(c_name) if manifest else None
 
                 # Heuristic: If we have a numeric bound, prioritize numeric initialization even if data_type says otherwise
                 is_numeric_bound = bound and (bound.min is not None or bound.max is not None)
@@ -192,14 +194,16 @@ class MinimalCompiler:
                     self.emit(f"BUFFERS['{table_name}']['{c_name}'] = [''] * len(BUFFERS['{table_name}'])")
 
         # C. Apply Distributions (Overrides base)
-        manifest = self.manifest.table_manifests.get(table_name)
+        manifest = self.manifest.get_table_manifest(table_name)
         if manifest:
-            for col, dist in manifest.distributions.items():
+            distributions = getattr(manifest, "distributions", {})
+            numeric_bounds = getattr(manifest, "numeric_bounds", {})
+            for col, dist in distributions.items():
                 sampler_code = self._emit_dist_sampler(dist, table_name)
                 self.emit(f"BUFFERS['{table_name}']['{col}'] = {sampler_code}")
                 # Clipping Bounds (New NumericRange model)
-                if col in manifest.numeric_bounds:
-                    b = manifest.numeric_bounds[col]
+                if col in numeric_bounds:
+                    b = numeric_bounds[col]
                     low = b.min if b.min is not None else -np.inf
                     high = b.max if b.max is not None else np.inf
                     if low != -np.inf or high != np.inf:
@@ -212,7 +216,7 @@ class MinimalCompiler:
 
         # E. Apply Logical Predicates (Overrides Distributions and Infill)
         if manifest and self.enable_logical_constraints:
-            for rule in manifest.logical_rules:
+            for rule in getattr(manifest, "logical_rules", []):
                 self._compile_if_node(rule, table_name)
 
         # D. Apply Sparsity (Dropping Mechanism)

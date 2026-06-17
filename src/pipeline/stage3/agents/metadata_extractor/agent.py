@@ -1,8 +1,8 @@
 from pathlib import Path
 from typing import Tuple, Optional, List, Dict
 
-from src.util.agent import get_agent_, AgentType
-from src.util.invoke import get_response
+from src.util.core.agent import get_agent_, AgentType
+from src.util.core.invoke import get_response
 from src.pipeline.stage3.models.sql_models import LLMResponse
 
 PROMPT_PATH = Path(__file__).parent / "prompt.txt"
@@ -39,7 +39,7 @@ async def extract_metadata(
         query += f"- {f}\n"
 
     if validator_report:
-        query += "\n### MATHEMATICAL VALIDATION REPORT (FOR CORRECTION):\n"
+        query += "\n### FEASIBILITY VALIDATION REPORT (FOR CORRECTION):\n"
         query += f"{validator_report}\n"
 
     parsed, tokens = await get_response(

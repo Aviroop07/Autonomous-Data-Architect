@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
-from typing import List, Dict, Optional
+from typing import List, Optional
 from src.pipeline.stage3.models import TableConstraintManifest, AlgebraicManifest
+from src.pipeline.stage3.models.sql_models import BinaryOperand
 
 class RetryStep(BaseModel):
     attempt: int
@@ -9,8 +10,10 @@ class RetryStep(BaseModel):
     token_usage: int = 0
 
 class RawSQLRule(BaseModel):
-    on: str
-    condition: str
+    state_query: str
+    left_operand: str
+    operator: str
+    right_operand: Optional[BinaryOperand] = None
     fact_references: List[int] = Field(default_factory=list)
 
 class HealingAttempt(BaseModel):
@@ -22,8 +25,8 @@ class ShardMetadata(BaseModel):
     shard_index: int
     table_names: List[str]
     allocated_fact_ids: List[int] = Field(default_factory=list)
-    manifests: Dict[str, TableConstraintManifest] = Field(default_factory=dict)
-    raw_sql_rules: List[RawSQLRule] = Field(default_factory=list, description="Raw LLM outputs (on/condition) before algebraic parsing.")
+    manifests: List[TableConstraintManifest] = Field(default_factory=list)
+    raw_sql_rules: List[RawSQLRule] = Field(default_factory=list, description="Raw LLM state-table predicates before global validation.")
     retry_history: List[RetryStep] = Field(default_factory=list)
     token_usage: int = 0
     validation_logs: List[str] = Field(default_factory=list)

@@ -12,7 +12,7 @@ from src.pipeline.stage4.agents.parameter_agent.agent import derive_parameters, 
 from src.pipeline.stage4.agents.semantic_agent.agent import infill_semantics, get_agent as get_semantic_agent
 from src.pipeline.stage4.compiler import MinimalCompiler
 from src.pipeline.stage4.smoke_test import run_smoke_test
-from src.util.ablation import AblationConfig
+from src.util.config.ablation import AblationConfig
 
 async def orchestrate(
     global_schema: Schema,
@@ -31,7 +31,7 @@ async def orchestrate(
     # Extract nullable columns from manifest to pass to parameter agent
     nullable_map = {
         t_name: m.nullable_columns
-        for t_name, m in manifest.table_manifests.items()
+        for t_name, m in manifest.table_manifest_pairs()
         if m.nullable_columns
     }
 
