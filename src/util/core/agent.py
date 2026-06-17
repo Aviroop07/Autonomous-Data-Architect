@@ -6,7 +6,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage
 from langchain_core.runnables import Runnable
 
-from src.util.schema_utils import generate_hierarchical_schema_description
+from src.util.schema_ops.schema_utils import generate_hierarchical_schema_description
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -17,7 +17,10 @@ AgentType = Union["StructuredAgent", Runnable]
 # Model Factory
 # ------------------------------------------------------------------
 
-def get_model(model: Optional[str] = None, use_responses_api: bool = False) -> ChatOpenAI:
+
+def get_model(
+    model: Optional[str] = None, use_responses_api: bool = False
+) -> ChatOpenAI:
     """Returns a ChatOpenAI instance. Reads config from environment."""
     load_dotenv()
     api_key = os.getenv("OPENAI_API_KEY", "")
@@ -35,6 +38,7 @@ def get_model(model: Optional[str] = None, use_responses_api: bool = False) -> C
 # Lightweight wrapper for structured-output-only agents
 # ------------------------------------------------------------------
 
+
 class StructuredAgent:
     """
     Wraps ChatOpenAI.with_structured_output() to provide the same
@@ -47,10 +51,19 @@ class StructuredAgent:
         }
     """
 
-    def __init__(self, system_prompt: str, llm: ChatOpenAI, output_structure: Type[T]):
+    def __init__(
+        self,
+        system_prompt: str,
+        llm: ChatOpenAI,
+        output_structure: Type[T],
+        name: str = "structured_agent",
+    ):
+        self.name = name
         self.system_prompt = system_prompt
         self.output_structure = output_structure
-        self.chain = llm.with_structured_output(output_structure, include_raw=True, method="function_calling")
+        self.chain = llm.with_structured_output(
+            output_structure, include_raw=True, method="function_calling"
+        )
 
     async def ainvoke(self, input_dict: Dict[str, Any]) -> Dict[str, Any]:
         messages = [SystemMessage(content=self.system_prompt)]
@@ -70,6 +83,7 @@ class StructuredAgent:
 # ------------------------------------------------------------------
 # Generic Agent Factory
 # ------------------------------------------------------------------
+
 
 def get_agent_(
     system_prompt: str,
@@ -99,19 +113,23 @@ def get_agent_(
         )
 
     if tools:
-        from langgraph.prebuilt import create_react_agent
-        agent = create_react_agent(
+        from langchain.agents import create_agent
+
+        agent = create_agent(
             model=llm,
             tools=tools,
-            prompt=system_prompt,
+            system_prompt=system_prompt,
             response_format=output_structure,
             name=name or "agent",
         )
         return agent
     else:
-        assert output_structure is not None, "output_structure is required for StructuredAgent"
+        assert output_structure is not None, (
+            "output_structure is required for StructuredAgent"
+        )
         return StructuredAgent(
             system_prompt=system_prompt,
             llm=llm,
             output_structure=output_structure,
+            name=name or "structured_agent",
         )

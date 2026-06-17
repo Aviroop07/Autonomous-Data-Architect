@@ -1,6 +1,7 @@
 from typing import Type, TypeVar, Tuple, Optional, Union
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage, BaseMessage
+from src.util.observability.llm_trace import get_active_trace_collector
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -25,9 +26,8 @@ async def get_response(
     if isinstance(query, str):
         query = query.encode("utf-8", errors="ignore").decode("utf-8")
 
-    response = await agent.ainvoke(
-        {"messages": [HumanMessage(content=query)]}
-    )
+    input_messages = [HumanMessage(content=query)]
+    response = await agent.ainvoke({"messages": input_messages})
 
     # Extract structured response or fallback to last message content
     if output_structure:
@@ -39,8 +39,7 @@ async def get_response(
             )
         if not isinstance(parsed, output_structure):
             raise TypeError(
-                f"Expected {output_structure.__name__}, "
-                f"got {type(parsed).__name__}"
+                f"Expected {output_structure.__name__}, got {type(parsed).__name__}"
             )
     else:
         last_msg = response["messages"][-1]
@@ -57,28 +56,41 @@ async def get_response(
     # Extract token usage from AI messages' metadata
     total_tokens = _extract_token_usage(response.get("messages", []))
 
+    collector = get_active_trace_collector()
+    if collector is not None:
+        output_structure_name = (
+            output_structure.__name__ if output_structure else "text"
+        )
+        parsed_response_type = type(parsed).__name__ if parsed is not None else ""
+        collector.add_trace(
+            agent_name=str(getattr(agent, "name", agent.__class__.__name__)),
+            output_structure_name=output_structure_name,
+            input_messages=input_messages,
+            returned_messages=response.get("messages", []),
+            token_usage=total_tokens,
+            parsed_response_type=parsed_response_type,
+        )
+
+    assert parsed is not None
     return parsed, total_tokens
+
+
+def _tokens_from_message(msg) -> int:
+    if isinstance(msg, BaseMessage):
+        usage = getattr(msg, "usage_metadata", None)
+        res_meta = getattr(msg, "response_metadata", {})
+    else:
+        usage = msg.get("usage_metadata")
+        res_meta = msg.get("response_metadata", {})
+    if usage:
+        return usage.get("total_tokens", 0)
+    return res_meta.get("token_usage", {}).get("total_tokens", 0)
 
 
 def _extract_token_usage(messages: list) -> int:
     """Sum total_tokens from all messages that carry usage metadata."""
-    total = 0
-    for msg in messages:
-        if isinstance(msg, BaseMessage):
-            usage = getattr(msg, "usage_metadata", None)
-            if usage:
-                total += usage.get("total_tokens", 0)
-            else:
-                res_meta = getattr(msg, "response_metadata", {})
-                total += res_meta.get("token_usage", {}).get("total_tokens", 0)
-        elif isinstance(msg, dict):
-            usage = msg.get("usage_metadata")
-            if usage:
-                total += usage.get("total_tokens", 0)
-            else:
-                total += (
-                    msg.get("response_metadata", {})
-                    .get("token_usage", {})
-                    .get("total_tokens", 0)
-                )
-    return total
+    return sum(
+        _tokens_from_message(msg)
+        for msg in messages
+        if isinstance(msg, (BaseMessage, dict))
+    )

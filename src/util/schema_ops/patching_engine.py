@@ -1,6 +1,6 @@
 from typing import List, Optional
 from src.pipeline.stage2.models.schema import Schema, Table, Column, ForeignKey, CompositeUnique
-from src.util.schema_patch import (
+from src.util.schema_ops.schema_patch import (
     SchemaPatch, AddColumnPatch, RenameColumnPatch,
     DeleteColumnPatch, AddTablePatch, MergeTablesPatch, AddRelationshipPatch,
     DeleteRelationshipPatch, UpdatePKPatch, UpsertUniquePatch, DeleteTablePatch,

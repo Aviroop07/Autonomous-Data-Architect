@@ -6,7 +6,7 @@ fits each via MLE (or MOM where MLE is unavailable), and ranks them by AIC.
 
 Usage
 -----
-    from src.util.dist_miner import mine_column_distribution
+    from src.util.analysis.dist_miner import mine_column_distribution
 
     result = mine_column_distribution(data)
     print(result.best.family, result.best.params)
