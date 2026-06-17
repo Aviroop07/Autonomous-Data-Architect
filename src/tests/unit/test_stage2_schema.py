@@ -68,7 +68,7 @@ def test_table_plural_name_flagged():
     assert any("singular" in e for e in errors)
 
 
-@pytest.mark.parametrize("allowed", ["STATUS", "ACCESS", "PROCESS"])
+@pytest.mark.parametrize("allowed", ["STATUS", "ACCESS", "PROCESS", "DIAGNOSIS", "TV_SERIES"])
 def test_table_allowed_s_ending_not_flagged_as_plural(allowed):
     t = Table(
         name=allowed,

@@ -4,8 +4,7 @@ from typing import List, Optional, Protocol, Set
 
 
 class EmbeddingModel(Protocol):
-    def encode(self, sentences: List[str], **kwargs: object) -> object:
-        ...
+    def encode(self, sentences: List[str], **kwargs: object) -> object: ...
 
 
 class SemanticSimilarity:
@@ -68,7 +67,7 @@ class SemanticSimilarity:
 
     def _get_embedding_model(self) -> Optional[EmbeddingModel]:
         if self._embedding_model is not None:
-            return self._embedding_model
+            return self._embedding_model  # type: ignore[return-value]
         if not self._enable_embedding_model or self._embedding_load_attempted:
             return None
 
@@ -76,23 +75,29 @@ class SemanticSimilarity:
         try:
             from sentence_transformers import SentenceTransformer
 
-            self._embedding_model = SentenceTransformer(self.model_name)
+            self._embedding_model = SentenceTransformer(self.model_name)  # type: ignore[assignment]
         except Exception:
             self._embedding_model = None
-        return self._embedding_model
+        return self._embedding_model  # type: ignore[return-value]
 
     def _embedding_score(self, s1: str, s2: str) -> float:
         model = self._get_embedding_model()
         if model is None:
             return 0.0
 
+        import warnings
+
         try:
-            embeddings = model.encode(
-                [s1, s2],
-                convert_to_numpy=True,
-                normalize_embeddings=True,
-                show_progress_bar=False,
-            )
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore", message="Token indices sequence length"
+                )
+                embeddings = model.encode(
+                    [s1, s2],
+                    convert_to_numpy=True,
+                    normalize_embeddings=True,
+                    show_progress_bar=False,
+                )
         except TypeError:
             embeddings = model.encode([s1, s2])
         except Exception:
@@ -138,7 +143,9 @@ class SemanticSimilarity:
         embedding = self._embedding_score(s1, s2)
         return max(lexical, embedding)
 
-    def get_matrix_scores(self, list_a: List[str], list_b: List[str]) -> List[List[float]]:
+    def get_matrix_scores(
+        self, list_a: List[str], list_b: List[str]
+    ) -> List[List[float]]:
         """Calculates a matrix of semantic similarity scores between two string lists."""
         if not list_a or not list_b:
             return []

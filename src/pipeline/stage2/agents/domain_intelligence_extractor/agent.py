@@ -1,8 +1,8 @@
 from pathlib import Path
 from typing import Optional, Tuple
 from src.pipeline.stage2.agents.domain_intelligence_extractor.model import DomainIntelligenceReport
-from src.util.agent import get_agent_, AgentType
-from src.util.invoke import get_response
+from src.util.core.agent import get_agent_, AgentType
+from src.util.core.invoke import get_response
 
 PROMPT_PATH = Path(__file__).parent / "prompt.txt"
 

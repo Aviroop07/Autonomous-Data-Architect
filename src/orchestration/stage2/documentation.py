@@ -1,5 +1,5 @@
 from src.orchestration.stage2.models import Output
-from src.util.documentation import render_schema_to_base64, format_atomic_facts, format_fix_history
+from src.util.observability.documentation import render_schema_to_base64, format_atomic_facts, format_fix_history
 
 def document(output: Output) -> str:
     """

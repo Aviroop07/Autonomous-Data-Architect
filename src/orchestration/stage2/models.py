@@ -2,7 +2,7 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 from src.pipeline.stage2.models.schema import Schema
 from src.pipeline.stage2.models.chunk import ChunkedPlan
-from src.util.schema_patch import CritiqueReport
+from src.util.schema_ops.schema_patch import CritiqueReport
 from src.pipeline.stage2.models.corrections import FixHistoryStep
 
 class PatchRepairStep(BaseModel):

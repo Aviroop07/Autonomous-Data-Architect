@@ -1,9 +1,9 @@
 from pathlib import Path
 from src.pipeline.stage2.models.schema import Schema
-from src.util.schema_patch import CritiqueReport
+from src.util.schema_ops.schema_patch import CritiqueReport
 from src.pipeline.stage1.models.rephrased_nl import AtomicFact
-from src.util.agent import get_agent_, AgentType
-from src.util.invoke import get_response
+from src.util.core.agent import get_agent_, AgentType
+from src.util.core.invoke import get_response
 from typing import List, Tuple, Optional
 
 PROMPT_PATH = Path(__file__).parent / "prompt.txt"

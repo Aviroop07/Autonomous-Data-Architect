@@ -9,6 +9,7 @@ Before returning your schema, you MUST verify:
     - [ ] Every table has a Primary Key that is also in the `columns` list.
     - [ ] **NATURAL KEY PRIORITY**: If the text provides a domain-specific identifier (e.g., a "Number", "Code", or "ID" attribute of the entity), use it as the PK. Do NOT add a surrogate `_id` column.
     - [ ] **NO ROLE EXPLOSION**: Logically identical entities representing roles of the same category MUST be merged into a single Supertype.
+    - [ ] **ROLE CLARITY**: Only consolidate roles within the same profession (e.g., attending vs consulting physician). Distinct professions (e.g., physician vs nurse) MUST remain separate tables unless the facts explicitly state they are the same entity class.
     - [ ] No "Parameter Pollution": abstract rates or modeling constants are NOT materialized as tables.
     - [ ] **Physicality Override**: Every physical event or entity (e.g. Orders, Payments, Spans, Metrics) MUST be materialized as a table if tagged as `STRUCTURAL`.
     - [ ] **FACT COVERAGE (CRITICAL)**: You MUST account for every single fact provided. If a fact mentions an attribute (e.g., 'Interest Rate', 'Loan Amount'), that attribute MUST be materialized as a column in the appropriate table.
@@ -47,6 +48,9 @@ Analyze carefully whether a certain keyword actually warrants its own table or i
 - **Consolidation Principle (EER Analysis - CRITICAL)**:
     - **Generalization (Supertype)**: If multiple entities represent roles or categories of the same underlying physical entity and share >80% of their attributes, you **MUST** consolidate them into a single **Supertype** (e.g., a generic category name) with a discriminator column.
     - **BANNED**: Do NOT split entities by role if they describe the same kind of physical actor.
+    - **Distinct Noun Guardrail**: If two entities differ by their head noun (last token) and both are explicitly mentioned as STRUCTURAL facts, keep them separate unless the facts state they are the same entity.
+    - **No Abbreviations**: Do NOT shorten or abbreviate table names (e.g., avoid DEMO for DEMOGRAPHIC).
+    - **Event vs Summary**: If a base event/entity and its summary/report are both mentioned (e.g., discharge and discharge summary), you MUST model both as separate tables.
     - **Specialization (Subtype)**: Only create specialized separate tables if a subclass has at least 3 unique attributes OR a fundamentally distinct relational life-cycle.
 - **Dimension Separation**: DO NOT collapse distinct dimension categories into a single generic table if they are fundamentally different. However, follow the Generalization rule above for similar human/actor roles.
 - **No Over-Engineering**: Do not add "common" tables or standard entities if they are not requested in the input.

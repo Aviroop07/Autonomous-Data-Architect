@@ -149,6 +149,217 @@ def test_merge_matched_tables_no_duplicate_columns():
     assert len(col_names) == len(set(col_names))
 
 
+def test_table_score_id_only_matches_are_weak(monkeypatch: pytest.MonkeyPatch):
+    def fake_score(_: str, __: str) -> float:
+        return 0.8
+
+    def fake_matrix(cols1: List[str], cols2: List[str]) -> List[List[float]]:
+        return [[1.0 for _ in cols2] for _ in cols1]
+
+    monkeypatch.setattr(
+        "src.pipeline.stage2.middleware.schema_merging.merger.get_similarity_score",
+        fake_score,
+    )
+    monkeypatch.setattr(
+        "src.pipeline.stage2.middleware.schema_merging.merger.get_similarity_matrix",
+        fake_matrix,
+    )
+
+    merger = make_merger(alpha=0.7, col_thresh=0.7)
+    t1 = Table(
+        name="INSURANCE_PLAN",
+        pk="insurance_plan_id",
+        columns=[
+            Column(name="insurance_plan_id", data_type="INTEGER"),
+            Column(name="patient_id", data_type="INTEGER"),
+        ],
+    )
+    t2 = Table(
+        name="INSURANCE_CLAIM",
+        pk="insurance_claim_id",
+        columns=[
+            Column(name="insurance_claim_id", data_type="INTEGER"),
+            Column(name="patient_id", data_type="INTEGER"),
+        ],
+    )
+
+    score = merger._calculate_table_score(t1, t2)
+    assert score == pytest.approx(0.56)
+
+
+def test_table_score_distinct_modifiers_penalized(monkeypatch: pytest.MonkeyPatch):
+    def fake_score(_: str, __: str) -> float:
+        return 0.8
+
+    def fake_matrix(cols1: List[str], cols2: List[str]) -> List[List[float]]:
+        return [[1.0 for _ in cols2] for _ in cols1]
+
+    monkeypatch.setattr(
+        "src.pipeline.stage2.middleware.schema_merging.merger.get_similarity_score",
+        fake_score,
+    )
+    monkeypatch.setattr(
+        "src.pipeline.stage2.middleware.schema_merging.merger.get_similarity_matrix",
+        fake_matrix,
+    )
+
+    merger = make_merger(alpha=0.7, col_thresh=0.7, table_thresh=0.6)
+    t1 = Table(
+        name="WEB_SALE",
+        pk="web_sale_id",
+        columns=[
+            Column(name="web_sale_id", data_type="INTEGER"),
+            Column(name="quantity", data_type="INTEGER"),
+        ],
+    )
+    t2 = Table(
+        name="STORE_SALE",
+        pk="store_sale_id",
+        columns=[
+            Column(name="store_sale_id", data_type="INTEGER"),
+            Column(name="quantity", data_type="INTEGER"),
+        ],
+    )
+
+    score = merger._calculate_table_score(t1, t2)
+    assert score < 0.6
+
+
+def test_force_match_pks_requires_identifier_or_similarity(monkeypatch: pytest.MonkeyPatch):
+    def fake_score(_: str, __: str) -> float:
+        return 0.2
+
+    monkeypatch.setattr(
+        "src.pipeline.stage2.middleware.schema_merging.merger.get_similarity_score",
+        fake_score,
+    )
+
+    merger = make_merger()
+    assert merger._should_force_match_pks("order_id", "customer_order_id")
+    assert not merger._should_force_match_pks("primary_name", "title_id")
+
+
+def test_merge_remaps_relationship_columns_for_matched_tables(monkeypatch: pytest.MonkeyPatch):
+    def fake_score(_: str, __: str) -> float:
+        return 1.0
+
+    def fake_matrix(cols1: List[str], cols2: List[str]) -> List[List[float]]:
+        return [[1.0 for _ in cols2] for _ in cols1]
+
+    monkeypatch.setattr(
+        "src.pipeline.stage2.middleware.schema_merging.merger.get_similarity_score",
+        fake_score,
+    )
+    monkeypatch.setattr(
+        "src.pipeline.stage2.middleware.schema_merging.merger.get_similarity_matrix",
+        fake_matrix,
+    )
+
+    a = Schema(
+        tables=[
+            Table(
+                name="COUNTRY",
+                pk="country_code",
+                columns=[Column(name="country_code", data_type="VARCHAR")],
+            ),
+            Table(
+                name="CUSTOMER",
+                pk="customer_id",
+                columns=[
+                    Column(name="customer_id", data_type="INTEGER"),
+                    Column(name="country_code", data_type="VARCHAR"),
+                ],
+            ),
+        ],
+        relationships=[
+            ForeignKey(
+                referencing_table="CUSTOMER",
+                referencing_column="country_code",
+                referred_table="COUNTRY",
+            )
+        ],
+    )
+    b = Schema(
+        tables=[
+            Table(
+                name="COUNTRY",
+                pk="country_id",
+                columns=[Column(name="country_id", data_type="INTEGER")],
+            ),
+            Table(
+                name="CUSTOMER",
+                pk="customer_id",
+                columns=[
+                    Column(name="customer_id", data_type="INTEGER"),
+                    Column(name="country_id", data_type="INTEGER"),
+                ],
+            ),
+        ],
+        relationships=[
+            ForeignKey(
+                referencing_table="CUSTOMER",
+                referencing_column="country_id",
+                referred_table="COUNTRY",
+            )
+        ],
+    )
+
+    merger = make_merger(table_thresh=0.5, col_thresh=0.7)
+    result = merger.merge_two_segments(a, b)
+
+    customer = next(t for t in result.tables if t.name == "CUSTOMER")
+    customer_cols = {c.name for c in customer.columns}
+    rel_cols = {
+        r.referencing_column
+        for r in (result.relationships or [])
+        if r.referencing_table == "CUSTOMER"
+    }
+    assert rel_cols.issubset(customer_cols)
+
+
+def test_repair_relationship_table_names_maps_plural(monkeypatch: pytest.MonkeyPatch):
+    def fake_score(name: str, candidate: str) -> float:
+        if name == "TV_SERIE" and candidate == "TV_SERIES":
+            return 1.0
+        return 0.4
+
+    monkeypatch.setattr(
+        "src.pipeline.stage2.middleware.schema_merging.merger.get_similarity_score",
+        fake_score,
+    )
+
+    schema = Schema(
+        tables=[
+            Table(
+                name="TV_SERIES",
+                pk="tv_series_id",
+                columns=[Column(name="tv_series_id", data_type="INTEGER")],
+            ),
+            Table(
+                name="EPISODE",
+                pk="episode_id",
+                columns=[
+                    Column(name="episode_id", data_type="INTEGER"),
+                    Column(name="tv_series_id", data_type="INTEGER"),
+                ],
+            ),
+        ],
+        relationships=[
+            ForeignKey(
+                referencing_table="EPISODE",
+                referencing_column="tv_series_id",
+                referred_table="TV_SERIE",
+            )
+        ],
+    )
+
+    merger = make_merger()
+    merger._repair_relationship_table_names(schema)
+    assert any(
+        rel.referred_table == "TV_SERIES" for rel in (schema.relationships or [])
+    )
+
+
 def test_merger_uses_gale_shapley_for_table_and_column_matching(monkeypatch: pytest.MonkeyPatch):
     calls: List[Tuple[int, int, float]] = []
 

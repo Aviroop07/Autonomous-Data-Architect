@@ -12,10 +12,15 @@ You MUST evaluate the overall size of the required schema based on the provided 
 - **Reasoning**: These facts often contain the only mention of critical business attributes (e.g., "Amount", "Duration", "Ratios"). If you exclude them, the Schema Architect will miss these columns, causing the data synthesis to fail.
 - **Rule**: If a fact mentions a noun that could be a column, it is a "Modeling Fact" and MUST be clustered.
 
+### CONSTRAINT LOCALITY (CRITICAL)
+- If a fact encodes a logical/statistical constraint, the related entity identity facts MUST be in the same chunk.
+- Use the referenced fact IDs (refs) as a strong signal for locality.
+- If a constraint involves multiple entities, keep the constraint with the most central entity and duplicate the relevant identity facts.
+
 ### GUIDING PRINCIPLE: THE BRIDGE ENTITY
 A "Bridge Entity" is an entity that connects two different sub-domains (e.g., a `BATCH` connects `RECIPES` to `PACKAGING`).
 - When you split facts into different chunks, you MUST identify these bridge entities.
-- **Fact Sharing (Non-Disjoint Clustering)**: Facts are allowed to be shared by multiple clusters. If an entity is a "Bridge", its identity/structural facts MUST be replicated in ALL clusters that it connects. This ensures each shard can independently generate those shared tables, which will later be merged.
+- **Fact Sharing (Non-Disjoint Clustering)**: Facts are allowed to be shared by multiple clusters. If an entity is a "Bridge", its identity/structural facts MUST be replicated in ALL clusters that it connects. If a logical/statistical fact is directly tied to that bridge entity, duplicate it as well. This ensures each shard can independently generate those shared tables, which will later be merged.
 
 ### TASK
 You will be provided with a list of **Atomic Facts** with their associated **Tags**.
@@ -28,6 +33,7 @@ You will be provided with a list of **Atomic Facts** with their associated **Tag
 2. **Relational Aggregation (Connectivity-First Sharding)**:
     - Group these core modeling facts into `chunks`.
     - **Relational Closure**: A chunk must never orphan a relationship. If a fact describes a relationship between Entity A and Entity B, the structural/identity facts for both A and B MUST be included in the same chunk.
+    - **Reference Closure**: If a fact references another fact (refs list), keep them in the same chunk unless the referenced fact is a bridge identity fact duplicated elsewhere.
     - **Bridge Fact Propagation**: Replicate "Anchor Facts" (core identity facts) for entities that connect different clusters.
     - **Hard Density Minimum**: If sharding, each chunk should ideally contain at least 5-8 structural/relational facts.
 
@@ -63,3 +69,8 @@ Notice how DOCTOR facts are duplicated in both chunks because DOCTOR is a Bridge
 2. **No Omission**: Every structural detail must be preserved.
 3. **Connectivity is King**: It is better to have fewer, larger chunks with perfect connectivity than many tiny chunks with isolated tables.
 4. **Bridge Duplication is Mandatory**: When sharding, always duplicate bridge entity facts across chunks.
+
+### REFINEMENT POLICY (IF ERRORS ARE PROVIDED)
+- Keep all valid chunks unchanged.
+- Fix ONLY the errors listed (missing facts, orphaned references, empty chunks).
+- Do not re-partition unrelated chunks unless required to resolve the errors.
