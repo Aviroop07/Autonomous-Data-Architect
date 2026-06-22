@@ -4,6 +4,7 @@ Deterministic, offline. Tests merge_two_segments on simple schema pairs --
 identical schemas (deduplication), disjoint schemas (union), FK remapping
 across shards, and junction relationship consolidation.
 """
+
 from __future__ import annotations
 
 from typing import List, Tuple
@@ -31,25 +32,29 @@ def single_table_schema(name: str, pk: str, extra_cols=None) -> Schema:
 # merge_segments: edge cases
 # --------------------------------------------------------------------------- #
 
+
 def test_merge_segments_empty_list_returns_empty_schema():
     merger = make_merger()
-    result = merger.merge_segments([])
+    result, log = merger.merge_segments([])
     assert result.tables == []
+    assert log.matched_pairs == []
 
 
 def test_merge_segments_single_schema_returns_normalized_copy():
     schema = sample_data.simple_two_table_schema()
     merger = make_merger()
-    result = merger.merge_segments([schema])
+    result, log = merger.merge_segments([schema])
     # normalized copy -- same tables present
     table_names = {t.name for t in result.tables}
     assert "ALPHA" in table_names
     assert "BETA" in table_names
+    assert log.matched_pairs == []
 
 
 # --------------------------------------------------------------------------- #
 # merge_two_segments: identical schemas -> no duplicates
 # --------------------------------------------------------------------------- #
+
 
 def test_merge_identical_tables_no_duplication():
     a = sample_data.simple_two_table_schema()
@@ -78,6 +83,7 @@ def test_merge_identical_tables_no_duplicate_relationships():
 # --------------------------------------------------------------------------- #
 # merge_two_segments: disjoint schemas -> union
 # --------------------------------------------------------------------------- #
+
 
 def test_merge_disjoint_schemas_union_of_tables():
     a = single_table_schema("ALPHA", "alpha_id")
@@ -109,17 +115,32 @@ def test_merge_empty_b_returns_a():
 # merge_two_segments: column union for matched tables
 # --------------------------------------------------------------------------- #
 
+
 def test_merge_matched_tables_combines_columns():
-    a = Schema(tables=[
-        Table(name="USER", pk="user_id",
-              columns=[Column(name="user_id", data_type="INTEGER"),
-                       Column(name="email", data_type="VARCHAR")])
-    ])
-    b = Schema(tables=[
-        Table(name="USER", pk="user_id",
-              columns=[Column(name="user_id", data_type="INTEGER"),
-                       Column(name="phone", data_type="VARCHAR")])
-    ])
+    a = Schema(
+        tables=[
+            Table(
+                name="USER",
+                pk="user_id",
+                columns=[
+                    Column(name="user_id", data_type="INTEGER"),
+                    Column(name="email", data_type="VARCHAR"),
+                ],
+            )
+        ]
+    )
+    b = Schema(
+        tables=[
+            Table(
+                name="USER",
+                pk="user_id",
+                columns=[
+                    Column(name="user_id", data_type="INTEGER"),
+                    Column(name="phone", data_type="VARCHAR"),
+                ],
+            )
+        ]
+    )
     merger = make_merger(table_thresh=0.5)
     result = merger.merge_two_segments(a, b)
 
@@ -131,16 +152,30 @@ def test_merge_matched_tables_combines_columns():
 
 
 def test_merge_matched_tables_no_duplicate_columns():
-    a = Schema(tables=[
-        Table(name="USER", pk="user_id",
-              columns=[Column(name="user_id", data_type="INTEGER"),
-                       Column(name="email", data_type="VARCHAR")])
-    ])
-    b = Schema(tables=[
-        Table(name="USER", pk="user_id",
-              columns=[Column(name="user_id", data_type="INTEGER"),
-                       Column(name="email", data_type="VARCHAR")])
-    ])
+    a = Schema(
+        tables=[
+            Table(
+                name="USER",
+                pk="user_id",
+                columns=[
+                    Column(name="user_id", data_type="INTEGER"),
+                    Column(name="email", data_type="VARCHAR"),
+                ],
+            )
+        ]
+    )
+    b = Schema(
+        tables=[
+            Table(
+                name="USER",
+                pk="user_id",
+                columns=[
+                    Column(name="user_id", data_type="INTEGER"),
+                    Column(name="email", data_type="VARCHAR"),
+                ],
+            )
+        ]
+    )
     merger = make_merger(table_thresh=0.5)
     result = merger.merge_two_segments(a, b)
 
@@ -183,8 +218,8 @@ def test_table_score_id_only_matches_are_weak(monkeypatch: pytest.MonkeyPatch):
         ],
     )
 
-    score = merger._calculate_table_score(t1, t2)
-    assert score == pytest.approx(0.56)
+    breakdown = merger._calculate_table_score(t1, t2)
+    assert breakdown.total == pytest.approx(0.56)
 
 
 def test_table_score_distinct_modifiers_penalized(monkeypatch: pytest.MonkeyPatch):
@@ -221,11 +256,14 @@ def test_table_score_distinct_modifiers_penalized(monkeypatch: pytest.MonkeyPatc
         ],
     )
 
-    score = merger._calculate_table_score(t1, t2)
-    assert score < 0.6
+    breakdown = merger._calculate_table_score(t1, t2)
+    assert breakdown.total < 0.6
+    assert breakdown.had_modifier_penalty is True
 
 
-def test_force_match_pks_requires_identifier_or_similarity(monkeypatch: pytest.MonkeyPatch):
+def test_force_match_pks_requires_identifier_or_similarity(
+    monkeypatch: pytest.MonkeyPatch,
+):
     def fake_score(_: str, __: str) -> float:
         return 0.2
 
@@ -239,7 +277,9 @@ def test_force_match_pks_requires_identifier_or_similarity(monkeypatch: pytest.M
     assert not merger._should_force_match_pks("primary_name", "title_id")
 
 
-def test_merge_remaps_relationship_columns_for_matched_tables(monkeypatch: pytest.MonkeyPatch):
+def test_merge_remaps_relationship_columns_for_matched_tables(
+    monkeypatch: pytest.MonkeyPatch,
+):
     def fake_score(_: str, __: str) -> float:
         return 1.0
 
@@ -360,10 +400,14 @@ def test_repair_relationship_table_names_maps_plural(monkeypatch: pytest.MonkeyP
     )
 
 
-def test_merger_uses_gale_shapley_for_table_and_column_matching(monkeypatch: pytest.MonkeyPatch):
+def test_merger_uses_gale_shapley_for_table_and_column_matching(
+    monkeypatch: pytest.MonkeyPatch,
+):
     calls: List[Tuple[int, int, float]] = []
 
-    def fake_matching(score_matrix: List[List[float]], threshold: float) -> List[Tuple[int, int]]:
+    def fake_matching(
+        score_matrix: List[List[float]], threshold: float
+    ) -> List[Tuple[int, int]]:
         row_count = len(score_matrix)
         col_count = len(score_matrix[0]) if score_matrix else 0
         calls.append((row_count, col_count, threshold))
@@ -374,16 +418,30 @@ def test_merger_uses_gale_shapley_for_table_and_column_matching(monkeypatch: pyt
         fake_matching,
     )
 
-    a = Schema(tables=[
-        Table(name="USER", pk="user_id",
-              columns=[Column(name="user_id", data_type="INTEGER"),
-                       Column(name="email", data_type="VARCHAR")])
-    ])
-    b = Schema(tables=[
-        Table(name="USER", pk="user_id",
-              columns=[Column(name="user_id", data_type="INTEGER"),
-                       Column(name="phone", data_type="VARCHAR")])
-    ])
+    a = Schema(
+        tables=[
+            Table(
+                name="USER",
+                pk="user_id",
+                columns=[
+                    Column(name="user_id", data_type="INTEGER"),
+                    Column(name="email", data_type="VARCHAR"),
+                ],
+            )
+        ]
+    )
+    b = Schema(
+        tables=[
+            Table(
+                name="USER",
+                pk="user_id",
+                columns=[
+                    Column(name="user_id", data_type="INTEGER"),
+                    Column(name="phone", data_type="VARCHAR"),
+                ],
+            )
+        ]
+    )
     merger = make_merger(table_thresh=0.5, col_thresh=0.7)
     merger.merge_two_segments(a, b)
 
@@ -395,25 +453,42 @@ def test_merger_uses_gale_shapley_for_table_and_column_matching(monkeypatch: pyt
 # FK remapping: relationships from B are remapped to A's table names
 # --------------------------------------------------------------------------- #
 
+
 def test_merge_remaps_fk_from_b_when_tables_matched():
     a = Schema(
         tables=[
-            Table(name="USER", pk="user_id",
-                  columns=[Column(name="user_id", data_type="INTEGER")]),
-            Table(name="ORDER", pk="order_id",
-                  columns=[Column(name="order_id", data_type="INTEGER"),
-                           Column(name="user_id", data_type="INTEGER")]),
+            Table(
+                name="USER",
+                pk="user_id",
+                columns=[Column(name="user_id", data_type="INTEGER")],
+            ),
+            Table(
+                name="ORDER",
+                pk="order_id",
+                columns=[
+                    Column(name="order_id", data_type="INTEGER"),
+                    Column(name="user_id", data_type="INTEGER"),
+                ],
+            ),
         ],
         relationships=[
-            ForeignKey(referencing_table="ORDER", referencing_column="user_id",
-                       referred_table="USER")
+            ForeignKey(
+                referencing_table="ORDER",
+                referencing_column="user_id",
+                referred_table="USER",
+            )
         ],
     )
     b = Schema(
         tables=[
-            Table(name="USER", pk="user_id",
-                  columns=[Column(name="user_id", data_type="INTEGER"),
-                           Column(name="email", data_type="VARCHAR")]),
+            Table(
+                name="USER",
+                pk="user_id",
+                columns=[
+                    Column(name="user_id", data_type="INTEGER"),
+                    Column(name="email", data_type="VARCHAR"),
+                ],
+            ),
         ],
     )
     merger = make_merger(table_thresh=0.5)
@@ -425,6 +500,7 @@ def test_merge_remaps_fk_from_b_when_tables_matched():
 # --------------------------------------------------------------------------- #
 # registry: merge_tables called for matched tables
 # --------------------------------------------------------------------------- #
+
 
 def test_merge_updates_registry_for_matched_tables():
     reg = TableFactRegistry()
@@ -442,6 +518,7 @@ def test_merge_updates_registry_for_matched_tables():
 # validate_connectivity
 # --------------------------------------------------------------------------- #
 
+
 def test_validate_connectivity_connected_schema_is_clean():
     merger = make_merger()
     schema = sample_data.simple_two_table_schema()
@@ -451,12 +528,20 @@ def test_validate_connectivity_connected_schema_is_clean():
 
 def test_validate_connectivity_isolated_table_flagged():
     merger = make_merger()
-    schema = Schema(tables=[
-        Table(name="ALPHA", pk="alpha_id",
-              columns=[Column(name="alpha_id", data_type="INTEGER")]),
-        Table(name="BETA", pk="beta_id",
-              columns=[Column(name="beta_id", data_type="INTEGER")]),
-    ])
+    schema = Schema(
+        tables=[
+            Table(
+                name="ALPHA",
+                pk="alpha_id",
+                columns=[Column(name="alpha_id", data_type="INTEGER")],
+            ),
+            Table(
+                name="BETA",
+                pk="beta_id",
+                columns=[Column(name="beta_id", data_type="INTEGER")],
+            ),
+        ]
+    )
     findings = merger.validate_connectivity(schema)
     assert len(findings) > 0
     combined = " ".join(findings)
