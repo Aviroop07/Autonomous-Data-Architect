@@ -26,9 +26,7 @@ class ActionTag(str, Enum):
 
 class BasePatch(BaseModel):
     # action: ActionTag
-    reason: str = Field(
-        description="TECHNICAL RATIONALE: Why this change is necessary."
-    )
+    reason: str = Field(description="Why this patch is needed.")
 
     def _validate(self, schema: "Schema") -> List[str]:
         errors = self._check_consistency()
@@ -78,8 +76,8 @@ class BasePatch(BaseModel):
 
 
 class ColumnPatch(BasePatch):
-    table_name: str = Field(description="The table target for the patch.")
-    column_name: str = Field(description="The column target for the patch.")
+    table_name: str = Field(description="Target table.")
+    column_name: str = Field(description="Target column.")
 
 
 class AddColumnPatch(ColumnPatch):
@@ -153,9 +151,7 @@ class DeleteColumnPatch(ColumnPatch):
 
 
 class SimplifiedUnique(BaseModel):
-    columns: List[str] = Field(
-        description="List of columns that form the unique constraint."
-    )
+    columns: List[str] = Field(description="Columns forming the unique constraint.")
 
 
 class SimplifiedColumn(BaseModel):
@@ -164,13 +160,11 @@ class SimplifiedColumn(BaseModel):
 
 
 class SimplifiedTable(BaseModel):
-    name: str = Field(description="Table name in UPPER_SNAKE_CASE.")
-    columns: List[SimplifiedColumn] = Field(
-        description="List of column definitions (name and type)."
-    )
-    pk: str = Field(description="Primary key column name (usually table_name_id).")
+    name: str = Field(description="UPPER_SNAKE_CASE table name.")
+    columns: List[SimplifiedColumn] = Field(description="Column definitions.")
+    pk: str = Field(description="Primary key column name.")
     unique: Optional[List[SimplifiedUnique]] = Field(
-        default=None, description="Optional list of composite unique keys."
+        default=None, description="Composite unique constraints."
     )
 
 
@@ -179,7 +173,7 @@ class RelationshipDefinition(BaseModel):
         default=None, description="The child/source table."
     )
     referencing_column: Optional[str] = Field(
-        default=None, description="The foreign key column in the child table."
+        default=None, description="Foreign key column in the child table."
     )
     referred_table: Optional[str] = Field(
         default=None, description="The parent/referred table."
@@ -205,6 +199,10 @@ class RelationshipDefinition(BaseModel):
                 data["referencing_table"] = data.pop("child_table")
             if "from_table" in data and "referencing_table" not in data:
                 data["referencing_table"] = data.pop("from_table")
+            if "foreign_key_table" in data and "referencing_table" not in data:
+                data["referencing_table"] = data.pop("foreign_key_table")
+            if "fk_table" in data and "referencing_table" not in data:
+                data["referencing_table"] = data.pop("fk_table")
 
             # Normalise column names
             if "referenced_column" in data and "referencing_column" not in data:
@@ -215,6 +213,14 @@ class RelationshipDefinition(BaseModel):
                 data["referencing_column"] = data.pop("child_column")
             if "from_column" in data and "referencing_column" not in data:
                 data["referencing_column"] = data.pop("from_column")
+            if "foreign_key_column" in data and "referencing_column" not in data:
+                data["referencing_column"] = data.pop("foreign_key_column")
+            if "fk_column" in data and "referencing_column" not in data:
+                data["referencing_column"] = data.pop("fk_column")
+            if "fk_name" in data and "referencing_column" not in data:
+                data["referencing_column"] = data.pop("fk_name")
+            if "table_name" in data and "referencing_table" not in data:
+                data["referencing_table"] = data.pop("table_name")
         return data
 
 
@@ -356,9 +362,7 @@ class UpdatePKPatch(BasePatch):
 
 class UpdateColumnTypePatch(ColumnPatch):
     action: Literal[ActionTag.UPDATE_COLUMN_TYPE] = ActionTag.UPDATE_COLUMN_TYPE
-    new_type: str = Field(
-        description="The target data type for the column (e.g. INTEGER, FLOAT)."
-    )
+    new_type: str = Field(description="New data type (e.g. INTEGER, FLOAT).")
 
     def _validate(self, schema: "Schema") -> List[str]:
         errors = self._check_consistency()
@@ -381,7 +385,7 @@ class UpsertUniquePatch(BasePatch):
     action: Literal[ActionTag.UPSERT_UNIQUE] = ActionTag.UPSERT_UNIQUE
     table_name: str
     unique_definition: SimplifiedUnique = Field(
-        description="Strict composite unique definition with columns list."
+        description="Unique constraint definition."
     )
 
     def _validate(self, schema: "Schema") -> List[str]:
@@ -439,7 +443,7 @@ class DeleteUniquePatch(BasePatch):
 
 class DeleteTablePatch(BasePatch):
     action: Literal[ActionTag.DELETE_TABLE] = ActionTag.DELETE_TABLE
-    table_name: str = Field(description="The table name to delete.")
+    table_name: str = Field(description="Table to delete.")
 
     def _validate(self, schema: "Schema") -> List[str]:
         errors = self._check_consistency()
@@ -455,8 +459,8 @@ class DeleteTablePatch(BasePatch):
 
 class RenameTablePatch(BasePatch):
     action: Literal[ActionTag.RENAME_TABLE] = ActionTag.RENAME_TABLE
-    table_name: str = Field(description="The current table name.")
-    new_name: str = Field(description="The target table name.")
+    table_name: str = Field(description="Current table name.")
+    new_name: str = Field(description="New table name.")
 
     def _validate(self, schema: "Schema") -> List[str]:
         errors = self._check_consistency()
@@ -518,12 +522,26 @@ def _normalize_action_tag(raw: str) -> str:
         return "UPSERT_UNIQUE"
     if "CONSTRAINT" in s:
         return "UPSERT_UNIQUE"
-    if s.startswith("ADD_COL"):
+    if (
+        s.startswith("ADD_COL")
+        or s.startswith("INSERT_COL")
+        or s.startswith("CREATE_COL")
+    ):
         return "ADD_COLUMN"
     if s.startswith("RENAME_COL"):
         return "RENAME_COLUMN"
-    if s.startswith("DELETE_COL"):
+    if (
+        s.startswith("DELETE_COL")
+        or s.startswith("REMOVE_COL")
+        or s.startswith("DROP_COL")
+    ):
         return "DELETE_COLUMN"
+    if s.startswith("CREATE_TABLE") or s.startswith("INSERT_TABLE"):
+        return "ADD_TABLE"
+    if s.startswith("ADD_TABLE") or s.startswith("CREATE_TABLE"):
+        return "ADD_TABLE"
+    if s.startswith("REMOVE_TABLE") or s.startswith("DROP_TABLE"):
+        return "DELETE_TABLE"
 
     return s
 
@@ -532,14 +550,14 @@ _KNOWN_TAGS = {tag.value for tag in ActionTag}
 
 
 class CritiqueReport(LoopOutputModel):
-    agent_name: str = Field(description="The AI name or persona assessing the schema.")
+    agent_name: str = Field(description="Agent name.")
     observations: Optional[str] = Field(
         default=None,
-        description="General strategic observations regarding the current schema architecture.",
+        description="High-level schema observations.",
     )
     patches: List[SchemaPatch] = Field(
         default_factory=list,
-        description="List of proposed atomic modifications (patches) to the schema.",
+        description="Schema patches to apply.",
     )
 
     def get_errors(self) -> list[str]:
@@ -566,6 +584,7 @@ class CritiqueReport(LoopOutputModel):
             and "patches" in data
             and isinstance(data["patches"], list)
         ):
+
             def _pop_key(patch: dict, keys: list[str]) -> Optional[Any]:
                 for key in keys:
                     if key in patch:
@@ -608,13 +627,29 @@ class CritiqueReport(LoopOutputModel):
                             "UPDATE_PK",
                         }:
                             table_value = _pop_key(
-                                patch, ["table", "tableName", "table_name"]
+                                patch,
+                                [
+                                    "table",
+                                    "tableName",
+                                    "table_name",
+                                    "target_table",
+                                    "targetTable",
+                                ],
                             )
                             if table_value and "table_name" not in patch:
                                 patch["table_name"] = table_value
 
                             column_value = _pop_key(
-                                patch, ["column", "columnName", "column_name", "col"]
+                                patch,
+                                [
+                                    "column",
+                                    "columnName",
+                                    "column_name",
+                                    "col",
+                                    "old_column_name",
+                                    "oldColumnName",
+                                    "source_column_name",
+                                ],
                             )
                             if column_value and "column_name" not in patch:
                                 patch["column_name"] = column_value
@@ -684,6 +719,54 @@ class CritiqueReport(LoopOutputModel):
                                 if isinstance(columns_value, str):
                                     patch["column_name"] = columns_value
 
+                        if normalised == "ADD_TABLE":
+                            if "table_definition" not in patch:
+                                defn: dict = {}
+                                for key in ("table_name", "tableName", "name"):
+                                    if key in patch:
+                                        defn["name"] = patch.pop(key)
+                                        break
+                                raw_cols = patch.pop("columns", None)
+                                if isinstance(raw_cols, list):
+                                    norm_cols = []
+                                    for col in raw_cols:
+                                        if not isinstance(col, dict):
+                                            continue
+                                        cname = (
+                                            col.get("name")
+                                            or col.get("column_name")
+                                            or col.get("columnName")
+                                        )
+                                        ctype = col.get("data_type") or col.get(
+                                            "type", "VARCHAR"
+                                        )
+                                        if cname:
+                                            norm_cols.append(
+                                                {"name": cname, "data_type": ctype}
+                                            )
+                                    if norm_cols:
+                                        defn["columns"] = norm_cols
+                                for key in (
+                                    "pk",
+                                    "primary_key",
+                                    "primaryKey",
+                                    "primary_keys",
+                                ):
+                                    if key in patch:
+                                        pk_val = patch.pop(key)
+                                        if isinstance(pk_val, list):
+                                            pk_val = pk_val[0] if pk_val else ""
+                                        defn["pk"] = pk_val
+                                        break
+                                if "pk" not in defn and defn.get("columns"):
+                                    defn["pk"] = defn["columns"][0]["name"]
+                                if (
+                                    defn.get("name")
+                                    and defn.get("columns")
+                                    and defn.get("pk")
+                                ):
+                                    patch["table_definition"] = defn
+
                         if normalised in ("ADD_RELATIONSHIP", "DELETE_RELATIONSHIP"):
                             if "fk_definition" not in patch:
                                 potential_defn = {}
@@ -692,6 +775,23 @@ class CritiqueReport(LoopOutputModel):
                                     "referencing_column",
                                     "referred_table",
                                     "referenced_table",
+                                    "foreign_key_table",
+                                    "foreign_key_column",
+                                    "parent_table",
+                                    "parent_column",
+                                    "fk_table",
+                                    "fk_column",
+                                    # Flat-style aliases Gemini produces
+                                    "table_name",
+                                    "fk_name",
+                                    "target_table",
+                                    "source_table",
+                                    "from_table",
+                                    "to_table",
+                                    "source_column",
+                                    "from_column",
+                                    "child_table",
+                                    "child_column",
                                 ]:
                                     if f_key in patch:
                                         potential_defn[f_key] = patch.pop(f_key)

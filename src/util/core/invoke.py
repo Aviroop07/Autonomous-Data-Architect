@@ -1,7 +1,60 @@
+import asyncio
+import re
 from typing import Type, TypeVar, Tuple, Optional, Union
 from pydantic import BaseModel
-from langchain_core.messages import HumanMessage, BaseMessage
+from langchain_core.messages import HumanMessage, BaseMessage  # type: ignore[import]
+import openai  # type: ignore[import]
 from src.util.observability.llm_trace import get_active_trace_collector
+
+_RETRY_DELAY_RE = re.compile(r"retry in\s+([\d.]+)s", re.IGNORECASE)
+_DAILY_QUOTA_RE = re.compile(r"PerDay", re.IGNORECASE)
+_MAX_RATE_LIMIT_RETRIES = 6
+
+
+async def _ainvoke_with_backoff(agent, input_dict: dict) -> dict:
+    """Wrap agent.ainvoke() with retry-with-backoff for transient API errors.
+
+    Retries on:
+      - 429 RateLimitError (per-minute throttling)
+      - 503 InternalServerError (model overloaded / temporarily unavailable)
+
+    Daily-quota 429s (quotaId contains 'PerDay') are re-raised immediately
+    since retrying won't help until the daily window resets.
+    """
+    delay = 15.0
+    for attempt in range(_MAX_RATE_LIMIT_RETRIES):
+        try:
+            return await agent.ainvoke(input_dict)
+        except openai.RateLimitError as exc:
+            err_str = str(exc)
+            if _DAILY_QUOTA_RE.search(err_str):
+                raise RuntimeError(
+                    "Daily API quota exhausted. "
+                    "Switch to a different model (e.g. gemini-2.5-flash-lite) "
+                    "or wait for the quota window to reset.\n"
+                    f"Original error: {exc}"
+                ) from exc
+            if attempt == _MAX_RATE_LIMIT_RETRIES - 1:
+                raise
+            m = _RETRY_DELAY_RE.search(err_str)
+            wait = float(m.group(1)) + 3.0 if m else delay
+            print(
+                f"[invoke] Rate limited (429). Retrying in {wait:.0f}s "
+                f"(attempt {attempt + 1}/{_MAX_RATE_LIMIT_RETRIES})..."
+            )
+            await asyncio.sleep(wait)
+            delay = min(delay * 2, 120.0)
+        except openai.InternalServerError:
+            if attempt == _MAX_RATE_LIMIT_RETRIES - 1:
+                raise
+            print(
+                f"[invoke] Server unavailable (503). Retrying in {delay:.0f}s "
+                f"(attempt {attempt + 1}/{_MAX_RATE_LIMIT_RETRIES})..."
+            )
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 120.0)
+    raise RuntimeError("_ainvoke_with_backoff: retry loop exhausted without returning")
+
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -27,7 +80,7 @@ async def get_response(
         query = query.encode("utf-8", errors="ignore").decode("utf-8")
 
     input_messages = [HumanMessage(content=query)]
-    response = await agent.ainvoke({"messages": input_messages})
+    response = await _ainvoke_with_backoff(agent, {"messages": input_messages})
 
     # Extract structured response or fallback to last message content
     if output_structure:
