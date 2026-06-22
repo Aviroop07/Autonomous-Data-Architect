@@ -36,3 +36,4 @@ src/backend/
 src/frontend/
 src/frontend_plan.md
 experiments/
+LLM4DBdesign/
