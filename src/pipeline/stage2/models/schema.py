@@ -448,6 +448,79 @@ class Schema(LoopOutputModel):
                         if rel.referred_table == old_table_name:
                             rel.referred_table = new_table_name
 
+        # [HARDENING] Strip single-column UNIQUE constraints on FK columns of junction
+        # tables. A junction table has 2+ FK columns; individually unique FK columns
+        # forbid value reuse across rows, which is always wrong for bridge entities.
+        if self.relationships:
+            fk_cols_by_table: Dict[str, Set[str]] = {}
+            for rel in self.relationships:
+                fk_cols_by_table.setdefault(rel.referencing_table, set()).add(
+                    rel.referencing_column
+                )
+            for table in self.tables:
+                fk_cols = fk_cols_by_table.get(table.name, set())
+                if len(fk_cols) < 2 or not table.unique:
+                    continue
+                cleaned = [
+                    uq
+                    for uq in table.unique
+                    if not (len(uq.columns) == 1 and uq.columns[0] in fk_cols)
+                ]
+                table.unique = cleaned if cleaned else None
+
+    def wire_orphan_fk_columns(self) -> None:
+        """
+        Declares missing FK relationships for columns that follow the naming convention
+        {referenced_table_lower_snake}_id where the referenced table exists in the schema
+        but no FK has been declared for that column.
+
+        This repairs the gap where architects include FK columns (e.g. department_id) but
+        omit the explicit FK declaration. Only fires when the column already exists, the
+        target table exists, the column is not the table's own PK, and no FK is already
+        declared for this (table, column) pair.
+        """
+        if not self.tables:
+            return
+
+        table_names = {t.name for t in self.tables}
+        existing_fk_pairs: set[tuple[str, str]] = {
+            (r.referencing_table, r.referencing_column)
+            for r in (self.relationships or [])
+        }
+
+        new_fks: list[ForeignKey] = []
+        for table in self.tables:
+            for col in table.columns:
+                if col.name == table.pk:
+                    continue
+                if not col.name.endswith("_id"):
+                    continue
+                # e.g. department_id -> DEPARTMENT, faculty_member_id -> FACULTY_MEMBER
+                candidate = col.name[:-3].upper()
+                if candidate not in table_names:
+                    continue
+                if candidate == table.name:
+                    continue
+                if (table.name, col.name) in existing_fk_pairs:
+                    continue
+                new_fks.append(
+                    ForeignKey(
+                        referencing_table=table.name,
+                        referencing_column=col.name,
+                        referred_table=candidate,
+                    )
+                )
+                existing_fk_pairs.add((table.name, col.name))
+
+        if new_fks:
+            if self.relationships is None:
+                self.relationships = []
+            for fk in new_fks:
+                print(
+                    f"  [Wire] Auto-declared FK: {fk.referencing_table}.{fk.referencing_column} -> {fk.referred_table}"
+                )
+            self.relationships.extend(new_fks)
+
     def align_fk_column_types(self) -> None:
         """
         Align referencing column types to match referred table PK types.
