@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import importlib
 import json
 import sys
@@ -222,7 +223,7 @@ async def run_pipeline(args: argparse.Namespace) -> None:
     )
 
     nl = resolve_nl(args)
-    model = args.model or "gpt-4o"
+    model = args.model or None
     run_id = _make_run_id(args)
     out_dir = _prepare_output_dir(args, run_id)
 
@@ -556,7 +557,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="0-based line index (for rschema)",
     )
     p.add_argument(
-        "--model", type=str, default="gpt-4o", help="LLM model name (default: gpt-4o)"
+        "--model", type=str, default=None, help="LLM model name (default: from env)"
+    )
+    p.add_argument(
+        "--provider",
+        choices=["openai", "gemini"],
+        default=None,
+        help="LLM provider (overrides PROVIDER env var)",
     )
     p.add_argument(
         "--output-dir",
@@ -613,6 +620,9 @@ def main() -> None:
 
     parser = _build_parser()
     args = parser.parse_args()
+
+    if args.provider:
+        os.environ["PROVIDER"] = args.provider
 
     if not args.nl and not args.nl_file and not args.dataset and not args.from_stage2:
         parser.error(

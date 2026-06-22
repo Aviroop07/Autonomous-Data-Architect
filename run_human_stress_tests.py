@@ -10,6 +10,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -256,7 +257,7 @@ CASES = [
 async def run_case(
     label: str,
     nl: str,
-    model: str = "gpt-4o",
+    model: Optional[str] = None,
 ) -> dict:
     from src.orchestration.stage1.entry import orchestrate as stage1
     from src.orchestration.stage2.entry import orchestrate as stage2

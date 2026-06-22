@@ -141,7 +141,9 @@ async def main() -> None:
     from src.orchestration.stage2.entry import orchestrate as stage2
     from src.util.config.ablation import AblationConfig
 
-    ablation = AblationConfig(enable_enrichment=True, enable_sharding=True)
+    ablation = AblationConfig(
+        enable_enrichment=True, enable_sharding=True, enable_logical_constraints=True
+    )
     out_dir = PROJECT_ROOT / "output" / "runs" / "large_test"
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -151,7 +153,7 @@ async def main() -> None:
 
     s1_output, s1_tokens = await stage1(
         nl_description=NL,
-        model="gpt-4o",
+        model=None,
         ablation_config=ablation,
     )
 
@@ -166,7 +168,7 @@ async def main() -> None:
     )
 
     print("\n" + "=" * 60)
-    print(f"  Stage 1 Summary")
+    print("  Stage 1 Summary")
     print("=" * 60)
     print(f"  Facts extracted : {len(facts)}")
     print(f"  Domain          : {s1_output.domain}")
@@ -177,7 +179,7 @@ async def main() -> None:
     for f in facts:
         for tag in f.tags or []:
             tag_counts[tag] = tag_counts.get(tag, 0) + 1
-    print(f"  Tag distribution:")
+    print("  Tag distribution:")
     for tag, cnt in sorted(tag_counts.items(), key=lambda x: -x[1])[:10]:
         print(f"    {tag:<30} {cnt}")
     print("=" * 60)
@@ -189,7 +191,7 @@ async def main() -> None:
         facts=facts,
         domain=s1_output.domain,
         analytical_goal=s1_output.analytical_goal,
-        model="gpt-4o",
+        model=None,
         ablation_config=ablation,
     )
 
@@ -201,25 +203,27 @@ async def main() -> None:
         json.dumps(s2_output.model_dump(), indent=2, default=str), encoding="utf-8"
     )
 
-    validation_errors = schema._validate()
+    validation_errors = schema._validate()  # type: ignore[union-attr]
 
     print("\n" + "=" * 60)
-    print(f"  Stage 2 Summary")
+    print("  Stage 2 Summary")
     print("=" * 60)
-    print(f"  Tables          : {len(schema.tables)}")
-    print(f"  Relationships   : {len(schema.relationships or [])}")
+    print(f"  Tables          : {len(schema.tables)}")  # type: ignore[union-attr]
+    print(f"  Relationships   : {len(schema.relationships or [])}")  # type: ignore[union-attr]
     print(f"  Validation errs : {len(validation_errors)}")
     print(f"  Tokens          : {s2_tokens}")
     print(f"  Time            : {s2_elapsed:.1f}s")
-    print(f"\n  Tables:")
-    for t in sorted(schema.tables, key=lambda x: x.name):
+    print("\n  Tables:")
+    for t in sorted(schema.tables, key=lambda x: x.name):  # type: ignore[union-attr]
         col_count = len(t.columns)
         fk_count = sum(
-            1 for r in (schema.relationships or []) if r.referencing_table == t.name
+            1
+            for r in (schema.relationships or [])  # type: ignore[union-attr]
+            if r.referencing_table == t.name
         )
         print(f"    {t.name:<40} cols={col_count:<4} fks={fk_count}")
     if validation_errors:
-        print(f"\n  Validation errors (first 20):")
+        print("\n  Validation errors (first 20):")
         for err in validation_errors[:20]:
             print(f"    - {err}")
     if s2_output.cycles:
