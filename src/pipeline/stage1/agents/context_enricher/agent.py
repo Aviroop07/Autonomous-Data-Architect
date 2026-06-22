@@ -1,9 +1,10 @@
+import re
 from pathlib import Path
-from typing import Any, Callable, List, Optional
+from typing import List, Optional
 
 from src.util.core.agent import AgentType, get_agent_
 from src.util.core.invoke import get_response
-from src.util.config.web_search import get_web_search_tool
+from src.util.core.search_tool import prefetch_and_format_searches
 from src.util.orchestration.loop_types import (
     HistoryEntry,
     LoopAgent,
@@ -15,34 +16,57 @@ from src.pipeline.stage1.models.raw_fact import RawFact
 from src.pipeline.stage1.models.context_audit import ContextAuditReport
 
 PROMPT_PATH = Path(__file__).parent / "prompt.txt"
-AgentFactory = Callable[..., AgentType]
+
+_ACRONYM_RE = re.compile(r"\b[A-Z]{2,5}\b")
 
 
-def get_context_enricher_tools() -> List[dict[str, Any]]:
-    return [get_web_search_tool()]
+def _derive_search_queries(
+    facts: List[RawFact],
+    suggestions: Optional[List[str]],
+    max_queries: int = 5,
+) -> List[str]:
+    """Build search queries from verifier suggestions + acronyms extracted from facts."""
+    queries: List[str] = list(suggestions or [])
+    if len(queries) >= max_queries:
+        return queries[:max_queries]
+
+    seen = {q.lower() for q in queries}
+    for fact in facts:
+        for match in _ACRONYM_RE.finditer(fact.fact):
+            term = match.group()
+            if term.lower() not in seen:
+                queries.append(f"{term} definition")
+                seen.add(term.lower())
+            if len(queries) >= max_queries:
+                break
+        if len(queries) >= max_queries:
+            break
+
+    return queries[:max_queries]
 
 
 def build_context_enricher_agent(
     system_prompt: str,
     model: Optional[str] = None,
-    agent_factory: AgentFactory = get_agent_,
 ) -> AgentType:
-    return agent_factory(
+    return get_agent_(
         system_prompt=system_prompt,
         output_structure=FactList,
-        tools=get_context_enricher_tools(),
         model=model,
         name="domain_specialist",
-        use_responses_api=True,
     )
 
 
 class ContextEnricherLoopAgent(LoopAgent):
     """LoopAgent for the context enricher node.
 
-    Accumulates accepted external facts across rounds. After each auditor
-    response, merges newly accepted facts into accumulated_accepted before
-    building the next enrichment query.
+    Runs a two-phase approach per iteration:
+      1. Pre-search: derive queries from verifier suggestions + acronyms, run them
+         concurrently via DuckDuckGo (cached), inject results into context.
+      2. Generation: StructuredAgent produces external facts from facts + search context.
+
+    This avoids react agent tool-use loops, eliminating Gemini thought_signature
+    compatibility issues while giving the model richer, pre-fetched context.
     """
 
     def __init__(
@@ -66,6 +90,14 @@ class ContextEnricherLoopAgent(LoopAgent):
         return self._agent
 
     async def invoke(self, query: str) -> tuple[LoopOutputModel, int]:
+        # Phase 1: run searches and inject results into the query context.
+        queries = _derive_search_queries(self._facts, self._search_suggestions)
+        if queries:
+            search_context = await prefetch_and_format_searches(queries, max_results=5)
+            if search_context:
+                query = query + "\n\n" + search_context
+
+        # Phase 2: generate external facts with the enriched context.
         parsed, tokens = await get_response(
             agent=self._get_agent(),
             output_structure=FactList,
@@ -110,14 +142,6 @@ class ContextEnricherLoopAgent(LoopAgent):
         if audit_feedback:
             query += (
                 f"\n\n## CONTEXT AUDIT FEEDBACK FROM PREVIOUS ATTEMPT\n{audit_feedback}"
-            )
-
-        if self._search_suggestions:
-            suggestions_text = "\n".join(f"- {s}" for s in self._search_suggestions)
-            query += (
-                f"\n\n## SUGGESTED SEARCHES\nThe verifier or underspecification detector "
-                f"recommends these searches:\n{suggestions_text}\n"
-                "Prioritize these searches when using the web search tool."
             )
 
         return query

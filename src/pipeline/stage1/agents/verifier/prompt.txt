@@ -84,9 +84,7 @@ Be precise about what deserves [MEDIUM] vs [LOW]:
 - A skeleton fact that is semantically wrong (wrong entity gets the attribute)
 
 **[LOW] for everything else:**
-- Missing implicit context (e.g., "how premium membership is determined" when the source says "premium members get X" but doesn't say how one becomes premium)
-- Inference about what the source "probably means"
-- A missing connecting detail that could reasonably be inferred
-- Uncertainty about a vague term
+- Missing implicit context that was never stated in the source
+- An inference about what the source "probably means"
 - Minor omissions that don't affect the core technical meaning
 - Self-contradictions that exist in the original NL text (flag as [LOW] ambiguity, not [MEDIUM] error)

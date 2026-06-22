@@ -26,7 +26,11 @@ from src.util.observability.llm_trace import (
     activate_trace_collector,
     reset_trace_collector,
 )
+from src.util.core.search_tool import clear_search_cache
 from src.util.orchestration.loop import AgentLoop
+
+
+NL_MAX_CHARS = 500
 
 
 async def orchestrate(
@@ -36,6 +40,11 @@ async def orchestrate(
     ablation_config: Optional[AblationConfig] = None,
     trace_collector: Optional[LLMTraceCollector] = None,
 ) -> Tuple[Output, int]:
+    if len(nl_description) > NL_MAX_CHARS:
+        raise ValueError(
+            f"NL description is {len(nl_description)} characters "
+            f"(limit: {NL_MAX_CHARS}). Trim the input before running."
+        )
     trace_token = (
         activate_trace_collector(trace_collector)
         if trace_collector is not None
@@ -57,6 +66,7 @@ async def _orchestrate_impl(
     model: Optional[str] = None,
     ablation_config: Optional[AblationConfig] = None,
 ) -> Tuple[Output, int]:
+    clear_search_cache()
     loop_config = make_stage1_loop_config(nl_description, model=model)
     result = await AgentLoop(loop_config).run(nl_description)
 

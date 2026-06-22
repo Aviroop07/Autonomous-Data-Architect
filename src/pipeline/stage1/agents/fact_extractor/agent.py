@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import List, Optional
 
-from src.util.core.agent import AgentType, get_model
+from src.util.core.agent import AgentType, _detect_provider, get_agent_
 from src.util.core.invoke import get_response
 from src.util.config.web_search import get_web_search_tool
 from src.util.orchestration.loop_types import (
@@ -15,25 +15,25 @@ from src.pipeline.stage1.middleware.error_formatter import format_errors_for_sta
 from src.pipeline.stage1.middleware.validation import deterministic_validator
 from src.pipeline.stage1.models.rephrased_nl import RephrasedOutput
 from src.pipeline.stage1.models.integrity_report import IntegrityReport
-from langchain.agents import create_agent
 
 PROMPT_PATH = Path(__file__).parent / "prompt.txt"
-
-
-def get_extractor_tools() -> list[dict]:
-    return [get_web_search_tool()]
 
 
 def build_extractor_agent(
     system_prompt: str,
     model: Optional[str] = None,
 ) -> AgentType:
-    llm = get_model(model, use_responses_api=True)
-    return create_agent(
-        model=llm,
-        tools=get_extractor_tools(),
+    # Gemini thinking models inject thought_signature fields into tool call
+    # responses that langchain_openai drops on subsequent turns, causing a 400.
+    # Skip tools for Gemini; the model relies on its training knowledge instead.
+    provider, _, _, _ = _detect_provider()
+    tools = [get_web_search_tool()] if provider == "openai" else None
+    return get_agent_(
         system_prompt=system_prompt,
-        response_format=RephrasedOutput,
+        tools=tools,
+        output_structure=RephrasedOutput,
+        model=model,
+        use_responses_api=(provider == "openai"),
         name="atomic_fact_extractor",
     )
 
