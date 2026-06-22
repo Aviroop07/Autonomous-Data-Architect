@@ -7,11 +7,23 @@ from src.pipeline.stage2.middleware.schema_merging.similarity import (
 )
 
 from src.pipeline.stage2.models.registry import TableFactRegistry
+from src.pipeline.stage2.models.merge_decision import (
+    MergeDecisionLog,
+    TableMatchDecision,
+    UnmatchedTable,
+)
 
 
 class _JunctionEntry(NamedTuple):
     table: str
     entities: Set[str]
+
+
+class _TableScoreBreakdown(NamedTuple):
+    total: float
+    name_score: float  # pre-modifier-penalty
+    attr_score: float
+    had_modifier_penalty: bool
 
 
 class SchemaMerger:
@@ -23,18 +35,29 @@ class SchemaMerger:
         self.table_thresh = table_thresh
 
     def merge_segments(
-        self, segments: List[Schema], registry: Optional[TableFactRegistry] = None
-    ) -> Schema:
+        self,
+        segments: List[Schema],
+        registry: Optional[TableFactRegistry] = None,
+        strict: bool = False,
+    ) -> Tuple[Schema, MergeDecisionLog]:
         """
         Merges multiple schema segments sequentially.
+        Returns the merged schema and a log of all merge decisions made.
+
+        strict=True: match tables by identical name only (for the final post-audit re-merge,
+        where canonical names are already stable and fuzzy matching risks collapsing distinct
+        entities with similar attribute sets).
         """
+        log = MergeDecisionLog()
+
         if not segments:
-            return Schema(tables=[])
+            return Schema(tables=[]), log
 
         if len(segments) == 1:
             res = segments[0].model_copy(deep=True)
             res.normalize(registry=registry)
-            return res
+            res.wire_orphan_fk_columns()
+            return res, log
 
         result = segments[0].model_copy(deep=True)
         result.normalize(registry=registry)
@@ -42,26 +65,35 @@ class SchemaMerger:
         for i in range(1, len(segments)):
             next_segment = segments[i].model_copy(deep=True)
             next_segment.normalize(registry=registry)
-            result = self.merge_two_segments(result, next_segment, registry)
+            result = self.merge_two_segments(
+                result, next_segment, registry, log=log, strict=strict
+            )
 
         # Post-Merge Enhancements
-        self._infer_cross_shard_fks(result)
+        # NOTE: _infer_cross_shard_fks removed — MergeReviewAgent + auditors handle cross-shard FK inference
         self._consolidate_junction_relationships(result)
         self._repair_relationship_table_names(result)
         result.align_fk_column_types()
+        result.wire_orphan_fk_columns()
 
-        return result
+        return result, log
 
     def merge_two_segments(
-        self, A: Schema, B: Schema, registry: Optional[TableFactRegistry] = None
+        self,
+        A: Schema,
+        B: Schema,
+        registry: Optional[TableFactRegistry] = None,
+        log: Optional[MergeDecisionLog] = None,
+        strict: bool = False,
     ) -> Schema:
         """
         Merges two schema segments A and B. Updates A and returns it.
+
+        strict=True: skip GS scoring and match tables by identical name only.
         """
 
         # A and B are assumed to be normalized already
 
-        # 1. Calculate table score matrix
         table_list_a = A.tables
         table_list_b = B.tables
 
@@ -70,16 +102,66 @@ class SchemaMerger:
         if not table_list_b:
             return A
 
-        score_matrix = []
-        for t1 in table_list_a:
-            row = []
-            for t2 in table_list_b:
-                score = self._calculate_table_score(t1, t2)
-                row.append(score)
-            score_matrix.append(row)
+        score_matrix: List[List[float]] = []
+        score_details: Dict[Tuple[int, int], _TableScoreBreakdown] = {}
 
-        # 2. Match tables
-        table_matches = gale_shapley_matching(score_matrix, self.table_thresh)
+        if strict:
+            # Name-exact matching: only tables with identical names (case-insensitive) merge.
+            # This is the correct semantic for the final post-audit re-merge, where canonical
+            # table names are stable and fuzzy scoring risks collapsing distinct entities.
+            name_to_idx_a = {t.name.upper(): i for i, t in enumerate(table_list_a)}
+            table_matches: List[Tuple[int, int]] = []
+            for j, t2 in enumerate(table_list_b):
+                if t2.name.upper() in name_to_idx_a:
+                    idx_a = name_to_idx_a[t2.name.upper()]
+                    table_matches.append((idx_a, j))
+                    score_details[(idx_a, j)] = _TableScoreBreakdown(
+                        total=1.0,
+                        name_score=1.0,
+                        attr_score=0.0,
+                        had_modifier_penalty=False,
+                    )
+            print(f"  [Strict] Name-exact matching: {len(table_matches)} match(es)")
+            for idx_a, idx_b in table_matches:
+                print(
+                    f"    MATCH  {table_list_a[idx_a].name:<32} <- {table_list_b[idx_b].name:<32}  (exact name)"
+                )
+        else:
+            # 1. Calculate table score matrix
+            for i, t1 in enumerate(table_list_a):
+                row = []
+                for j, t2 in enumerate(table_list_b):
+                    breakdown = self._calculate_table_score(t1, t2)
+                    row.append(breakdown.total)
+                    score_details[(i, j)] = breakdown
+                score_matrix.append(row)
+
+            # 2. Match tables via Gale-Shapley
+            print(
+                f"  [GS] Score matrix ({len(table_list_a)} A x {len(table_list_b)} B), thresh={self.table_thresh}:"
+            )
+            for i, t1 in enumerate(table_list_a):
+                for j, t2 in enumerate(table_list_b):
+                    bd = score_details[(i, j)]
+                    print(
+                        f"    {t1.name:<32} vs {t2.name:<32} total={bd.total:.3f}  name={bd.name_score:.3f}  attr={bd.attr_score:.3f}"
+                    )
+            table_matches = gale_shapley_matching(score_matrix, self.table_thresh)
+            print(f"  [GS] Matched {len(table_matches)} pair(s):")
+            for idx_a, idx_b in table_matches:
+                bd = score_details[(idx_a, idx_b)]
+                print(
+                    f"    MATCH  {table_list_a[idx_a].name:<32} <- {table_list_b[idx_b].name:<32}  score={bd.total:.3f}"
+                )
+            unmatched_b_names = [
+                table_list_b[j].name
+                for j in range(len(table_list_b))
+                if j not in {m[1] for m in table_matches}
+            ]
+            if unmatched_b_names:
+                print(
+                    f"  [GS] Unmatched B-tables (will be added or collision-merged): {unmatched_b_names}"
+                )
 
         matched_indices_b = {m[1] for m in table_matches}
 
@@ -140,6 +222,7 @@ class SchemaMerger:
             }
 
         # Pass 2: Validate FK consistency for matched columns
+        fk_divergent_pairs: Set[Tuple[str, str]] = set()
         for (name_a, name_b), col_matches in all_col_matches.items():
             t1 = next(t for t in table_list_a if t.name == name_a)
             t2 = next(t for t in table_list_b if t.name == name_b)
@@ -215,6 +298,7 @@ class SchemaMerger:
                                 print(
                                     f"    [Merger Warning] FK Target Divergence: {t1.name}.{c1.name} and {t2.name}.{c2.name} point to un-matched PKs ({target_col_a} vs {target_col_b}). Normalizing to {target_col_a}."
                                 )
+                                fk_divergent_pairs.add((name_a, name_b))
                                 # We don't raise error, the later merge will unify the names
                             else:
                                 print(
@@ -228,26 +312,90 @@ class SchemaMerger:
         for idx_a, idx_b in table_matches:
             t1 = table_list_a[idx_a]
             t2 = table_list_b[idx_b]
+            # Capture fact IDs before the registry merge combines them
+            pre_fact_ids_a = (
+                list(registry.get_facts_for_tables([t1.name])) if registry else []
+            )
+            pre_fact_ids_b = (
+                list(registry.get_facts_for_tables([t2.name])) if registry else []
+            )
             if registry:
                 registry.merge_tables(t2.name, t1.name)
             col_matches = all_col_matches[(t1.name, t2.name)]
             self._merge_tables(A, t1, t2, col_matches, registry)
+            if log is not None:
+                breakdown = score_details[(idx_a, idx_b)]
+                log.matched_pairs.append(
+                    TableMatchDecision(
+                        shard_a_table=t1.name,
+                        shard_b_table=t2.name,
+                        match_score=breakdown.total,
+                        name_score=breakdown.name_score,
+                        attr_score=breakdown.attr_score,
+                        matched_columns=[t1.columns[ia].name for ia, _ in col_matches],
+                        shard_a_fact_ids=pre_fact_ids_a,
+                        shard_b_fact_ids=pre_fact_ids_b,
+                        had_pk_divergence=bool(t1.pk)
+                        and bool(t2.pk)
+                        and t1.pk != t2.pk,
+                        had_fk_target_divergence=(t1.name, t2.name)
+                        in fk_divergent_pairs,
+                    )
+                )
+                if breakdown.had_modifier_penalty:
+                    log.modifier_penalty_applied.append(f"{t1.name}::{t2.name}")
 
         # 4. Add unmatched tables from B to A OR force merge on name collision
+        # Capture before the loop: A.tables grows as unmatched B-tables are appended,
+        # but score_matrix was built on the original a-table count.
+        num_original_a_tables = len(table_list_a)
         for i, t2 in enumerate(table_list_b):
             if i not in matched_indices_b:
                 # Collision Check
                 existing_table = next((t for t in A.tables if t.name == t2.name), None)
+                if log is not None and not strict and num_original_a_tables > 0:
+                    best_idx_a = max(
+                        range(num_original_a_tables), key=lambda j: score_matrix[j][i]
+                    )
+                    log.unmatched_tables.append(
+                        UnmatchedTable(
+                            shard_b_table=t2.name,
+                            reason="name_collision_merged"
+                            if existing_table
+                            else "new_entity",
+                            best_candidate_in_a=table_list_a[best_idx_a].name,
+                            best_candidate_score=score_matrix[best_idx_a][i],
+                            shard_b_fact_ids=list(
+                                registry.get_facts_for_tables([t2.name])
+                            )
+                            if registry
+                            else [],
+                        )
+                    )
                 if existing_table:
-                    # If name collision but not matched by Gale-Shapley (score was too low),
-                    # we FORCE a structural merge anyway to prevent table loss.
+                    # Name collision not captured by GS (below threshold or capacity
+                    # exhausted). Run explicit column matching so same-concept columns
+                    # are aligned rather than blindly appended.
+                    cols1 = [c.name for c in existing_table.columns]
+                    cols2 = [c.name for c in t2.columns]
+                    col_score_matrix = get_similarity_matrix(cols1, cols2)
+                    name_col_matches = gale_shapley_matching(
+                        col_score_matrix, self.col_thresh
+                    )
+                    print(
+                        f"    [Merger] Name-collision merge: {existing_table.name} "
+                        f"({len(name_col_matches)} col matches)"
+                    )
                     if registry:
                         registry.merge_tables(t2.name, existing_table.name)
-                    self._merge_tables(A, existing_table, t2, [], registry)
+                    self._merge_tables(
+                        A, existing_table, t2, name_col_matches, registry
+                    )
                 else:
                     # Truly new table
                     new_table = t2.model_copy(deep=True)
                     A.tables.append(new_table)
+                    print(f"    [GS] UNMATCHED {t2.name} added as new table")
 
         # 5. Merge relationships
         if B.relationships:
@@ -333,14 +481,17 @@ class SchemaMerger:
                 return False
         return True
 
-    def _calculate_table_score(self, t1: Table, t2: Table) -> float:
-        name_score = get_similarity_score(t1.name, t2.name)
+    def _calculate_table_score(self, t1: Table, t2: Table) -> _TableScoreBreakdown:
+        raw_name_score = get_similarity_score(t1.name, t2.name)
 
         # Exact Name Match Boost
         if t1.name.upper() == t2.name.upper():
-            name_score = 1.0
+            raw_name_score = 1.0
 
+        had_modifier_penalty = False
+        name_score = raw_name_score
         if name_score < 0.98 and self._has_distinct_modifiers(t1.name, t2.name):
+            had_modifier_penalty = True
             name_score *= 0.3
 
         # Column matching
@@ -363,7 +514,12 @@ class SchemaMerger:
             if name_score < 0.9 and self._matches_id_only(cols1, cols2, col_matches):
                 attr_score = 0.0
 
-        return self.alpha * name_score + (1.0 - self.alpha) * attr_score
+        return _TableScoreBreakdown(
+            total=self.alpha * name_score + (1.0 - self.alpha) * attr_score,
+            name_score=raw_name_score,
+            attr_score=attr_score,
+            had_modifier_penalty=had_modifier_penalty,
+        )
 
     def _should_force_match_pks(self, pk1: str, pk2: str) -> bool:
         if self._is_identifier_column(pk1) and self._is_identifier_column(pk2):
@@ -519,8 +675,6 @@ class SchemaMerger:
 
             # If the table has extra non-FK columns, it is not a pure junction.
             if not non_pk_cols or not non_pk_cols.issubset(fk_cols):
-                continue
-            if len(non_pk_cols) > 2:
                 continue
 
             junction_tables.append(

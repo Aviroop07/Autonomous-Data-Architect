@@ -436,6 +436,7 @@ class AuditPatchValidatorLoopAgent(LoopAgent):
         report = CritiqueReport(**payload.get("report", {}))
 
         if not report.patches:
+            print("  [Auditor] No patches proposed.")
             return _AuditPatchResult(
                 is_valid=True,
                 had_patches=False,
@@ -443,6 +444,10 @@ class AuditPatchValidatorLoopAgent(LoopAgent):
                 schema_state=schema,
                 patched_schema=None,
             ), 0
+
+        print(f"  [Auditor] Applying {len(report.patches)} patch(es):")
+        for p in report.patches:
+            print(f"    {p}")
 
         temp_schema = schema.model_copy(deep=True)
         apply_patches(
@@ -453,6 +458,7 @@ class AuditPatchValidatorLoopAgent(LoopAgent):
         )
         errors = temp_schema._validate()
         if not errors:
+            print("  [Auditor] Schema valid after patches.")
             return _AuditPatchResult(
                 is_valid=True,
                 had_patches=True,
@@ -460,6 +466,12 @@ class AuditPatchValidatorLoopAgent(LoopAgent):
                 schema_state=temp_schema,
                 patched_schema=temp_schema,
             ), 0
+
+        print(f"  [Auditor] {len(errors)} validation error(s) after patches:")
+        for e in errors[:5]:
+            print(f"    - {e}")
+        if len(errors) > 5:
+            print(f"    ... ({len(errors) - 5} more)")
 
         self._attempt += 1
         self.fix_history.append(
@@ -613,6 +625,26 @@ async def run_architect_self_correction_loop(
     schema_output = result.node_outputs.get("architect")
     if not isinstance(schema_output, Schema):
         schema_output = Schema(tables=[], relationships=[])
+
+    print(
+        f"  [Architect] Shard output: {len(schema_output.tables)} tables, "
+        f"{len(schema_output.relationships or [])} FKs, "
+        f"{result.iteration_count} loop iteration(s)"
+    )
+    for t in schema_output.tables:
+        col_str = ", ".join(f"{c.name}:{c.data_type or '?'}" for c in t.columns)
+        print(f"    {t.name}  pk={t.pk}  [{col_str}]")
+    for r in schema_output.relationships or []:
+        print(
+            f"    FK: {r.referencing_table}.{r.referencing_column} -> {r.referred_table}"
+        )
+    if architect_agent.fix_history:
+        print(f"  [Architect] Retry iterations: {len(architect_agent.fix_history)}")
+        for step in architect_agent.fix_history:
+            print(f"    Attempt {step.attempt}: {len(step.errors)} error(s)")
+            for e in step.errors[:3]:
+                print(f"      - {e}")
+
     return schema_output, architect_agent.fix_history, result.total_tokens
 
 
