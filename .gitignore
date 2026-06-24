@@ -10,7 +10,6 @@ temp.txt
 generated_generator.py
 research/
 output/
-paper/
 paper_latex/
 poster/
 presentation/
@@ -21,6 +20,7 @@ run_test.py
 .ruff_cache/
 plan.txt
 *.pdf
+!paper/*.pdf
 *.mp4
 demo_paper/
 dataset/
