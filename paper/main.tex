@@ -227,10 +227,10 @@ The pipeline outputs DDL + a Python program, not tables directly, separating syn
 from materialization.]}
 
 \textit{[Para 2: Inter-stage interfaces. $\mathcal{F}$ = enriched fact set (JSON list of
-atomic statements). $\mathcal{S}$ = relational schema (JSON: tables, columns, PKs, FKs,
-types). $\mathcal{C}$ = structured constraints (nested JSON: distributions, decision trees,
-aggregations). $\mathcal{G}$ = column-level dependency DAG (adjacency list).
-$\mathcal{P}$ = Python program (plain text).]}
+atomic statements with tags and external-kind annotations). $\mathcal{S}$ = relational schema
+(JSON: tables, columns, PKs, FKs, types). $\mathcal{C}$ = structured constraints (nested
+JSON: distributions, decision trees, aggregations). $\mathcal{G}$ = column-level dependency
+DAG (adjacency list). $\mathcal{P}$ = Python program (plain text).]}
 
 % Figure 2: Architecture (full-width)
 \begin{figure*}[t]
@@ -253,46 +253,212 @@ $\mathcal{P}$ = Python program (plain text).]}
 \label{sec:stage1}
 % ============================================================
 
-\subsection{Atomic Fact Decomposition}
-\textit{[Para: An LLM agent decomposes $\mathcal{D}$ into atomic facts---single-requirement
-statements (e.g., ``An applicant has a credit score between 300 and 850'').
-Each fact is kept minimal: one entity, one constraint, one relationship.]}
+\textit{[Intro sentence: Stage 1 transforms the raw NL description $\mathcal{D}$ into a
+structured, enriched, and classified set of atomic facts $\mathcal{F}$ via a pipeline of
+LLM agents interleaved with deterministic validation and filtering steps.]}
 
-\subsection{Verification and Context Enrichment}
-\textit{[Para: A verifier agent audits the candidate fact set for omissions and hallucinations,
-iterating until the set is internally consistent.
-Technical terms (e.g., DTI, LIBOR, HbA1c) are then grounded via web retrieval and domain
-knowledge bases---ablation shows +10\% Table F1 from enrichment alone (\S\ref{sec:eval}).
-Enriched facts carry structured metadata (term, definition, source).]}
+\subsection{Atomic Fact Decomposition}
+\textit{[Para: A \textsc{FactExtractor} LLM agent (tool-augmented: DuckDuckGo web-search)
+decomposes $\mathcal{D}$ into candidate \emph{atomic facts}---minimal single-requirement
+statements (e.g., ``An applicant has a credit score between 300 and 850'').
+Each fact carries: a unique identifier, its verbatim text, a list of
+\texttt{referenced\_fact\_ids} (other facts it depends on or elaborates), an
+\texttt{is\_external} flag, and an origin span anchoring it to a substring of $\mathcal{D}$.
+The agent tracks previously errored fact IDs across repair iterations to avoid re-introducing
+known invalid facts.]}
+
+\subsection{Deterministic Fact Validation}
+\label{subsec:det-fact-val}
+\textit{[Para: After each extraction iteration the candidate set is subjected to a
+\emph{deterministic validator} that performs five correctness checks entirely without LLM
+involvement (Algorithm~\ref{alg:det-fact-val}).
+Errors are typed (CRITICAL / MEDIUM / LOW) and fed back to the \textsc{FactExtractor} agent
+as a structured repair signal.
+Only CRITICAL errors trigger a re-extraction; MEDIUM and LOW errors are surfaced as warnings.
+Short origin spans ($<$10 characters) are downgraded to LOW rather than CRITICAL to avoid
+over-flagging terse but correct facts.]}
+
+% Algorithm 1: Deterministic Fact Validator (sub-step)
+\begin{algorithm}[t]
+\caption{Deterministic Fact Validator}
+\label{alg:det-fact-val}
+\begin{algorithmic}[1]
+  \Require Candidate fact set $F$, source NL text $\mathcal{D}$
+  \Ensure List of typed error records $E$
+  \State \textit{// Preprocessing: remove self-references and duplicate references}
+  \ForAll{$f \in F$}
+    \State normalize $f.\texttt{referenced\_fact\_ids}$
+          (remove $f.\texttt{id}$ and deduplicate)
+  \EndFor
+  \State \textit{// Check 1: all referenced IDs must exist in $F$}
+  \ForAll{$f \in F$, each $r \in f.\texttt{referenced\_fact\_ids}$}
+    \If{$r \notin \{f'.\texttt{id} : f' \in F\}$}
+      \State append CRITICAL error (INVALID\_REFERENCE, $f$, $r$) to $E$
+    \EndIf
+  \EndFor
+  \State \textit{// Check 2: no fact may reference itself (post-normalize guard)}
+  \ForAll{$f \in F$}
+    \If{$f.\texttt{id} \in f.\texttt{referenced\_fact\_ids}$}
+      \State append CRITICAL error (SELF\_REFERENCE, $f$) to $E$
+    \EndIf
+  \EndFor
+  \State \textit{// Check 3: DFS cycle detection on reference graph}
+  \State build directed graph $G_{\text{ref}}$: edges $f \to r$ for each reference $r$
+  \If{DFS detects a cycle in $G_{\text{ref}}$}
+    \State append CRITICAL error (CYCLE, cycle members) to $E$
+  \EndIf
+  \State \textit{// Check 4: non-external facts must have verifiable origin in $\mathcal{D}$}
+  \ForAll{$f \in F$ with $f.\texttt{is\_external} = \text{False}$}
+    \If{\textsc{FactOriginMatcher}($f.\texttt{origin}$, $\mathcal{D}$) fails}
+      \State severity $\gets$ LOW if $|f.\texttt{origin}| < 10$ else CRITICAL
+      \State append error (UNVERIFIABLE\_ORIGIN, $f$, severity) to $E$
+    \EndIf
+  \EndFor
+  \State \textit{// Check 5: external facts must cite $\geq 1$ existing non-external fact}
+  \ForAll{$f \in F$ with $f.\texttt{is\_external} = \text{True}$}
+    \If{$f.\texttt{referenced\_fact\_ids} = \emptyset$}
+      \State append MEDIUM error (UNCITED\_EXTERNAL, $f$) to $E$
+    \EndIf
+  \EndFor
+  \State \Return $E$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Integrity Verification}
+\textit{[Para: Once the fact set passes deterministic validation, a \textsc{Verifier} LLM agent
+performs a semantic audit.
+It inspects the fact set for: (a)~\emph{missing information} (entities or constraints in
+$\mathcal{D}$ not yet captured as facts), (b)~\emph{introduced information}
+(facts that cannot be grounded in $\mathcal{D}$), (c)~\emph{changed constraints}
+(paraphrase drift from the original wording), and (d)~\emph{unresolved ambiguities}.
+The verifier emits a structured \texttt{IntegrityReport}; if non-empty, the
+\textsc{FactExtractor} agent is re-invoked with the report appended to its context.
+This loop continues until the report is empty or the retry budget is exhausted.]}
+
+\subsection{Fact Classification}
+\textit{[Para: After the verification loop, a \textsc{Tagger} LLM agent performs a
+\emph{one-shot} pass over the verified fact set.
+Each fact is tagged with one or more of four types:
+\textsc{Structural} (entity definitions, FK relationships),
+\textsc{Logical} (if--then rules, conditional constraints),
+\textsc{Statistical} (distributional parameters, value ranges), and
+\textsc{Metadata} (documentation, provenance notes).
+These tags are stored in the \texttt{tags} field of each \texttt{AtomicFact} and guide
+downstream agents: Schema Generation prioritises \textsc{Structural} and \textsc{Logical}
+facts; Code Generation consumes \textsc{Statistical} facts for distribution sampling.]}
+
+\subsection{Underspecification Detection and Context Enrichment}
+\textit{[Para: A deterministic \emph{underspecification detector} counts entities ($<$4),
+relationships, constraints, and total facts ($<$8) in the verified set and emits
+domain-specific DuckDuckGo search queries when the schema is likely under-described.
+These queries supplement those derived by the \textsc{ContextEnricher} agent.]}
+
+\textit{[Para: The \textsc{ContextEnricher} runs in two phases.
+\textbf{Phase 1 (pre-search)}: extract acronyms via regex $[A-Z]\{2,5\}$, combine with any
+suggestions from the \texttt{IntegrityReport} (up to 5 queries total), and execute DuckDuckGo
+searches via \texttt{prefetch\_and\_format\_searches}; results are formatted as grounding
+context.
+\textbf{Phase 2 (LLM)}: the agent receives the enriched context and the verified fact set
+and generates a list of \emph{external facts} (technical definitions, architecture patterns,
+domain constraints) to augment $\mathcal{F}$.
+A \textsc{ContextAuditor} LLM agent then reviews the proposed external facts, accepting or
+rejecting each with a reason; accepted facts are accumulated across iterations.
+Ablation shows $+10\%$ Table F1 from enrichment alone (\S\ref{sec:eval}).]}
+
+\subsection{External Context Filtering}
+\textit{[Para: The accepted external facts are passed through a deterministic
+\emph{external context filter} (Algorithm~\ref{alg:ext-filter}) before being merged into
+$\mathcal{F}$.
+The filter deduplicates, validates cross-references, and assigns a structured
+\texttt{ExternalFactKind} label to each accepted fact via keyword matching.
+The kind label informs how Schema Generation and Code Generation agents interpret and
+weight the fact.]}
+
+% Algorithm 2: External Context Filter (sub-step)
+\begin{algorithm}[t]
+\caption{External Context Filter}
+\label{alg:ext-filter}
+\begin{algorithmic}[1]
+  \Require Accepted external facts $F_{\text{ext}}$, original non-external facts $F_{\text{orig}}$
+  \Ensure Classified, deduplicated external fact set $F_{\text{ext}}^{*}$
+  \State \textit{// Step 1: deduplicate by normalised text (lowercase, strip whitespace)}
+  \State $F_{\text{ext}} \gets \text{dedup}(F_{\text{ext}})$
+  \State \textit{// Step 2: remove facts that reference only themselves}
+  \ForAll{$f \in F_{\text{ext}}$}
+    \If{$f.\texttt{id} \in f.\texttt{referenced\_fact\_ids}$}
+      \State discard $f$
+    \EndIf
+  \EndFor
+  \State \textit{// Step 3: validate that every referenced ID exists in $F_{\text{orig}}$}
+  \ForAll{$f \in F_{\text{ext}}$}
+    \If{$\exists\, r \in f.\texttt{referenced\_fact\_ids}$ s.t.\ $r \notin \{g.\texttt{id} : g \in F_{\text{orig}}\}$}
+      \State discard $f$
+    \EndIf
+  \EndFor
+  \State \textit{// Step 4: classify into ExternalFactKind via keyword matching}
+  \ForAll{$f \in F_{\text{ext}}$}
+    \State $f.\texttt{kind} \gets$ \textsc{ClassifyKind}($f.\texttt{text}$)
+           \Comment{TECHNICAL\_DEFINITION $|$ ARCHITECTURE\_PATTERN $|$
+                    DOMAIN\_PATTERN $|$ DOMAIN\_CONSTRAINT\_HINT}
+  \EndFor
+  \State \Return $F_{\text{ext}}^{*} \gets F_{\text{ext}}$
+\end{algorithmic}
+\end{algorithm}
 
 % Figure 3: Fact extraction example
 \begin{figure}[t]
   \centering
   \vspace{1.5cm}
   \textit{[Figure 3 placeholder: Credit Risk NL paragraph (top);
-  8--10 atomic facts extracted (middle), with per-fact type tags
-  (schema, distribution, logical);
-  enriched version of one fact with DTI definition inlined (bottom, highlighted).]}
+  8--10 atomic facts extracted (middle), each annotated with its type tag
+  (STRUCTURAL / LOGICAL / STATISTICAL / METADATA);
+  one external fact with DTI definition inlined (bottom, highlighted)
+  showing its ExternalFactKind = DOMAIN\_CONSTRAINT\_HINT.]}
   \vspace{1.5cm}
   \caption{Fact extraction for the Credit Risk running example.
-           Atomic facts are typed and enriched with domain-grounded definitions.}
+           Atomic facts are tagged by type; external facts carry a kind label.}
   \label{fig:fact-extraction}
 \end{figure}
 
-% Algorithm 1: Stage 1 summary
+% Algorithm 3: Stage 1 summary (calls Algs 1 & 2)
 \begin{algorithm}[t]
 \caption{Stage 1: Fact Extraction \& Enrichment}
 \label{alg:stage1}
 \begin{algorithmic}[1]
   \Require NL description $\mathcal{D}$
-  \Ensure Enriched atomic fact set $\mathcal{F}$
-  \State \textit{// [Placeholder: LLM decomposition agent splits $\mathcal{D}$ into candidate facts]}
+  \Ensure Enriched, tagged atomic fact set $\mathcal{F}$
+  \State \textit{// LLM: FactExtractor decomposes $\mathcal{D}$ into candidate facts}
+  \State $F \gets \textsc{FactExtractor}(\mathcal{D})$
   \Repeat
-    \State \textit{// [Placeholder: verifier agent checks completeness and hallucination]}
-    \State \textit{// [Placeholder: repair loop: LLM adds missing facts / removes spurious ones]}
-  \Until{fact set is consistent}
-  \State \textit{// [Placeholder: web-retrieval enrichment for technical terms in each fact]}
-  \State \Return $\mathcal{F}$
+    \State $E \gets \Call{DetFactValidator}{F, \mathcal{D}}$
+           \hfill$\triangleright$ Alg.~\ref{alg:det-fact-val}
+    \If{$E$ contains CRITICAL errors}
+      \State $F \gets \textsc{FactExtractor}(\mathcal{D}, F, E)$
+             \hfill$\textit{// LLM repair}$
+    \EndIf
+  \Until{$E$ is CRITICAL-free or retry budget exhausted}
+  \State \textit{// LLM: Verifier semantic audit $\to$ IntegrityReport}
+  \State $R_v \gets \textsc{Verifier}(F)$
+  \While{$R_v \neq \emptyset$}
+    \State $F \gets \textsc{FactExtractor}(\mathcal{D}, F, R_v)$
+           \hfill$\textit{// LLM repair guided by IntegrityReport}$
+    \State $R_v \gets \textsc{Verifier}(F)$
+  \EndWhile
+  \State \textit{// LLM: Tagger one-shot classification $\to$ STRUCTURAL/LOGICAL/STATISTICAL/METADATA}
+  \State $F \gets \textsc{Tagger}(F)$
+  \State \textit{// Deterministic: underspecification heuristic $\to$ search queries}
+  \State $Q \gets \textsc{UnderspecDetector}(F)$
+  \State \textit{// LLM: ContextEnricher (web pre-search + LLM) $\to$ proposed external facts}
+  \State $F_{\text{prop}} \gets \textsc{ContextEnricher}(F, Q)$
+  \Repeat
+    \State \textit{// LLM: ContextAuditor accepts/rejects proposed external facts}
+    \State $(F_{\text{acc}}, F_{\text{rej}}) \gets \textsc{ContextAuditor}(F_{\text{prop}})$
+    \State $F_{\text{prop}} \gets \textsc{ContextEnricher}(F, Q, F_{\text{rej}})$
+           \hfill$\textit{// LLM regeneration for rejected facts}$
+  \Until{audit is acceptable or retry budget exhausted}
+  \State $F_{\text{ext}}^{*} \gets \Call{ExternalContextFilter}{F_{\text{acc}}, F}$
+         \hfill$\triangleright$ Alg.~\ref{alg:ext-filter}
+  \State \Return $\mathcal{F} \gets F \cup F_{\text{ext}}^{*}$
 \end{algorithmic}
 \end{algorithm}
 
@@ -301,11 +467,34 @@ Enriched facts carry structured metadata (term, definition, source).]}
 \label{sec:stage2}
 % ============================================================
 
+\textit{[Intro sentence: Stage 2 maps the enriched fact set $\mathcal{F}$ to a globally
+consistent relational schema $\mathcal{S}$ via a shard-and-merge strategy augmented with
+domain intelligence, deterministic validation, and a multi-agent review loop.]}
+
+\subsection{Domain Intelligence Extraction}
+\textit{[Para: Before fact clustering, a \textsc{DomainIntelligenceExtractor} one-shot LLM
+agent is invoked with the domain name and the analytical goal implicit in $\mathcal{F}$.
+It produces a \texttt{DomainIntelligenceReport}---a structured summary of typical entity
+types, common relationship patterns, and domain-specific design conventions for the target
+domain (e.g., normalisation conventions in healthcare, regulatory FK structures in finance).
+This report is passed as additional context to the \textsc{SchemaArchitect} agents in each
+shard and to the \textsc{DomainAuditor} loop (§\ref{subsec:schema-finalize}), anchoring the
+schema in domain expectations rather than solely in the facts.]}
+
 \subsection{Fact Clustering and Parallel Shard Generation}
-\textit{[Para: An LLM clustering agent partitions $\mathcal{F}$ into shards, each covering
-a cohesive subset of tables.
-Each shard is processed in parallel by a schema-architect agent that produces a candidate
-schema shard with table definitions, columns, PKs, and intra-shard FKs.]}
+\textit{[Para: A \textsc{Chunker} LLM agent partitions $\mathcal{F}$ into a \texttt{ChunkedPlan}:
+a list of \emph{chunks} (each a labeled cluster of fact IDs covering one cohesive sub-domain)
+plus a \texttt{core\_modeling\_facts} set of globally applicable facts (e.g., cross-table
+FK conventions, domain-wide cardinality rules) that are broadcast to every shard.
+The Chunker participates in a deterministic repair loop: structural errors in the proposed
+plan (e.g., orphaned fact IDs, empty chunks) are fed back as typed error signals.]}
+
+\textit{[Para: Each chunk is processed in parallel by a \textsc{SchemaArchitect} LLM agent
+that receives the chunk's facts, the \texttt{core\_modeling\_facts}, and the
+\texttt{DomainIntelligenceReport}.
+It produces a candidate schema shard: table definitions, columns, PKs, and intra-shard FKs.
+A deterministic repair loop (Algorithm~\ref{alg:shard-val}) guards each shard; the agent
+maintains a \texttt{fix\_history} to avoid re-introducing previously repaired errors.]}
 
 \subsection{Deterministic Shard Validation}
 \textit{[Para: Each shard undergoes a pure-algorithmic check before merging:
@@ -314,46 +503,88 @@ or are flagged as cross-shard pending), and schema-graph connectivity (no isolat
 Failures emit a typed repair signal to the schema-architect agent; no LLM call within
 the validator itself.]}
 
-% Algorithm 2: Deterministic Shard Validation (sub-step)
+% Algorithm 4: Deterministic Shard Validation (sub-step)
 \begin{algorithm}[t]
 \caption{Deterministic Shard Validation}
 \label{alg:shard-val}
 \begin{algorithmic}[1]
   \Require Schema shard $S_i$
   \Ensure Validated $S_i$ or typed repair signal
-  \State \textit{// [Placeholder: assert PK uniqueness for every table in $S_i$]}
-  \State \textit{// [Placeholder: assert FK targets exist or flag as cross-shard pending]}
-  \State \textit{// [Placeholder: build schema graph of $S_i$; assert connectivity (no isolated node)]}
-  \If{\textit{any assertion fails}}
-    \State \textit{// [Placeholder: emit typed repair signal (PK\_CLASH | FK\_DANGLE | ISOLATED\_TABLE)]}
+  \State \textit{// Assert PK uniqueness for every table in $S_i$}
+  \ForAll{table $T \in S_i$}
+    \If{$T$ has duplicate PK column names}
+      \State emit PK\_CLASH error
+    \EndIf
+  \EndFor
+  \State \textit{// Assert FK targets exist or flag as cross-shard pending}
+  \ForAll{FK $(T_{\text{src}}, T_{\text{tgt}}) \in S_i$}
+    \If{$T_{\text{tgt}} \notin S_i$ and not already flagged cross-shard}
+      \State emit FK\_DANGLE or flag as cross-shard pending
+    \EndIf
+  \EndFor
+  \State \textit{// BFS connectivity: assert no isolated table (no PK/FK path)}
+  \State build schema graph of $S_i$; run BFS from any table
+  \If{unreachable tables found}
+    \State emit ISOLATED\_TABLE error per unreachable table
   \EndIf
-  \State \Return validated $S_i$
+  \State \Return validated $S_i$ (or repair signal if any error emitted)
 \end{algorithmic}
 \end{algorithm}
 
 \subsection{Shard Merging via Stable Matching}
 \textit{[Para: Independently generated shards may contain overlapping representations of the
 same entity.
-Overlaps are identified via Gale--Shapley~\cite{gale1962} stable matching over
-(i) semantic table-name similarity and (ii) a column-alignment score computed via a
-second stable-matching pass over column pairs.
-The highest-scoring stable table alignments are treated as entity overlaps and merged.
-Non-overlapping tables are unioned directly into $\mathcal{S}$.]}
+The \textsc{SchemaMerger} is a fully deterministic three-pass procedure
+(Algorithm~\ref{alg:merge}) that identifies and resolves these overlaps.]}
 
-% Algorithm 3: Deterministic Schema Merge (sub-step)
+\textit{[Para: \textbf{Similarity scoring.}
+For each candidate table pair $(T_a, T_b)$ across shards, a composite score
+$\sigma = \alpha \cdot \sigma_{\text{name}} + (1-\alpha) \cdot \sigma_{\text{attr}}$ is
+computed. $\sigma_{\text{name}}$ is the cosine similarity of sentence-transformer embeddings
+(all-MiniLM-L6-v2) with a lexical fallback: $\sigma_{\text{lex}} = 0.3 \cdot J + 0.7 \cdot O$
+(Jaccard $J$, context-overlap $O$); the final name score is $\max(\sigma_{\text{lex}},
+\sigma_{\text{emb}})$, using the strongest available signal.
+$\sigma_{\text{attr}}$ is a second Gale--Shapley~\cite{gale1962} pass over column pairs.
+Shard pairs with $\sigma > \theta$ are candidate overlaps.]}
+
+% Algorithm 5: Deterministic Schema Merge (sub-step)
 \begin{algorithm}[t]
 \caption{Deterministic Schema Merge via Stable Matching}
 \label{alg:merge}
 \begin{algorithmic}[1]
-  \Require Validated shards $\{S_1,\ldots,S_k\}$
-  \Ensure Merged global schema $\mathcal{S}$ (without cross-shard FKs resolved)
-  \State \textit{// [Placeholder: compute pairwise table-name semantic similarity matrix]}
-  \State \textit{// [Placeholder: for each candidate pair, compute column-alignment score via
-         second Gale--Shapley pass over column pairs]}
-  \State \textit{// [Placeholder: run Gale--Shapley over table pairs; identify stable overlaps
-         above threshold $\theta$]}
-  \State \textit{// [Placeholder: merge overlapping table pairs; union non-overlapping tables]}
-  \State \Return $\mathcal{S}_{\text{draft}}$
+  \Require Validated shards $\{S_1,\ldots,S_k\}$, threshold $\theta$
+  \Ensure Merged global schema $\mathcal{S}$, \texttt{MergeDecisionLog}
+  \State \textit{// Pass 1: pairwise scoring and Gale--Shapley stable matching}
+  \ForAll{shard pairs $(S_i, S_j)$, table pairs $(T_a \in S_i, T_b \in S_j)$}
+    \State compute $\sigma_{\text{name}}$ via embedding cosine + lexical fallback
+    \State compute $\sigma_{\text{attr}}$ via column-pair GS matching
+    \State $\sigma(T_a, T_b) \gets \alpha \cdot \sigma_{\text{name}} + (1-\alpha) \cdot \sigma_{\text{attr}}$
+  \EndFor
+  \State run GS stable matching on $\sigma$ matrix; identify overlapping pairs with $\sigma > \theta$
+  \State \textit{// Pass 2: FK consistency pre-validation across matched pairs}
+  \ForAll{matched pair $(T_a, T_b)$}
+    \State \textit{// check FK integrity: cross-shard FK endpoints align post-merge}
+    \If{FK conflict detected}
+      \State demote $(T_a, T_b)$ from matched to unioned; log decision
+    \EndIf
+  \EndFor
+  \State \textit{// Pass 3: actual merge --- column union + relationship remapping}
+  \ForAll{matched pair $(T_a, T_b)$}
+    \State merge columns (union with conflict resolution); remap relationships
+  \EndFor
+  \State union all unmatched tables into $\mathcal{S}$
+  \State \textit{// Post-merge repairs}
+  \State \textsc{ConsolidateJunctions}($\mathcal{S}$)
+         \Comment{remove redundant FKs where M2M junction table exists}
+  \State \textsc{RepairRelationshipNames}($\mathcal{S}$)
+         \Comment{fix stale table name refs in relationships}
+  \State $\mathcal{S}$.\textsc{AlignFKColumnTypes}()
+         \Comment{align FK column types with referenced PK types}
+  \State $\mathcal{S}$.\textsc{WireOrphanFKColumns}()
+         \Comment{reconnect FK columns whose target was lost during merge}
+  \State \textsc{ValidateConnectivity}($\mathcal{S}$)
+         \Comment{BFS/DFS: report disconnected components as warnings}
+  \State \Return $\mathcal{S}$, \texttt{MergeDecisionLog}
 \end{algorithmic}
 \end{algorithm}
 
@@ -363,37 +594,71 @@ Non-overlapping tables are unioned directly into $\mathcal{S}$.]}
   \vspace{1.5cm}
   \textit{[Figure 4 placeholder: Two schema shards (left) each containing a variant of the
   Applicant/Customer entity.
-  Centre: Gale--Shapley matching arrow annotated with similarity scores.
-  Right: merged global schema with unified Applicant table and resolved cross-shard FK.]}
+  Centre: Gale--Shapley matching arrow annotated with $\sigma_{\text{name}}$ and
+  $\sigma_{\text{attr}}$ scores and the FK consistency verdict.
+  Right: merged global schema with unified Applicant table, resolved cross-shard FK,
+  and the four post-merge repair steps annotated.]}
   \vspace{1.5cm}
   \caption{Shard-and-merge for Credit Risk.
-           Overlapping Applicant entities are detected by stable matching and unified.}
+           Overlapping Applicant entities are detected by stable matching and unified
+           via the three-pass merge procedure.}
   \label{fig:shard-merge}
 \end{figure}
 
-\subsection{Global Schema Finalization}
-\textit{[Para: After merging, cross-shard FK references that were flagged as
-``cross-shard pending'' during validation are now resolved against the global table set.
-A final global connectivity check confirms that the schema graph is connected and that no
-table is unreachable via PK/FK paths.
-If cross-shard FKs remain unresolvable (e.g., the target table was not generated by any
-shard), a patch agent is invoked to synthesise the missing table or re-cluster facts.
-This step produces the final validated global schema $\mathcal{S}$.]}
+\subsection{Post-Merge Review and Domain Audit}
+\label{subsec:schema-finalize}
+\textit{[Para: After merging, a \textsc{MergeReviewer} LLM agent reviews the merged schema
+$\mathcal{S}$, the \texttt{MergeDecisionLog}, and the original per-shard facts.
+It identifies merge decisions that appear semantically inconsistent (e.g., two tables with
+different semantics merged due to a high name-similarity score) and proposes targeted patches.]}
 
-% Algorithm 4: Stage 2 summary (calls Algs 2 & 3)
+\textit{[Para: A \textsc{DomainAuditor} LLM loop agent then performs a deeper structural audit
+using the \texttt{DomainIntelligenceReport}, the full fact clusters, and any structural
+errors emitted by a deterministic patch validator.
+It produces a \texttt{CritiqueReport} with typed patches (add table, rename column, add FK,
+etc.); each patch is validated deterministically before being applied.
+The loop continues until the \texttt{CritiqueReport} is empty or the retry budget is
+exhausted.]}
+
+\textit{[Para: Finally, a \textsc{ComplianceCertifier} LLM agent performs a
+one-shot analytical-utility check---verifying that $\mathcal{S}$ can express the
+analytical queries implied by $\mathcal{D}$ (e.g., that columns needed to compute
+portfolio-level aggregates are present).
+The certifier's verdict is informational; it does not block pipeline execution but
+is logged for user inspection.
+This produces the final validated global schema $\mathcal{S}$.]}
+
+% Algorithm 6: Stage 2 summary (calls Algs 4 & 5)
 \begin{algorithm}[t]
 \caption{Stage 2: Schema Generation}
 \label{alg:stage2}
 \begin{algorithmic}[1]
   \Require Fact set $\mathcal{F}$
   \Ensure Global schema $\mathcal{S}$
-  \State \textit{// [Placeholder: cluster $\mathcal{F}$ into $k$ shards; run schema-architect agents in parallel]}
-  \ForAll{shard $S_i$}
-    \State \Call{ShardValidation}{$S_i$} \hfill$\triangleright$ Alg.~\ref{alg:shard-val}
+  \State \textit{// LLM: one-shot domain intelligence extraction}
+  \State $R_d \gets \textsc{DomainIntelligenceExtractor}(\mathcal{F})$
+  \State \textit{// LLM + det. loop: cluster facts into ChunkedPlan}
+  \State $\textit{plan} \gets \textsc{Chunker}(\mathcal{F}, R_d)$
+  \State \textit{// LLM + det. loop: schema architect per shard, run in parallel}
+  \ForAll{chunk $C_i \in \textit{plan}$} \textbf{in parallel}
+    \State $S_i \gets \textsc{SchemaArchitect}(C_i, \textit{plan}.\texttt{core\_modeling\_facts}, R_d)$
+    \State $\Call{ShardValidation}{S_i}$
+           \hfill$\triangleright$ Alg.~\ref{alg:shard-val}
   \EndFor
-  \State \Call{SchemaMerge}{$\{S_i\}$} $\to \mathcal{S}_{\text{draft}}$ \hfill$\triangleright$ Alg.~\ref{alg:merge}
-  \State \textit{// [Placeholder: resolve cross-shard FKs; global connectivity check (§\ref{sec:stage2}.4)]}
-  \State \Return $\mathcal{S}$
+  \State $(\mathcal{S}_{\text{draft}}, \textit{log}) \gets \Call{SchemaMerge}{\{S_i\}}$
+         \hfill$\triangleright$ Alg.~\ref{alg:merge}
+  \State \textit{// LLM: MergeReviewer reviews merged schema + MergeDecisionLog}
+  \State $\textit{patches}_m \gets \textsc{MergeReviewer}(\mathcal{S}_{\text{draft}}, \textit{log})$
+  \State apply $\textit{patches}_m$ to $\mathcal{S}_{\text{draft}}$
+  \Repeat
+    \State \textit{// LLM loop: DomainAuditor produces CritiqueReport with patches}
+    \State $R_c \gets \textsc{DomainAuditor}(\mathcal{S}_{\text{draft}}, R_d, \mathcal{F})$
+    \State \textit{// Deterministic: validate each patch before applying}
+    \State apply validated patches from $R_c$ to $\mathcal{S}_{\text{draft}}$
+  \Until{$R_c$ is empty or retry budget exhausted}
+  \State \textit{// LLM: one-shot analytical-utility compliance check}
+  \State $\textsc{ComplianceCertifier}(\mathcal{S}_{\text{draft}}, \mathcal{F})$
+  \State \Return $\mathcal{S} \gets \mathcal{S}_{\text{draft}}$
 \end{algorithmic}
 \end{algorithm}
 
@@ -417,7 +682,7 @@ A mathematics agent then verifies distribution feasibility (e.g., checking that 
 values are in the valid domain for the specified distribution family).
 Decision-tree feasibility is checked deterministically (Algorithm~\ref{alg:dt-feasibility}).]}
 
-% Algorithm 5: Deterministic Decision-Tree Feasibility Check (sub-step)
+% Algorithm 7: Deterministic Decision-Tree Feasibility Check (sub-step)
 \begin{algorithm}[t]
 \caption{Deterministic Decision-Tree Feasibility Check}
 \label{alg:dt-feasibility}
@@ -425,13 +690,13 @@ Decision-tree feasibility is checked deterministically (Algorithm~\ref{alg:dt-fe
   \Require Set of decision-tree constraints $T \subseteq \mathcal{C}$
   \Ensure Feasibility verdict per constraint; infeasibility report if any
   \ForAll{constraint $t \in T$}
-    \State \textit{// [Placeholder: enumerate leaf conditions; check for contradictory conjunctions
-           (e.g., $x > 750$ AND $x < 300$)]}
-    \State \textit{// [Placeholder: verify that outcome column data type is compatible with
-           assigned value ranges]}
-    \State \textit{// [Placeholder: check that referenced columns exist in schema $\mathcal{S}$]}
+    \State \textit{// Enumerate leaf conditions; check for contradictory conjunctions
+           (e.g., $x > 750$ AND $x < 300$)}
+    \State \textit{// Verify that outcome column data type is compatible with
+           assigned value ranges}
+    \State \textit{// Check that referenced columns exist in schema $\mathcal{S}$}
     \If{infeasible}
-      \State \textit{// [Placeholder: flag constraint; trigger constraint-modeling agent repair]}
+      \State \textit{// Flag constraint; trigger constraint-modeling agent repair}
     \EndIf
   \EndFor
   \State \Return feasibility verdicts
@@ -459,22 +724,22 @@ Multivariate group nodes are inserted as composite nodes (TBD).
 Cycle detection is performed via topological sort; if a cycle is detected, a patch agent
 updates $\mathcal{C}$ to break the cycle and the graph is rebuilt.]}
 
-% Algorithm 6: Deterministic DAG Construction (sub-step)
+% Algorithm 8: Deterministic DAG Construction (sub-step)
 \begin{algorithm}[t]
 \caption{Deterministic Dependency DAG Construction}
 \label{alg:dag}
 \begin{algorithmic}[1]
   \Require Schema $\mathcal{S}$, structured constraints $\mathcal{C}$
   \Ensure Column-level DAG $\mathcal{G}$
-  \State \textit{// [Placeholder: initialise $\mathcal{G}$; add one node per column in $\mathcal{S}$]}
-  \State \textit{// [Placeholder: add FK edges in reverse-causal direction (FK target $\to$ FK source)]}
-  \State \textit{// [Placeholder: for each decision-tree constraint: add edges outcome $\leftarrow$ driver
-         for each driver column in the condition]}
-  \State \textit{// [Placeholder: insert multivariate group composite nodes (TBD)]}
+  \State initialise $\mathcal{G}$; add one node per column in $\mathcal{S}$
+  \State add FK edges in reverse-causal direction (FK target $\to$ FK source)
+  \ForAll{decision-tree constraint $t \in \mathcal{C}$}
+    \State add edge outcome $\leftarrow$ driver for each driver column in $t$
+  \EndFor
+  \State \textit{// Insert multivariate group composite nodes (TBD)}
   \State run topological sort on $\mathcal{G}$
   \If{cycle detected}
-    \State \textit{// [Placeholder: identify cycle edges; invoke patch agent to update $\mathcal{C}$;
-           rebuild $\mathcal{G}$]}
+    \State identify cycle edges; invoke patch agent to update $\mathcal{C}$; rebuild $\mathcal{G}$
   \EndIf
   \State \Return $\mathcal{G}$
 \end{algorithmic}
@@ -494,23 +759,25 @@ updates $\mathcal{C}$ to break the cycle and the graph is rebuilt.]}
   Node colouring: deterministic-path nodes (blue), LLM-path nodes (orange).]}
   \vspace{1.5cm}
   \caption{Dependency DAG for the Credit Risk running example.
-           \texttt{interest\_rate} is the root (reverse-causal root); its drivers are leaves.
+           \texttt{interest\_rate} is the reverse-causal root; its drivers are leaves.
            Node colour indicates the code-generation path taken in Stage 4.}
   \label{fig:dag}
 \end{figure}
 
-% Algorithm 7: Stage 3 summary (calls Algs 5 & 6)
+% Algorithm 9: Stage 3 summary (calls Algs 7 & 8)
 \begin{algorithm}[t]
 \caption{Stage 3: Constraint Modeling}
 \label{alg:stage3}
 \begin{algorithmic}[1]
   \Require Schema $\mathcal{S}$, fact set $\mathcal{F}$
   \Ensure Structured constraints $\mathcal{C}$, dependency DAG $\mathcal{G}$
-  \State \textit{// [Placeholder: shard $\mathcal{S}$'s graph into connected components]}
-  \State \textit{// [Placeholder: run constraint-modeling agents per component in parallel]}
-  \State \textit{// [Placeholder: math agent verifies distribution feasibility of each component's constraints]}
-  \State \Call{DTFeasibilityCheck}{$\mathcal{C}$} \hfill$\triangleright$ Alg.~\ref{alg:dt-feasibility}
-  \State \Call{BuildDAG}{$\mathcal{S}, \mathcal{C}$} $\to \mathcal{G}$ \hfill$\triangleright$ Alg.~\ref{alg:dag}
+  \State shard $\mathcal{S}$'s graph into connected components
+  \State run constraint-modeling agents per component in parallel
+  \State math agent verifies distribution feasibility of each component's constraints
+  \State $\Call{DTFeasibilityCheck}{\mathcal{C}}$
+         \hfill$\triangleright$ Alg.~\ref{alg:dt-feasibility}
+  \State $\mathcal{G} \gets \Call{BuildDAG}{\mathcal{S}, \mathcal{C}}$
+         \hfill$\triangleright$ Alg.~\ref{alg:dag}
   \State \Return $\mathcal{C},\,\mathcal{G}$
 \end{algorithmic}
 \end{algorithm}
@@ -534,28 +801,24 @@ Covered aggregation types and their inverses: SUM $\to$ uniform partition,
 MAX $\to$ argmax selection, AVG $\to$ constrained sampling around mean,
 JOIN (FK assignment) $\to$ deterministic FK-key draw.]}
 
-% Algorithm 8: Deterministic Inverse-Function Code (sub-step)
+% Algorithm 10: Deterministic Inverse-Function Code (sub-step)
 \begin{algorithm}[t]
 \caption{Deterministic Inverse-Function Code Synthesis}
 \label{alg:det-code}
 \begin{algorithmic}[1]
   \Require Single-dependency column $c$, aggregation type $\tau$, constraint $\phi$
   \Ensure Python code snippet $p_c$
-  \State \textit{// [Placeholder: synthesise intermediate aggregate/join table satisfying $\phi$]}
+  \State synthesise intermediate aggregate/join table satisfying $\phi$
   \If{$\tau = \textsc{Sum}$}
-    \State \textit{// [Placeholder: emit uniform-partition inverse: randomly split aggregate
-           total across constituent rows]}
+    \State emit uniform-partition inverse: randomly split aggregate total across constituent rows
   \ElsIf{$\tau = \textsc{Max}$}
-    \State \textit{// [Placeholder: emit argmax-selection inverse: designate one row as max,
-           sample others below it]}
+    \State emit argmax-selection inverse: designate one row as max, sample others below it
   \ElsIf{$\tau = \textsc{Avg}$}
-    \State \textit{// [Placeholder: emit constrained sampling inverse: sample $n-1$ values,
-           set $n$-th to satisfy average]}
+    \State emit constrained-sampling inverse: sample $n-1$ values, set $n$-th to satisfy average
   \ElsIf{$\tau = \textsc{Join}$}
-    \State \textit{// [Placeholder: emit FK-assignment inverse: draw FK values from parent PK
-           column]}
+    \State emit FK-assignment inverse: draw FK values from parent PK column
   \Else
-    \State \textit{// [Placeholder: unsupported type --- fall through to LLM path (§\ref{subsec:llm-sampling})]}
+    \State fall through to LLM path (§\ref{subsec:llm-sampling})
   \EndIf
   \State \Return $p_c$
 \end{algorithmic}
@@ -575,21 +838,18 @@ are satisfied.
 By following the reverse-causal order of $\mathcal{G}$, this scheme guarantees
 constraints are satisfied \emph{by construction}, with no post-hoc repair.]}
 
-% Algorithm 9: LLM Ancestral Sampling (sub-step)
+% Algorithm 11: LLM Ancestral Sampling (sub-step)
 \begin{algorithm}[t]
 \caption{LLM Ancestral Sampling for Intertwined Constraints}
 \label{alg:llm-sampling}
 \begin{algorithmic}[1]
   \Require Intertwined column $c$, its local sub-DAG, constraints $\mathcal{C}_c \subseteq \mathcal{C}$
   \Ensure Python code snippet $p_c$
-  \State \textit{// [Placeholder: build prompt: sub-DAG, $\mathcal{C}_c$, generation order,
-         code template]}
-  \State \textit{// [Placeholder: LLM code-generator agent synthesises inverse function for $c$
-         given driver column values]}
-  \State \textit{// [Placeholder: deterministic sanity check on emitted code:
-         type compatibility, no undefined variables]}
+  \State build prompt: sub-DAG, $\mathcal{C}_c$, generation order, code template
+  \State LLM code-generator agent synthesises inverse function for $c$ given driver column values
+  \State \textit{// Deterministic sanity check: type compatibility, no undefined variables}
   \If{check fails}
-    \State \textit{// [Placeholder: repair loop (max 5 retries)]}
+    \State repair loop (max 5 retries)
   \EndIf
   \State \Return $p_c$
 \end{algorithmic}
@@ -624,26 +884,25 @@ The merged program is smoke-tested by running it at 10\% of the target row count
 Any runtime failure triggers an agent repair loop before full-scale materialisation.
 The final output is $\mathcal{P}$.]}
 
-% Algorithm 10: Deterministic Code Merge (sub-step)
+% Algorithm 12: Deterministic Code Merge (sub-step)
 \begin{algorithm}[t]
 \caption{Deterministic Code Merge}
 \label{alg:code-merge}
 \begin{algorithmic}[1]
   \Require Shard-level code snippets $\{p_1,\ldots,p_k\}$, code template $\mathcal{T}$
   \Ensure Consolidated Python program $\mathcal{P}$
-  \State \textit{// [Placeholder: align each snippet to its section in $\mathcal{T}$
-         (imports / seeds / helpers / intermediate / base)]}
-  \State \textit{// [Placeholder: detect conflicting column initialisations;
-         resolve via tie-breaking rules]}
-  \State \textit{// [Placeholder: run merged program at 10\% scale (smoke test)]}
+  \State align each snippet to its section in $\mathcal{T}$
+        (imports / seeds / helpers / intermediate / base)
+  \State detect conflicting column initialisations; resolve via tie-breaking rules
+  \State run merged program at 10\% scale (smoke test)
   \If{smoke test fails}
-    \State \textit{// [Placeholder: call repair agent; retry (max 5)]}
+    \State call repair agent; retry (max 5)
   \EndIf
   \State \Return $\mathcal{P}$
 \end{algorithmic}
 \end{algorithm}
 
-% Algorithm 11: Stage 4 summary (calls Algs 8, 9, 10)
+% Algorithm 13: Stage 4 summary (calls Algs 10, 11, 12)
 \begin{algorithm}[t]
 \caption{Stage 4: Code Generation}
 \label{alg:stage4}
@@ -652,14 +911,14 @@ The final output is $\mathcal{P}$.]}
   \Ensure Python program $\mathcal{P}$
   \ForAll{column $c$ in reverse-topological order of $\mathcal{G}$}
     \If{$|\text{in-edges}(c)| = 1$}
-      \State \Call{DetInverseCode}{$c, \tau_c, \phi_c$} $\to p_c$
+      \State $p_c \gets \Call{DetInverseCode}{c, \tau_c, \phi_c}$
              \hfill$\triangleright$ Alg.~\ref{alg:det-code}
     \Else
-      \State \Call{LLMAncestralSampling}{$c, \mathcal{C}_c$} $\to p_c$
+      \State $p_c \gets \Call{LLMAncestralSampling}{c, \mathcal{C}_c}$
              \hfill$\triangleright$ Alg.~\ref{alg:llm-sampling}
     \EndIf
   \EndFor
-  \State \Call{CodeMerge}{$\{p_c\}$} $\to \mathcal{P}$
+  \State $\mathcal{P} \gets \Call{CodeMerge}{\{p_c\}}$
          \hfill$\triangleright$ Alg.~\ref{alg:code-merge}
   \State \Return $\mathcal{P}$
 \end{algorithmic}
@@ -888,8 +1147,8 @@ deterministic path expected to achieve FA = 1.0 by construction.]}
 \label{subsec:case-study}
 
 \textit{[Placeholder: End-to-end walkthrough.
-NL description (\S\ref{sec:stage1}) $\to$ 9 atomic facts (Stage 1)
-$\to$ DDL schema: Applicants (ApplicantID PK, CreditScore, Income, DTI),
+NL description (\S\ref{sec:stage1}) $\to$ 9 atomic facts tagged STRUCTURAL/LOGICAL/STATISTICAL
+(Stage 1) $\to$ DDL schema: Applicants (ApplicantID PK, CreditScore, Income, DTI),
 Loans (LoanID PK, ApplicantID FK, LoanAmount, InterestRate) (Stage 2)
 $\to$ dependency DAG: \texttt{interest\_rate} $\leftarrow$ \texttt{credit\_score},
 \texttt{loan\_amount} (Stage 3)
@@ -904,14 +1163,14 @@ $\to$ sample of materialized rows verifying tiered-lookup constraint.]}
 # [Placeholder: Python code excerpt]
 # Expected content:
 #   def sample_interest_rate(credit_score, loan_amount):
-#       """Inverse function synthesised by LLM agent (Alg. 9).
+#       """Inverse function synthesised by LLM agent (Alg. 11).
 #       Implements tiered lookup: credit_score > 750 and amount < 50000 -> rate = 0.035
 #       ... additional tiers ...
 #       """
 #       ...
 #
 #   def sample_loan_amount(applicant_ids):
-#       """Deterministic FK-assignment inverse (Alg. 8, JOIN case)."""
+#       """Deterministic FK-assignment inverse (Alg. 10, JOIN case)."""
 #       return np.random.choice(applicant_ids, size=N_LOANS, replace=True)
 \end{lstlisting}
 
