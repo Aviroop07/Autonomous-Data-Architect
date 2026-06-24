@@ -286,42 +286,11 @@ over-flagging terse but correct facts.]}
 \begin{algorithmic}[1]
   \Require Candidate fact set $F$, source NL text $\mathcal{D}$
   \Ensure List of typed error records $E$
-  \State \textit{// Preprocessing: remove self-references and duplicate references}
-  \ForAll{$f \in F$}
-    \State normalize $f.\texttt{referenced\_fact\_ids}$
-          (remove $f.\texttt{id}$ and deduplicate)
-  \EndFor
-  \State \textit{// Check 1: all referenced IDs must exist in $F$}
-  \ForAll{$f \in F$, each $r \in f.\texttt{referenced\_fact\_ids}$}
-    \If{$r \notin \{f'.\texttt{id} : f' \in F\}$}
-      \State append CRITICAL error (INVALID\_REFERENCE, $f$, $r$) to $E$
-    \EndIf
-  \EndFor
-  \State \textit{// Check 2: no fact may reference itself (post-normalize guard)}
-  \ForAll{$f \in F$}
-    \If{$f.\texttt{id} \in f.\texttt{referenced\_fact\_ids}$}
-      \State append CRITICAL error (SELF\_REFERENCE, $f$) to $E$
-    \EndIf
-  \EndFor
-  \State \textit{// Check 3: DFS cycle detection on reference graph}
-  \State build directed graph $G_{\text{ref}}$: edges $f \to r$ for each reference $r$
-  \If{DFS detects a cycle in $G_{\text{ref}}$}
-    \State append CRITICAL error (CYCLE, cycle members) to $E$
-  \EndIf
-  \State \textit{// Check 4: non-external facts must have verifiable origin in $\mathcal{D}$}
-  \ForAll{$f \in F$ with $f.\texttt{is\_external} = \text{False}$}
-    \If{\textsc{FactOriginMatcher}($f.\texttt{origin}$, $\mathcal{D}$) fails}
-      \State severity $\gets$ LOW if $|f.\texttt{origin}| < 10$ else CRITICAL
-      \State append error (UNVERIFIABLE\_ORIGIN, $f$, severity) to $E$
-    \EndIf
-  \EndFor
-  \State \textit{// Check 5: external facts must cite $\geq 1$ existing non-external fact}
-  \ForAll{$f \in F$ with $f.\texttt{is\_external} = \text{True}$}
-    \If{$f.\texttt{referenced\_fact\_ids} = \emptyset$}
-      \State append MEDIUM error (UNCITED\_EXTERNAL, $f$) to $E$
-    \EndIf
-  \EndFor
-  \State \Return $E$
+  \State \textit{[Placeholder: normalize refs; check (1) invalid referenced IDs,
+         (2) self-references, (3) DFS cycles on reference graph,
+         (4) unverifiable origin via FactOriginMatcher (short spans $\to$ LOW severity),
+         (5) external facts without any cited non-external fact;
+         return typed errors CRITICAL / MEDIUM / LOW]}
 \end{algorithmic}
 \end{algorithm}
 
@@ -382,27 +351,11 @@ weight the fact.]}
 \begin{algorithmic}[1]
   \Require Accepted external facts $F_{\text{ext}}$, original non-external facts $F_{\text{orig}}$
   \Ensure Classified, deduplicated external fact set $F_{\text{ext}}^{*}$
-  \State \textit{// Step 1: deduplicate by normalised text (lowercase, strip whitespace)}
-  \State $F_{\text{ext}} \gets \text{dedup}(F_{\text{ext}})$
-  \State \textit{// Step 2: remove facts that reference only themselves}
-  \ForAll{$f \in F_{\text{ext}}$}
-    \If{$f.\texttt{id} \in f.\texttt{referenced\_fact\_ids}$}
-      \State discard $f$
-    \EndIf
-  \EndFor
-  \State \textit{// Step 3: validate that every referenced ID exists in $F_{\text{orig}}$}
-  \ForAll{$f \in F_{\text{ext}}$}
-    \If{$\exists\, r \in f.\texttt{referenced\_fact\_ids}$ s.t.\ $r \notin \{g.\texttt{id} : g \in F_{\text{orig}}\}$}
-      \State discard $f$
-    \EndIf
-  \EndFor
-  \State \textit{// Step 4: classify into ExternalFactKind via keyword matching}
-  \ForAll{$f \in F_{\text{ext}}$}
-    \State $f.\texttt{kind} \gets$ \textsc{ClassifyKind}($f.\texttt{text}$)
-           \Comment{TECHNICAL\_DEFINITION $|$ ARCHITECTURE\_PATTERN $|$
-                    DOMAIN\_PATTERN $|$ DOMAIN\_CONSTRAINT\_HINT}
-  \EndFor
-  \State \Return $F_{\text{ext}}^{*} \gets F_{\text{ext}}$
+  \State \textit{[Placeholder: (1) dedup by normalised text; (2) discard self-referencing facts;
+         (3) discard facts referencing IDs not in $F_{\text{orig}}$;
+         (4) classify each fact into ExternalFactKind via keyword matching
+         (TECHNICAL\_DEFINITION $|$ ARCHITECTURE\_PATTERN $|$
+          DOMAIN\_PATTERN $|$ DOMAIN\_CONSTRAINT\_HINT)]}
 \end{algorithmic}
 \end{algorithm}
 
@@ -428,38 +381,11 @@ weight the fact.]}
 \begin{algorithmic}[1]
   \Require NL description $\mathcal{D}$
   \Ensure Enriched, tagged atomic fact set $\mathcal{F}$
-  \State \textit{// LLM: FactExtractor decomposes $\mathcal{D}$ into candidate facts}
-  \State $F \gets \textsc{FactExtractor}(\mathcal{D})$
-  \Repeat
-    \State $E \gets \Call{DetFactValidator}{F, \mathcal{D}}$
-           \hfill$\triangleright$ Alg.~\ref{alg:det-fact-val}
-    \If{$E$ contains CRITICAL errors}
-      \State $F \gets \textsc{FactExtractor}(\mathcal{D}, F, E)$
-             \hfill$\textit{// LLM repair}$
-    \EndIf
-  \Until{$E$ is CRITICAL-free or retry budget exhausted}
-  \State \textit{// LLM: Verifier semantic audit $\to$ IntegrityReport}
-  \State $R_v \gets \textsc{Verifier}(F)$
-  \While{$R_v \neq \emptyset$}
-    \State $F \gets \textsc{FactExtractor}(\mathcal{D}, F, R_v)$
-           \hfill$\textit{// LLM repair guided by IntegrityReport}$
-    \State $R_v \gets \textsc{Verifier}(F)$
-  \EndWhile
-  \State \textit{// LLM: Tagger one-shot classification $\to$ STRUCTURAL/LOGICAL/STATISTICAL/METADATA}
-  \State $F \gets \textsc{Tagger}(F)$
-  \State \textit{// Deterministic: underspecification heuristic $\to$ search queries}
-  \State $Q \gets \textsc{UnderspecDetector}(F)$
-  \State \textit{// LLM: ContextEnricher (web pre-search + LLM) $\to$ proposed external facts}
-  \State $F_{\text{prop}} \gets \textsc{ContextEnricher}(F, Q)$
-  \Repeat
-    \State \textit{// LLM: ContextAuditor accepts/rejects proposed external facts}
-    \State $(F_{\text{acc}}, F_{\text{rej}}) \gets \textsc{ContextAuditor}(F_{\text{prop}})$
-    \State $F_{\text{prop}} \gets \textsc{ContextEnricher}(F, Q, F_{\text{rej}})$
-           \hfill$\textit{// LLM regeneration for rejected facts}$
-  \Until{audit is acceptable or retry budget exhausted}
-  \State $F_{\text{ext}}^{*} \gets \Call{ExternalContextFilter}{F_{\text{acc}}, F}$
-         \hfill$\triangleright$ Alg.~\ref{alg:ext-filter}
-  \State \Return $\mathcal{F} \gets F \cup F_{\text{ext}}^{*}$
+  \State \textit{[Placeholder: FactExtractor $\to$ DetFactValidator loop (Alg.~\ref{alg:det-fact-val})
+         $\to$ Verifier repair loop $\to$ Tagger (one-shot) $\to$ UnderspecDetector
+         $\to$ ContextEnricher (web pre-search + LLM) $\to$ ContextAuditor loop
+         $\to$ ExternalContextFilter (Alg.~\ref{alg:ext-filter})
+         $\to$ return $\mathcal{F} = F \cup F_{\text{ext}}^{*}$]}
 \end{algorithmic}
 \end{algorithm}
 
@@ -511,24 +437,10 @@ the validator itself.]}
 \begin{algorithmic}[1]
   \Require Schema shard $S_i$
   \Ensure Validated $S_i$ or typed repair signal
-  \State \textit{// Assert PK uniqueness for every table in $S_i$}
-  \ForAll{table $T \in S_i$}
-    \If{$T$ has duplicate PK column names}
-      \State emit PK\_CLASH error
-    \EndIf
-  \EndFor
-  \State \textit{// Assert FK targets exist or flag as cross-shard pending}
-  \ForAll{FK $(T_{\text{src}}, T_{\text{tgt}}) \in S_i$}
-    \If{$T_{\text{tgt}} \notin S_i$ and not already flagged cross-shard}
-      \State emit FK\_DANGLE or flag as cross-shard pending
-    \EndIf
-  \EndFor
-  \State \textit{// BFS connectivity: assert no isolated table (no PK/FK path)}
-  \State build schema graph of $S_i$; run BFS from any table
-  \If{unreachable tables found}
-    \State emit ISOLATED\_TABLE error per unreachable table
-  \EndIf
-  \State \Return validated $S_i$ (or repair signal if any error emitted)
+  \State \textit{[Placeholder: (1) PK uniqueness per table (PK\_CLASH);
+         (2) FK target existence or cross-shard pending flag (FK\_DANGLE);
+         (3) BFS connectivity---no isolated table (ISOLATED\_TABLE);
+         emit typed repair signal to SchemaArchitect on failure]}
 \end{algorithmic}
 \end{algorithm}
 
@@ -555,37 +467,13 @@ Shard pairs with $\sigma > \theta$ are candidate overlaps.]}
 \begin{algorithmic}[1]
   \Require Validated shards $\{S_1,\ldots,S_k\}$, threshold $\theta$
   \Ensure Merged global schema $\mathcal{S}$, \texttt{MergeDecisionLog}
-  \State \textit{// Pass 1: pairwise scoring and Gale--Shapley stable matching}
-  \ForAll{shard pairs $(S_i, S_j)$, table pairs $(T_a \in S_i, T_b \in S_j)$}
-    \State compute $\sigma_{\text{name}}$ via embedding cosine + lexical fallback
-    \State compute $\sigma_{\text{attr}}$ via column-pair GS matching
-    \State $\sigma(T_a, T_b) \gets \alpha \cdot \sigma_{\text{name}} + (1-\alpha) \cdot \sigma_{\text{attr}}$
-  \EndFor
-  \State run GS stable matching on $\sigma$ matrix; identify overlapping pairs with $\sigma > \theta$
-  \State \textit{// Pass 2: FK consistency pre-validation across matched pairs}
-  \ForAll{matched pair $(T_a, T_b)$}
-    \State \textit{// check FK integrity: cross-shard FK endpoints align post-merge}
-    \If{FK conflict detected}
-      \State demote $(T_a, T_b)$ from matched to unioned; log decision
-    \EndIf
-  \EndFor
-  \State \textit{// Pass 3: actual merge --- column union + relationship remapping}
-  \ForAll{matched pair $(T_a, T_b)$}
-    \State merge columns (union with conflict resolution); remap relationships
-  \EndFor
-  \State union all unmatched tables into $\mathcal{S}$
-  \State \textit{// Post-merge repairs}
-  \State \textsc{ConsolidateJunctions}($\mathcal{S}$)
-         \Comment{remove redundant FKs where M2M junction table exists}
-  \State \textsc{RepairRelationshipNames}($\mathcal{S}$)
-         \Comment{fix stale table name refs in relationships}
-  \State $\mathcal{S}$.\textsc{AlignFKColumnTypes}()
-         \Comment{align FK column types with referenced PK types}
-  \State $\mathcal{S}$.\textsc{WireOrphanFKColumns}()
-         \Comment{reconnect FK columns whose target was lost during merge}
-  \State \textsc{ValidateConnectivity}($\mathcal{S}$)
-         \Comment{BFS/DFS: report disconnected components as warnings}
-  \State \Return $\mathcal{S}$, \texttt{MergeDecisionLog}
+  \State \textit{[Placeholder: Pass 1---pairwise $\sigma = \alpha\,\sigma_{\text{name}} +
+         (1{-}\alpha)\,\sigma_{\text{attr}}$ scoring (embedding cosine + lexical fallback;
+         column-pair GS pass) and Gale--Shapley stable matching;
+         Pass 2---FK consistency pre-validation per matched pair;
+         Pass 3---column union + relationship remapping;
+         post-merge repairs: junction consolidation, relationship name repair,
+         FK type alignment, orphan FK wiring, connectivity check]}
 \end{algorithmic}
 \end{algorithm}
 
@@ -636,30 +524,11 @@ This produces the final validated global schema $\mathcal{S}$.]}
 \begin{algorithmic}[1]
   \Require Fact set $\mathcal{F}$
   \Ensure Global schema $\mathcal{S}$
-  \State \textit{// LLM: one-shot domain intelligence extraction}
-  \State $R_d \gets \textsc{DomainIntelligenceExtractor}(\mathcal{F})$
-  \State \textit{// LLM + det. loop: cluster facts into ChunkedPlan}
-  \State $\textit{plan} \gets \textsc{Chunker}(\mathcal{F}, R_d)$
-  \State \textit{// LLM + det. loop: schema architect per shard, run in parallel}
-  \ForAll{chunk $C_i \in \textit{plan}$} \textbf{in parallel}
-    \State $S_i \gets \textsc{SchemaArchitect}(C_i, \textit{plan}.\texttt{core\_modeling\_facts}, R_d)$
-    \State $\Call{ShardValidation}{S_i}$
-           \hfill$\triangleright$ Alg.~\ref{alg:shard-val}
-  \EndFor
-  \State $(\mathcal{S}_{\text{draft}}, \textit{log}) \gets \Call{SchemaMerge}{\{S_i\}}$
-         \hfill$\triangleright$ Alg.~\ref{alg:merge}
-  \State \textit{// LLM: MergeReviewer reviews merged schema + MergeDecisionLog}
-  \State $\textit{patches}_m \gets \textsc{MergeReviewer}(\mathcal{S}_{\text{draft}}, \textit{log})$
-  \State apply $\textit{patches}_m$ to $\mathcal{S}_{\text{draft}}$
-  \Repeat
-    \State \textit{// LLM loop: DomainAuditor produces CritiqueReport with patches}
-    \State $R_c \gets \textsc{DomainAuditor}(\mathcal{S}_{\text{draft}}, R_d, \mathcal{F})$
-    \State \textit{// Deterministic: validate each patch before applying}
-    \State apply validated patches from $R_c$ to $\mathcal{S}_{\text{draft}}$
-  \Until{$R_c$ is empty or retry budget exhausted}
-  \State \textit{// LLM: one-shot analytical-utility compliance check}
-  \State $\textsc{ComplianceCertifier}(\mathcal{S}_{\text{draft}}, \mathcal{F})$
-  \State \Return $\mathcal{S} \gets \mathcal{S}_{\text{draft}}$
+  \State \textit{[Placeholder: DomainIntelligenceExtractor (one-shot LLM)
+         $\to$ Chunker + det.\ loop $\to$ parallel SchemaArchitect + ShardValidation
+         (Alg.~\ref{alg:shard-val}) $\to$ SchemaMerge (Alg.~\ref{alg:merge})
+         $\to$ MergeReviewer (LLM) $\to$ DomainAuditor loop + det.\ patch validation
+         $\to$ ComplianceCertifier (one-shot LLM) $\to$ return $\mathcal{S}$]}
 \end{algorithmic}
 \end{algorithm}
 
@@ -690,17 +559,10 @@ Decision-tree feasibility is checked deterministically (Algorithm~\ref{alg:dt-fe
 \begin{algorithmic}[1]
   \Require Set of decision-tree constraints $T \subseteq \mathcal{C}$
   \Ensure Feasibility verdict per constraint; infeasibility report if any
-  \ForAll{constraint $t \in T$}
-    \State \textit{// Enumerate leaf conditions; check for contradictory conjunctions
-           (e.g., $x > 750$ AND $x < 300$)}
-    \State \textit{// Verify that outcome column data type is compatible with
-           assigned value ranges}
-    \State \textit{// Check that referenced columns exist in schema $\mathcal{S}$}
-    \If{infeasible}
-      \State \textit{// Flag constraint; trigger constraint-modeling agent repair}
-    \EndIf
-  \EndFor
-  \State \Return feasibility verdicts
+  \State \textit{[Placeholder: per constraint---enumerate leaf conditions,
+         check contradictory conjunctions (e.g., $x > 750$ AND $x < 300$),
+         verify outcome type compatibility, check referenced columns exist in $\mathcal{S}$;
+         flag infeasible constraints for LLM repair]}
 \end{algorithmic}
 \end{algorithm}
 
@@ -732,17 +594,9 @@ updates $\mathcal{C}$ to break the cycle and the graph is rebuilt.]}
 \begin{algorithmic}[1]
   \Require Schema $\mathcal{S}$, structured constraints $\mathcal{C}$
   \Ensure Column-level DAG $\mathcal{G}$
-  \State initialise $\mathcal{G}$; add one node per column in $\mathcal{S}$
-  \State add FK edges in reverse-causal direction (FK target $\to$ FK source)
-  \ForAll{decision-tree constraint $t \in \mathcal{C}$}
-    \State add edge outcome $\leftarrow$ driver for each driver column in $t$
-  \EndFor
-  \State \textit{// Insert multivariate group composite nodes (TBD)}
-  \State run topological sort on $\mathcal{G}$
-  \If{cycle detected}
-    \State identify cycle edges; invoke patch agent to update $\mathcal{C}$; rebuild $\mathcal{G}$
-  \EndIf
-  \State \Return $\mathcal{G}$
+  \State \textit{[Placeholder: one node per column; FK edges reverse-causal;
+         constraint edges outcome $\leftarrow$ driver; multivariate group nodes (TBD);
+         topological sort; cycle $\to$ patch agent updates $\mathcal{C}$, rebuild]}
 \end{algorithmic}
 \end{algorithm}
 
@@ -772,14 +626,11 @@ updates $\mathcal{C}$ to break the cycle and the graph is rebuilt.]}
 \begin{algorithmic}[1]
   \Require Schema $\mathcal{S}$, fact set $\mathcal{F}$
   \Ensure Structured constraints $\mathcal{C}$, dependency DAG $\mathcal{G}$
-  \State shard $\mathcal{S}$'s graph into connected components
-  \State run constraint-modeling agents per component in parallel
-  \State math agent verifies distribution feasibility of each component's constraints
-  \State $\Call{DTFeasibilityCheck}{\mathcal{C}}$
-         \hfill$\triangleright$ Alg.~\ref{alg:dt-feasibility}
-  \State $\mathcal{G} \gets \Call{BuildDAG}{\mathcal{S}, \mathcal{C}}$
-         \hfill$\triangleright$ Alg.~\ref{alg:dag}
-  \State \Return $\mathcal{C},\,\mathcal{G}$
+  \State \textit{[Placeholder: shard $\mathcal{S}$ into connected components
+         $\to$ parallel constraint-modeling agents $\to$ math agent distribution feasibility
+         $\to$ DTFeasibilityCheck (Alg.~\ref{alg:dt-feasibility})
+         $\to$ BuildDAG (Alg.~\ref{alg:dag})
+         $\to$ return $\mathcal{C}, \mathcal{G}$]}
 \end{algorithmic}
 \end{algorithm}
 
@@ -809,19 +660,10 @@ JOIN (FK assignment) $\to$ deterministic FK-key draw.]}
 \begin{algorithmic}[1]
   \Require Single-dependency column $c$, aggregation type $\tau$, constraint $\phi$
   \Ensure Python code snippet $p_c$
-  \State synthesise intermediate aggregate/join table satisfying $\phi$
-  \If{$\tau = \textsc{Sum}$}
-    \State emit uniform-partition inverse: randomly split aggregate total across constituent rows
-  \ElsIf{$\tau = \textsc{Max}$}
-    \State emit argmax-selection inverse: designate one row as max, sample others below it
-  \ElsIf{$\tau = \textsc{Avg}$}
-    \State emit constrained-sampling inverse: sample $n-1$ values, set $n$-th to satisfy average
-  \ElsIf{$\tau = \textsc{Join}$}
-    \State emit FK-assignment inverse: draw FK values from parent PK column
-  \Else
-    \State fall through to LLM path (§\ref{subsec:llm-sampling})
-  \EndIf
-  \State \Return $p_c$
+  \State \textit{[Placeholder: synthesise intermediate aggregate/join table;
+         dispatch on $\tau$: SUM $\to$ uniform partition, MAX $\to$ argmax selection,
+         AVG $\to$ constrained sampling, JOIN $\to$ FK-key draw;
+         unsupported $\tau$ falls through to LLM path (§\ref{subsec:llm-sampling})]}
 \end{algorithmic}
 \end{algorithm}
 
@@ -846,13 +688,9 @@ constraints are satisfied \emph{by construction}, with no post-hoc repair.]}
 \begin{algorithmic}[1]
   \Require Intertwined column $c$, its local sub-DAG, constraints $\mathcal{C}_c \subseteq \mathcal{C}$
   \Ensure Python code snippet $p_c$
-  \State build prompt: sub-DAG, $\mathcal{C}_c$, generation order, code template
-  \State LLM code-generator agent synthesises inverse function for $c$ given driver column values
-  \State \textit{// Deterministic sanity check: type compatibility, no undefined variables}
-  \If{check fails}
-    \State repair loop (max 5 retries)
-  \EndIf
-  \State \Return $p_c$
+  \State \textit{[Placeholder: build prompt (sub-DAG + $\mathcal{C}_c$ + generation order + template)
+         $\to$ LLM synthesises inverse function $\to$ deterministic sanity check
+         (type compatibility, no undefined variables) $\to$ repair loop max 5 retries]}
 \end{algorithmic}
 \end{algorithm}
 
@@ -892,14 +730,10 @@ The final output is $\mathcal{P}$.]}
 \begin{algorithmic}[1]
   \Require Shard-level code snippets $\{p_1,\ldots,p_k\}$, code template $\mathcal{T}$
   \Ensure Consolidated Python program $\mathcal{P}$
-  \State align each snippet to its section in $\mathcal{T}$
-        (imports / seeds / helpers / intermediate / base)
-  \State detect conflicting column initialisations; resolve via tie-breaking rules
-  \State run merged program at 10\% scale (smoke test)
-  \If{smoke test fails}
-    \State call repair agent; retry (max 5)
-  \EndIf
-  \State \Return $\mathcal{P}$
+  \State \textit{[Placeholder: align snippets to template sections
+         (imports / seeds / helpers / intermediate / base);
+         resolve column initialisation conflicts via tie-breaking rules;
+         smoke test at 10\% scale; repair loop max 5 retries on failure]}
 \end{algorithmic}
 \end{algorithm}
 
@@ -910,18 +744,10 @@ The final output is $\mathcal{P}$.]}
 \begin{algorithmic}[1]
   \Require Schema $\mathcal{S}$, constraints $\mathcal{C}$, DAG $\mathcal{G}$
   \Ensure Python program $\mathcal{P}$
-  \ForAll{column $c$ in reverse-topological order of $\mathcal{G}$}
-    \If{$|\text{in-edges}(c)| = 1$}
-      \State $p_c \gets \Call{DetInverseCode}{c, \tau_c, \phi_c}$
-             \hfill$\triangleright$ Alg.~\ref{alg:det-code}
-    \Else
-      \State $p_c \gets \Call{LLMAncestralSampling}{c, \mathcal{C}_c}$
-             \hfill$\triangleright$ Alg.~\ref{alg:llm-sampling}
-    \EndIf
-  \EndFor
-  \State $\mathcal{P} \gets \Call{CodeMerge}{\{p_c\}}$
-         \hfill$\triangleright$ Alg.~\ref{alg:code-merge}
-  \State \Return $\mathcal{P}$
+  \State \textit{[Placeholder: traverse $\mathcal{G}$ in reverse-topological order;
+         single in-edge $\to$ DetInverseCode (Alg.~\ref{alg:det-code}),
+         multiple in-edges $\to$ LLMAncestralSampling (Alg.~\ref{alg:llm-sampling});
+         CodeMerge (Alg.~\ref{alg:code-merge}) $\to$ return $\mathcal{P}$]}
 \end{algorithmic}
 \end{algorithm}
 
