@@ -1,0 +1,677 @@
+% ============================================================
+% ScribbleDB: Natural Language to Relational Database Synthesis
+% Skeleton draft -- headings, placeholders, algorithm stubs
+% ============================================================
+\documentclass[sigconf]{acmart}
+
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{booktabs}
+\usepackage{multirow}
+
+% ---- Draft / copyright suppression ----
+\setcopyright{none}
+\acmConference[SIGMOD '27]{ACM SIGMOD International Conference on Management of Data}{2027}{TBD}
+\acmDOI{10.1145/XXXXXXX.XXXXXXX}
+\acmISBN{XXX-X-XXXX-XXXX-X/27/00}
+
+% ---- Title ----
+\title{ScribbleDB: Natural Language to Relational Database Synthesis}
+
+% ---- Authors ----
+\author{Aviroop Mitra}
+\email{aviroopmitra@iisc.ac.in}
+\affiliation{%
+  \institution{Indian Institute of Science}
+  \city{Bengaluru}
+  \country{India}
+}
+
+\author{Anupam Sanghi}
+\email{placeholder@iith.ac.in}
+\affiliation{%
+  \institution{Indian Institute of Technology Hyderabad}
+  \city{Sangareddy}
+  \country{India}
+}
+
+% ---- Abstract ----
+\begin{abstract}
+\textit{[Placeholder $\sim$150\,words. Motivate the greenfield database-generation problem: no real data,
+no formal spec, only a natural-language description.
+Introduce ScribbleDB as a four-stage agentic pipeline
+(fact extraction $\to$ schema generation $\to$ constraint modeling $\to$ code generation)
+whose output is a relational schema (DDL) plus an executable Python program that materializes
+the populated tables.
+Highlight the key new contributions versus prior workshop version:
+(i)~deterministic inverse-function code generation for single-dependency DAG nodes,
+(ii)~multivariate distribution support,
+(iii)~ancestral sampling for logical constraints (FA = 1.0),
+(iv)~context enrichment and shard-and-merge for scalability.
+Close with headline numbers: $\sim$6$\times$ table accuracy and $\sim$4$\times$ lower latency
+over SchemaAgent across three benchmark suites.]}
+\end{abstract}
+
+% ---- CCS / Keywords ----
+\ccsdesc[500]{Information systems~Database design and models}
+\ccsdesc[300]{Information systems~Database utilities and tools}
+\keywords{Database Generation; Schema Generation; Large Language Models; Agentic Pipelines; Ancestral Sampling}
+
+\maketitle
+
+% ============================================================
+\section{Introduction}
+% ============================================================
+
+\textit{[Para 1 --- Why synthetic databases matter: application development, testing, benchmarking;
+data-privacy and greenfield constraints prevent access to real data.]}
+
+\textit{[Para 2 --- State of the art and its limitations:
+ab-initio generators (MUDD, PDGF, Myriad) require formal declarative specs;
+regeneration-based tools (DBSynth, RSGen, Hydra, SAM) require production artefacts.
+Neither suits a non-technical domain expert with only an NL description.]}
+
+\textit{[Para 3 --- LLMs as enabler and source of new challenges.
+Strong NL-to-SQL~\cite{yu2019spider} and text-to-schema~\cite{wang2025text2schema} capability.
+Three core challenges for full DB synthesis:
+\textbf{(a)~Expressiveness} (complex cross-table constraints),
+\textbf{(b)~Hallucination} (error propagation across stages),
+\textbf{(c)~Scalability} (context window and materialization throughput).]}
+
+\textit{[Para 4 --- ScribbleDB overview: how it addresses each challenge.
+Emphasise that the \emph{output} is a DDL schema and an executable Python program,
+not tables directly.]}
+
+\medskip\noindent\textbf{Contributions.}
+\begin{itemize}[leftmargin=*]
+  \item End-to-end NL-to-database agentic pipeline; outputs relational DDL schema
+        + executable Python code for table materialization.
+  \item \textit{[New contribution]} Deterministic code generation for single-dependency
+        columns in the DAG via inverse functions on join/aggregate tables,
+        reducing LLM calls and guaranteeing correctness-by-construction.
+  \item \textit{[New contribution, partially fleshed out]} Multivariate distribution
+        support for cross-column correlations beyond univariate priors.
+  \item Shard-and-merge schema generation with Gale--Shapley entity alignment.
+  \item Ancestral sampling for logical constraint satisfaction; FA = 1.0 empirically.
+  \item Comprehensive evaluation: $\sim$6$\times$ table accuracy, $\sim$4$\times$ lower
+        latency vs.\ SchemaAgent~\cite{wang2025text2schema} across three benchmark suites.
+\end{itemize}
+
+% Figure 1: Motivating example
+\begin{figure}[t]
+  \centering
+  \vspace{1.5cm}
+  \textit{[Figure 1 placeholder: NL description (left) $\to$ generated DDL schema (middle)
+  $\to$ excerpt of materialized rows (right), for the Credit Risk domain.]}
+  \vspace{1.5cm}
+  \caption{Motivating example: ScribbleDB converts an NL description into
+           a relational schema and an executable Python program that populates
+           the tables.}
+  \label{fig:motivating}
+\end{figure}
+
+% ============================================================
+\section{Background and Related Work}
+% ============================================================
+
+\subsection{Database Generation}
+\textit{[Para: Ab-initio generators (MUDD~\cite{stephens2004mudd}, PSDG~\cite{hoag2007psdg},
+PDGF~\cite{rabl2010pdgf}, Myriad~\cite{alexandrov2012myriad}) and regeneration-based approaches
+(DBSynth~\cite{rabl2015dbsynth}, RSGen~\cite{shen2013rsgen}, Hydra~\cite{sanghi2018hydra},
+SAM~\cite{yang2022sam}).
+Contrast with ScribbleDB's NL-only input.]}
+
+\subsection{LLM-based Schema and SQL Generation}
+\textit{[Para: NL-to-SQL survey~\cite{luo2025nl2sql}; SchemaAgent / Text2Schema~\cite{wang2025text2schema};
+gap: none target full materialization with distributional and logical constraint fidelity.]}
+
+\subsection{Agentic Systems for Structured Output}
+\textit{[Para: Multi-agent orchestration, self-repair loops, tool-augmented LLMs.
+ScribbleDB extends these to data materialization at scale.]}
+
+% ============================================================
+\section{Problem Formulation}
+% ============================================================
+
+\textit{[Para 1 --- Input: NL description $\mathcal{D}$, target row count per fact table.
+Output: (i)~relational schema $\mathcal{S}$ (table definitions, PKs, FKs, data types),
+(ii)~Python program $\mathcal{P}$ s.t.\ executing $\mathcal{P}$ produces tables satisfying
+$\mathcal{S}$ and all constraints implied by $\mathcal{D}$.]}
+
+\textit{[Para 2 --- Correctness criteria: schema validity (PK uniqueness, FK referential
+integrity, type correctness), constraint fidelity (FA = 1.0 for logical; KS/MRE/NLL within
+thresholds for statistical), and completeness (recall of schema elements described in $\mathcal{D}$).
+The system assumes $\mathcal{D}$ is internally consistent.]}
+
+% ============================================================
+\section{System Architecture}
+% ============================================================
+
+\textit{[Para: Four-stage pipeline overview. Each stage uses deterministic guards;
+failures trigger a bounded repair loop (max 5 retries).
+The pipeline outputs DDL + a Python program---not tables---so correctness
+is verifiable by inspection before materialization.]}
+
+% Figure 2: Architecture
+\begin{figure*}[t]
+  \centering
+  \vspace{2cm}
+  \textit{[Figure 2 placeholder: Full ScribbleDB architecture---four stage boxes
+  (Fact Extraction, Schema Generation, Constraint Modeling, Code Generation)
+  with LLM agent icons, deterministic validator blocks, repair-loop arrows,
+  and final output labels (DDL schema + Python code).]}
+  \vspace{2cm}
+  \caption{ScribbleDB architecture. Each stage is guarded by deterministic validators
+           and a bounded repair loop. The final outputs are a relational DDL schema and
+           an executable Python program.}
+  \label{fig:architecture}
+\end{figure*}
+
+% ============================================================
+\section{Stage 1: Fact Extraction}
+\label{sec:stage1}
+% ============================================================
+
+\subsection{Atomic Fact Decomposition and Verification}
+\textit{[Para: LLM agent decomposes NL input into atomic facts (single-requirement statements).
+A verifier agent audits for omissions and hallucinations; iterates until set is consistent.]}
+
+\subsection{Context Enrichment}
+\textit{[Para: Technical terms (e.g., DTI, LIBOR, HbA1c) grounded via web retrieval and
+domain knowledge bases. Ablation shows +10\% Table F1 from enrichment (\S\ref{sec:eval}).]}
+
+% Figure 3: Fact extraction example
+\begin{figure}[t]
+  \centering
+  \vspace{1.5cm}
+  \textit{[Figure 3 placeholder: Credit Risk NL paragraph (top) decomposed into
+  8--10 atomic facts (middle); enriched facts with domain-grounded terms highlighted (bottom).]}
+  \vspace{1.5cm}
+  \caption{Fact extraction for the Credit Risk running example.}
+  \label{fig:fact-extraction}
+\end{figure}
+
+% Algorithm 1: Stage 1 -- Fact Extraction (summary)
+\begin{algorithm}[t]
+\caption{Stage 1: Fact Extraction \& Enrichment}
+\label{alg:stage1}
+\begin{algorithmic}[1]
+  \Require NL description $\mathcal{D}$
+  \Ensure Enriched atomic fact set $\mathcal{F}$
+  \State \textit{// [Placeholder: LLM agent decomposes $\mathcal{D}$ into candidate atomic facts]}
+  \State \textit{// [Placeholder: Verifier agent checks consistency; repair loop if needed]}
+  \State \textit{// [Placeholder: Web retrieval enriches technical terms in each fact]}
+  \State \Return $\mathcal{F}$
+\end{algorithmic}
+\end{algorithm}
+
+% ============================================================
+\section{Stage 2: Schema Generation}
+\label{sec:stage2}
+% ============================================================
+
+\subsection{Fact Clustering and Parallel Shard Generation}
+\textit{[Para: An agent clusters $\mathcal{F}$ into shards, each covering a closely related
+table subset. Schema-architect agents process shards in parallel.]}
+
+\subsection{Deterministic Shard Validation}
+\textit{[Para: Pure-algorithmic checks per shard: PK uniqueness, FK referential completeness,
+schema-graph connectivity (no isolated tables). No LLM call. Failures trigger repair loop.]}
+
+% Algorithm 2: Shard Validation (deterministic sub-step)
+\begin{algorithm}[t]
+\caption{Deterministic Shard Validation}
+\label{alg:shard-val}
+\begin{algorithmic}[1]
+  \Require Schema shard $S_i$
+  \Ensure Validated shard or repair signal
+  \State \textit{// [Placeholder: check PK uniqueness across all tables in $S_i$]}
+  \State \textit{// [Placeholder: verify FK referential completeness within shard]}
+  \State \textit{// [Placeholder: connectivity check on schema graph of $S_i$]}
+  \If{\textit{any check fails}}
+    \State \textit{// [Placeholder: emit repair signal to schema-architect agent]}
+  \EndIf
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Shard Merging via Stable Matching}
+\textit{[Para: Overlapping entity representations across shards identified via
+Gale--Shapley~\cite{gale1962} stable matching over
+(i)~semantic table-name similarity and (ii)~column-alignment score.
+Overlapping tables merged into unified global schema $\mathcal{S}$.]}
+
+% Algorithm 3: Gale--Shapley Schema Merge (deterministic sub-step)
+\begin{algorithm}[t]
+\caption{Deterministic Schema Merge via Stable Matching}
+\label{alg:merge}
+\begin{algorithmic}[1]
+  \Require Validated shards $\{S_1,\ldots,S_k\}$
+  \Ensure Merged global schema $\mathcal{S}$
+  \State \textit{// [Placeholder: compute pairwise semantic similarity scores for table pairs across shards]}
+  \State \textit{// [Placeholder: run Gale--Shapley over table pairs; identify stable overlaps]}
+  \State \textit{// [Placeholder: column-alignment second-pass for matched table pairs]}
+  \State \textit{// [Placeholder: merge overlapping tables; union non-overlapping tables]}
+  \State \Return $\mathcal{S}$
+\end{algorithmic}
+\end{algorithm}
+
+% Figure 4: Shard-and-merge
+\begin{figure}[t]
+  \centering
+  \vspace{1.5cm}
+  \textit{[Figure 4 placeholder: Two schema shards with an overlapping
+  Applicant/Customer entity; Gale--Shapley matching arrow; merged global schema on right.]}
+  \vspace{1.5cm}
+  \caption{Shard-and-merge for Credit Risk. Overlapping entities are identified and
+           merged into the global schema via stable matching.}
+  \label{fig:shard-merge}
+\end{figure}
+
+% Algorithm 4: Stage 2 summary (calls Algs 2 & 3)
+\begin{algorithm}[t]
+\caption{Stage 2: Schema Generation}
+\label{alg:stage2}
+\begin{algorithmic}[1]
+  \Require Fact set $\mathcal{F}$
+  \Ensure Global schema $\mathcal{S}$
+  \State \textit{// [Placeholder: cluster $\mathcal{F}$ into shards; run schema-architect agents in parallel]}
+  \State \Call{ShardValidation}{$S_i$} \textit{~for each shard $S_i$} \hfill$\triangleright$ Alg.~\ref{alg:shard-val}
+  \State \Call{SchemaMerge}{$\{S_i\}$} \hfill$\triangleright$ Alg.~\ref{alg:merge}
+  \State \Return $\mathcal{S}$
+\end{algorithmic}
+\end{algorithm}
+
+% ============================================================
+\section{Stage 3: Constraint Modeling}
+\label{sec:stage3}
+% ============================================================
+
+\subsection{Structured Constraint Representation}
+\textit{[Para: Constraints stored in a nested structured format:
+univariate distributions (type, parameters) and decision-tree logical constraints
+(if--then rules over column values, including cross-table aggregations).
+Representation also extended to multivariate groups (\S\ref{subsec:multivariate}).]}
+
+\subsection{Constraint Extraction and Verification}
+\textit{[Para: Schema graph sharded into connected components.
+Constraint-modeling agent extracts constraints per component in parallel.
+Mathematics agent verifies distribution feasibility; decision-tree feasibility checked
+deterministically.]}
+
+\subsection{Multivariate Distribution Support}
+\label{subsec:multivariate}
+\textit{[Para --- PLACEHOLDER (not fully fleshed out): Extension beyond univariate constraints
+to capture cross-column correlations.
+Planned approach: [TBD --- likely copula-based joint sampling or conditional chain representation].
+Describe how multivariate constraint groups are represented in the structured format
+and how they integrate into the dependency graph.]}
+
+\subsection{Dependency Graph Construction}
+\textit{[Para: From FK links and decision-tree constraints, build a column-level DAG
+in reverse-causal order: constrained outcomes (e.g., \texttt{interest\_rate}) positioned as
+roots, independent drivers as leaves.
+Cycle detection via topological sort; patch agent invoked if cycles remain.]}
+
+% Algorithm 5: DAG Construction (deterministic sub-step)
+\begin{algorithm}[t]
+\caption{Deterministic Dependency DAG Construction}
+\label{alg:dag}
+\begin{algorithmic}[1]
+  \Require Schema $\mathcal{S}$, structured constraints $\mathcal{C}$
+  \Ensure Column-level DAG $\mathcal{G}$
+  \State \textit{// [Placeholder: add FK edges in reverse-causal direction]}
+  \State \textit{// [Placeholder: add decision-tree dependency edges (outcome $\leftarrow$ driver)]}
+  \State \textit{// [Placeholder: add multivariate group edges (TBD)]}
+  \State \textit{// [Placeholder: run topological sort; detect cycles]}
+  \If{\textit{cycle detected}}
+    \State \textit{// [Placeholder: call patch agent; update $\mathcal{C}$; retry]}
+  \EndIf
+  \State \Return $\mathcal{G}$
+\end{algorithmic}
+\end{algorithm}
+
+% Figure 5: Dependency DAG
+\begin{figure}[t]
+  \centering
+  \vspace{1.5cm}
+  \textit{[Figure 5 placeholder: Column-level DAG for Credit Risk.
+  Nodes: \texttt{credit\_score}, \texttt{loan\_amount}, \texttt{interest\_rate}.
+  Reverse-causal directed edges. Dashed node group = multivariate dependency (placeholder).]}
+  \vspace{1.5cm}
+  \caption{Dependency DAG for the Credit Risk example.
+           \texttt{interest\_rate} is the root; its drivers are leaves.
+           Dashed group indicates a multivariate dependency (placeholder).}
+  \label{fig:dag}
+\end{figure}
+
+% Algorithm 6: Stage 3 summary (calls Alg 5)
+\begin{algorithm}[t]
+\caption{Stage 3: Constraint Modeling}
+\label{alg:stage3}
+\begin{algorithmic}[1]
+  \Require Schema $\mathcal{S}$, fact set $\mathcal{F}$
+  \Ensure Structured constraints $\mathcal{C}$, dependency DAG $\mathcal{G}$
+  \State \textit{// [Placeholder: shard schema graph into connected components]}
+  \State \textit{// [Placeholder: run constraint-modeling agents per component in parallel]}
+  \State \textit{// [Placeholder: verify distributions (math agent) and decision trees (deterministic)]}
+  \State \Call{BuildDAG}{$\mathcal{S}, \mathcal{C}$} \hfill$\triangleright$ Alg.~\ref{alg:dag}
+  \State \Return $\mathcal{C},\,\mathcal{G}$
+\end{algorithmic}
+\end{algorithm}
+
+% ============================================================
+\section{Stage 4: Code Generation}
+\label{sec:stage4}
+% ============================================================
+
+\subsection{Deterministic Inverse-Function Code for Single-Dependency Columns}
+\label{subsec:det-codegen}
+\textit{[Para: Key new contribution.
+For each column node in $\mathcal{G}$ that has \emph{exactly one} dependency,
+code is synthesized deterministically---no LLM call.
+Strategy: (i)~synthesize an intermediate join or aggregate table satisfying the
+aggregate constraint; (ii)~decompose back to base columns using an inverse function
+whose form is determined by the aggregation type
+(SUM $\to$ uniform partition; MAX $\to$ argmax selection; JOIN $\to$ FK assignment).
+Guarantees correctness-by-construction; eliminates LLM API cost for these nodes.]}
+
+\textit{[Para: The LLM code-generator agent is invoked only when column dependencies are
+\emph{intertwined}---multiple constraints share overlapping column sets with no clean
+closed-form inverse.
+In that case, the agent follows the reverse-causal order of $\mathcal{G}$ and synthesizes
+inverse functions generatively (ancestral sampling).]}
+
+% Algorithm 7: Deterministic Inverse Code Generation (sub-step)
+\begin{algorithm}[t]
+\caption{Deterministic Inverse-Function Code Synthesis}
+\label{alg:det-code}
+\begin{algorithmic}[1]
+  \Require Single-dependency column $c$, aggregation type $\tau$, constraint $\phi$
+  \Ensure Python code snippet $p_c$
+  \State \textit{// [Placeholder: synthesize intermediate aggregate/join table satisfying $\phi$]}
+  \Switch{$\tau$}
+    \Case{\textsc{Sum}}
+      \State \textit{// [Placeholder: emit uniform-partition inverse]}
+    \EndCase
+    \Case{\textsc{Max}}
+      \State \textit{// [Placeholder: emit argmax-selection inverse]}
+    \EndCase
+    \Case{\textsc{Join}}
+      \State \textit{// [Placeholder: emit FK-assignment inverse]}
+    \EndCase
+  \EndSwitch
+  \State \Return $p_c$
+\end{algorithmic}
+\end{algorithm}
+
+% Figure 6: Code-gen routing decision
+\begin{figure}[t]
+  \centering
+  \vspace{1.5cm}
+  \textit{[Figure 6 placeholder: Decision diagram. DAG node with single dependency
+  $\to$ deterministic inverse path (Alg.~\ref{alg:det-code}).
+  DAG node with intertwined dependencies $\to$ LLM ancestral-sampling path.
+  Illustrated on Credit Risk DAG with \texttt{interest\_rate}.]}
+  \vspace{1.5cm}
+  \caption{Code generation routing: single-dependency nodes take the deterministic
+           inverse path; intertwined nodes are handled by the LLM agent.}
+  \label{fig:codegen-routing}
+\end{figure}
+
+\subsection{Code Merge and Smoke Testing}
+\textit{[Para: Shard-level Python code merged using a fixed template
+(imports, seed definitions, helper functions, intermediate-table synthesis, base-table materialization).
+Tie-breaking rules for conflicting column initializations: distribution-spec beats random init.
+Smoke-tested at 10\% scale; failures trigger repair loop.
+Final output is an executable Python program $\mathcal{P}$.]}
+
+% Algorithm 8: Deterministic Code Merge (sub-step)
+\begin{algorithm}[t]
+\caption{Deterministic Code Merge}
+\label{alg:code-merge}
+\begin{algorithmic}[1]
+  \Require Shard-level code snippets $\{p_1,\ldots,p_k\}$
+  \Ensure Consolidated Python program $\mathcal{P}$
+  \State \textit{// [Placeholder: align snippets to fixed template sections]}
+  \State \textit{// [Placeholder: detect conflicting initializations; apply tie-breaking rules]}
+  \State \textit{// [Placeholder: smoke-test merged program at 10\% scale]}
+  \If{\textit{smoke test fails}}
+    \State \textit{// [Placeholder: call repair agent; retry (max 5)]}
+  \EndIf
+  \State \Return $\mathcal{P}$
+\end{algorithmic}
+\end{algorithm}
+
+% Algorithm 9: Stage 4 summary (calls Algs 7 & 8)
+\begin{algorithm}[t]
+\caption{Stage 4: Code Generation}
+\label{alg:stage4}
+\begin{algorithmic}[1]
+  \Require Schema $\mathcal{S}$, constraints $\mathcal{C}$, DAG $\mathcal{G}$
+  \Ensure Python program $\mathcal{P}$
+  \ForAll{column $c$ in reverse-topological order of $\mathcal{G}$}
+    \If{single dependency}
+      \State \Call{DeterministicInverseCode}{$c$} \hfill$\triangleright$ Alg.~\ref{alg:det-code}
+    \Else
+      \State \textit{// [Placeholder: call LLM ancestral-sampling agent for $c$]}
+    \EndIf
+  \EndFor
+  \State \Call{CodeMerge}{$\{p_c\}$} \hfill$\triangleright$ Alg.~\ref{alg:code-merge}
+  \State \Return $\mathcal{P}$
+\end{algorithmic}
+\end{algorithm}
+
+% ============================================================
+\section{Experimental Evaluation}
+\label{sec:eval}
+% ============================================================
+
+\subsection{Experimental Setup}
+
+\noindent\textbf{Datasets.}
+\textit{[Placeholder: (a)~RSchema~\cite{wang2025text2schema}: 381 NL-to-schema test cases.
+(b)~Handcrafted: 135 test cases (NL, schema, constraints) spanning Credit Risk, Quant Finance,
+Clinical Trials; 3--50 tables; 10K--1M rows.
+(c)~Benchmarks: IMDB~\cite{imdb2024}, TPC-H~\cite{tpch2022}, TPC-DS~\cite{tpcds2024},
+MIMIC-IV~\cite{johnson2024mimic} official docs converted to NL descriptions that omit
+benchmark-specific names.]}
+
+\noindent\textbf{LLM \& Baseline.}
+\textit{[Placeholder: GPT-4o for all LLM components. Baseline: SchemaAgent~\cite{wang2025text2schema}.]}
+
+\noindent\textbf{Metrics.}
+\textit{[Placeholder: Schema quality: Table/Attr/PK/DT F1 and Accuracy.
+Statistical fidelity: MRE$\downarrow$, NLL$\uparrow$, KS$\downarrow$.
+Logical fidelity: FA$\uparrow$.
+Efficiency: schema gen tokens/time, row gen time, retry loops.]}
+
+\subsection{Schema Quality}
+
+\textit{[Placeholder: ScribbleDB achieves near-perfect Table F1 (95--100) across all three
+dataset groups; SchemaAgent degrades sharply on complex schemas (Table F1 drops to 48--52 on
+Handcrafted/Benchmark).]}
+
+\begin{table}[t]
+  \caption{Schema quality comparison.}
+  \label{tab:schema-quality}
+  \centering
+  \small
+  \begin{tabular}{llcccccc}
+    \toprule
+    Dataset & System & TF1 & TAcc & AF1 & AAcc & PKAcc & DTAcc \\
+    \midrule
+    \multirow{2}{*}{RSchema}     & SchemaAgent & \multicolumn{6}{c}{\textit{[values]}} \\
+                                  & ScribbleDB  & \multicolumn{6}{c}{\textit{[values]}} \\
+    \midrule
+    \multirow{2}{*}{Handcrafted} & SchemaAgent & \multicolumn{6}{c}{\textit{[values]}} \\
+                                  & ScribbleDB  & \multicolumn{6}{c}{\textit{[values]}} \\
+    \midrule
+    \multirow{2}{*}{Benchmark}   & SchemaAgent & \multicolumn{6}{c}{\textit{[values]}} \\
+                                  & ScribbleDB  & \multicolumn{6}{c}{\textit{[values]}} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Data Modeling Quality}
+
+\textit{[Placeholder: Statistical realism (KS~$<$~0.3, MRE~$<$~0.2, NLL~$>$~0.7) and
+logical fidelity (FA~$=$~1.0) across Handcrafted and Benchmark datasets.]}
+
+\begin{table}[t]
+  \caption{Data modeling quality.}
+  \label{tab:data-quality}
+  \centering
+  \small
+  \begin{tabular}{lcccc}
+    \toprule
+    Dataset & MRE$\downarrow$ & NLL$\uparrow$ & KS$\downarrow$ & FA$\uparrow$ \\
+    \midrule
+    Handcrafted & \multicolumn{4}{c}{\textit{[values]}} \\
+    TPC-H       & \multicolumn{4}{c}{\textit{[values]}} \\
+    TPC-DS      & \multicolumn{4}{c}{\textit{[values]}} \\
+    IMDB        & \multicolumn{4}{c}{\textit{[values]}} \\
+    MIMIC-IV    & \multicolumn{4}{c}{\textit{[values]}} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% Figure 7: Distribution fidelity plots
+\begin{figure}[t]
+  \centering
+  \vspace{1.5cm}
+  \textit{[Figure 7 placeholder: Three panels. Each: generated histogram (blue) overlaid
+  with ground-truth density (orange) for one column from the Handcrafted dataset.
+  Columns chosen to illustrate normal, Zipfian, and bounded distributions.]}
+  \vspace{1.5cm}
+  \caption{Distribution fidelity: generated vs.\ ground-truth for three representative
+           columns in the Handcrafted dataset.}
+  \label{fig:distributions}
+\end{figure}
+
+\subsection{Scalability Analysis}
+
+\textit{[Placeholder: 3--4$\times$ schema-generation speedup from sharding (parallel agents);
+row-generation time scales linearly at 10--30\,ms/row.]}
+
+% Figure 8: Scalability
+\begin{figure}[t]
+  \centering
+  \vspace{1.5cm}
+  \textit{[Figure 8 placeholder: Two panels.
+  Left: schema generation latency (s) vs.\ number of tables --- ScribbleDB (shaded 1$\sigma$)
+  vs.\ SchemaAgent.
+  Right: row generation throughput vs.\ target row count.]}
+  \vspace{1.5cm}
+  \caption{Scalability. Sharding yields a 3--4$\times$ speedup in schema generation;
+           row generation scales linearly.}
+  \label{fig:scalability}
+\end{figure}
+
+\subsection{Ablation Studies}
+
+\textit{[Placeholder: Quantify contribution of each component on Handcrafted dataset.
+New ablation row: w/o Deterministic CodeGen (replace with LLM for all columns) --- expected
+to show higher LLM cost and potentially lower FA.]}
+
+\begin{table}[t]
+  \caption{Ablation on the Handcrafted dataset.}
+  \label{tab:ablation}
+  \centering
+  \small
+  \begin{tabular}{lccccccc}
+    \toprule
+    Configuration & TF1 & TAcc & AF1 & MRE & NLL & KS & FA \\
+    \midrule
+    Full ScribbleDB      & \multicolumn{7}{c}{\textit{[values]}} \\
+    w/o Enrichment       & \multicolumn{7}{c}{\textit{[values]}} \\
+    w/o Sharding         & \multicolumn{7}{c}{\textit{[values]}} \\
+    w/o Anc.\ Sampling   & \multicolumn{7}{c}{\textit{[values]}} \\
+    w/o Det.\ CodeGen    & \multicolumn{7}{c}{\textit{[values --- new row]}} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Cost and Efficiency}
+
+\begin{table}[t]
+  \caption{Cost and efficiency (avg.\ per test case).}
+  \label{tab:efficiency}
+  \centering
+  \small
+  \begin{tabular}{llcccc}
+    \toprule
+    Dataset & System & Tokens & Sch.\ Time & Row Time & Retries \\
+    \midrule
+    \multirow{2}{*}{RSchema}     & SchemaAgent & \multicolumn{4}{c}{\textit{[values]}} \\
+                                  & ScribbleDB  & \multicolumn{4}{c}{\textit{[values]}} \\
+    \midrule
+    \multirow{2}{*}{Handcrafted} & SchemaAgent & \multicolumn{4}{c}{\textit{[values]}} \\
+                                  & ScribbleDB  & \multicolumn{4}{c}{\textit{[values]}} \\
+    \midrule
+    \multirow{2}{*}{Benchmark}   & SchemaAgent & \multicolumn{4}{c}{\textit{[values]}} \\
+                                  & ScribbleDB  & \multicolumn{4}{c}{\textit{[values]}} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Case Study: Credit Risk Database}
+
+\textit{[Placeholder: End-to-end walkthrough: NL input $\to$ atomic facts $\to$ DDL schema $\to$
+dependency DAG $\to$ excerpt of generated Python code showing the deterministic inverse for
+\texttt{interest\_rate} $\to$ sample of materialized rows verifying the tiered-lookup constraint.]}
+
+\begin{table}[t]
+  \caption{Sample rows from the generated Credit Risk database.}
+  \label{tab:case-study}
+  \centering
+  \small
+  \begin{tabular}{cccccc}
+    \toprule
+    AppID & CreditScore & Income & DTI & LoanAmt & IntRate \\
+    \midrule
+    \multicolumn{6}{c}{\textit{[placeholder rows satisfying tiered-lookup constraint]}} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% ============================================================
+\section{Discussion}
+% ============================================================
+
+\subsection{Limitations}
+\textit{[Placeholder: (1) Assumes NL input is internally consistent; no contradiction detection.
+(2) Multivariate distribution support is partially specified (see \S\ref{subsec:multivariate}).
+(3) Deterministic inverse synthesis is defined only for single-dependency columns;
+many-to-many join columns with compound constraints fall back to LLM.]}
+
+\subsection{Failure Modes}
+\textit{[Placeholder: (a) Overly ambiguous NL where enrichment cannot recover missing parameters.
+(b) DAG cycles that the patch agent cannot resolve within the retry budget.
+(c) Distribution parameter hallucination for rare or domain-specific distribution families.]}
+
+\subsection{Future Directions}
+\textit{[Placeholder: (1) Copula-based multivariate distributions for cross-column correlations.
+(2) Contradiction detection and resolution in NL input.
+(3) Extending deterministic code generation to multi-dependency column chains.
+(4) Schema evolution: incrementally updating a generated database as the NL description changes.]}
+
+% ============================================================
+\section{Conclusion}
+% ============================================================
+
+\textit{[Placeholder $\sim$100\,words. Summarise ScribbleDB: four-stage agentic pipeline converting
+NL to a relational DDL schema and an executable Python program.
+Restate key new contributions (deterministic inverse code generation, multivariate distribution
+support) alongside ancestral sampling, context enrichment, and shard-and-merge.
+Restate headline numbers. One forward-looking sentence on copulas and contradiction handling.]}
+
+% ============================================================
+\begin{acks}
+\textit{[Placeholder: Thank Jayant Haritsa (feedback), Carsten Binnig (problem inspiration),
+Nitthesh D and Udit Senapaty (implementation support).]}
+\end{acks}
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{references}
+
+\end{document}
