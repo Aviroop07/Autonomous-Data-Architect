@@ -20,6 +20,7 @@ run_test.py
 .ruff_cache/
 plan.txt
 *.pdf
+!paper/*.pdf
 *.mp4
 demo_paper/
 dataset/

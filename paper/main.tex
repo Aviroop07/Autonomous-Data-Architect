@@ -9,7 +9,6 @@
 \usepackage{booktabs}
 \usepackage{multirow}
 \usepackage{enumitem}
-\usepackage{amssymb}
 \usepackage{listings}
 
 \lstset{
@@ -24,7 +23,9 @@
 % Shorthand for comparison table
 \newcommand{\yes}{$\checkmark$}
 \newcommand{\no}{$\times$}
-\newcommand{\part}{$\circ$}   % partial support
+\newcommand{\partsup}{$\circ$}   % partial support
+
+\begin{document}
 
 % ---- Draft / copyright suppression ----
 \setcopyright{none}
@@ -164,7 +165,7 @@ materialization scheme, distinguishing it from generation-only agentic approache
 % Table 1: System positioning matrix
 \begin{table}[t]
   \caption{Positioning ScribbleDB against representative prior systems.
-           \yes~= full support, \part~= partial, \no~= not supported.}
+           \yes~= full support, \partsup~= partial, \no~= not supported.}
   \label{tab:positioning}
   \centering
   \small
