@@ -37,3 +37,16 @@ src/frontend/
 src/frontend_plan.md
 experiments/
 LLM4DBdesign/
+
+# Local testing and scratch scripts
+/test_*.py
+/check_*.py
+/agent_schema_report.py
+/run_tier_d.ps1
+
+# Local logs and temporary output
+/pipeline_*_log.txt
+/pipeline_log.txt
+/benerator.log
+/descr.txt
+/stage1_output.txt

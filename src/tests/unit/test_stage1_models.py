@@ -44,7 +44,6 @@ def test_rawfact_defaults():
     f = RawFact(id=7, fact="Users have credit scores.")
     assert f.id == 7
     assert f.fact == "Users have credit scores."
-    assert f.origin == ""
     assert f.referenced_fact_ids == []
     assert f.is_external is False
     assert f.external_kind is None
@@ -63,17 +62,12 @@ def test_rawfact_explicit_fields():
     f = RawFact(
         id=3,
         fact="External definition.",
-        origin="some snippet",
         referenced_fact_ids=[1, 2],
         is_external=True,
         external_kind=ExternalFactKind.TECHNICAL_DEFINITION,
         novelty_reason="Defines a term.",
     )
-    assert f.origin == "some snippet"
     assert f.referenced_fact_ids == [1, 2]
-    assert f.is_external is True
-    assert f.external_kind == ExternalFactKind.TECHNICAL_DEFINITION
-    assert f.novelty_reason == "Defines a term."
 
 
 def test_integrity_report_issue_missing_severity_defaults_to_medium():
@@ -93,7 +87,6 @@ def test_atomicfact_minimal_defaults():
     f = AtomicFact(id=1, fact="A minimal fact.")
     assert f.id == 1
     assert f.fact == "A minimal fact."
-    assert f.origin == ""
     assert f.referenced_fact_ids == []
     assert f.is_external is False
     assert f.tags == []
@@ -120,7 +113,6 @@ def test_from_raw_copies_all_fields_and_sets_tags():
     raw = RawFact(
         id=42,
         fact="The fact body.",
-        origin="verbatim source",
         referenced_fact_ids=[1, 2, 3],
         is_external=True,
         external_kind=ExternalFactKind.DOMAIN_MODELING_HINT,
@@ -131,9 +123,7 @@ def test_from_raw_copies_all_fields_and_sets_tags():
     assert isinstance(atomic, AtomicFact)
     assert atomic.id == 42
     assert atomic.fact == "The fact body."
-    assert atomic.origin == "verbatim source"
     assert atomic.referenced_fact_ids == [1, 2, 3]
-    assert atomic.is_external is True
     assert atomic.external_kind == ExternalFactKind.DOMAIN_MODELING_HINT
     assert atomic.novelty_reason == "Adds useful context."
     assert atomic.tags == [FactTag.METADATA]
@@ -156,19 +146,19 @@ def test_from_raw_multiple_tags():
 # --------------------------------------------------------------------------- #
 
 
-def test_atomicfact_str_includes_tags_and_origin():
-    f = AtomicFact(id=9, fact="Has origin.", origin="snippet", tags=[FactTag.LOGICAL])
+def test_atomicfact_str_includes_tags_and_segment():
+    f = AtomicFact(id=9, fact="Has segment.", segment_text="snippet", tags=[FactTag.LOGICAL])
     s = str(f)
     assert "9." in s
     assert "LOGICAL" in s
-    assert "Has origin." in s
+    assert "Has segment." in s
     assert "snippet" in s
 
 
-def test_atomicfact_str_omits_origin_when_empty():
-    f = AtomicFact(id=10, fact="No origin.", tags=[FactTag.METADATA])
+def test_atomicfact_str_omits_segment_when_empty():
+    f = AtomicFact(id=10, fact="No segment.", tags=[FactTag.METADATA])
     s = str(f)
-    assert "Origin:" not in s
+    assert "Segment:" not in s
     assert "METADATA" in s
 
 

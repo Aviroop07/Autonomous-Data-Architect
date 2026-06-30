@@ -48,9 +48,9 @@ class VerifierLoopAgent(LoopAgent):
             facts_text = "(none yet)"
         else:
             facts_text = "\n".join(
-                f'{f.id}. {f.fact}\n   [Origin: "{f.origin}"]'
+                f'{f.id}. {f.fact}\n   [Segment: "{f.segment_text if hasattr(f, "segment_text") else ""}"]'
                 + (f" | External: {f.is_external}" if f.is_external else "")
-                for f in extractor_output.facts
+                for f in extractor_output.flat_facts
             )
         return (
             f"## ORIGINAL DESCRIPTION\n{ctx.initial_context}\n\n"

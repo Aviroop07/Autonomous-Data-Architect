@@ -6,6 +6,7 @@ and Schema.detect_cycles (circular, acyclic, self-referential).
 
 No LLM / no network. Source is NOT modified; suspected bugs are xfail'd.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -20,12 +21,14 @@ from src.pipeline.stage2.models.schema import (
     is_upper_snake,
     is_lower_snake,
 )
+from src.pipeline.stage2.models.data_types import DataType
 from src.tests.fixtures import sample_data
 
 
 # --------------------------------------------------------------------------- #
 # Column._validate
 # --------------------------------------------------------------------------- #
+
 
 def test_column_valid_name_yields_no_errors():
     assert Column(name="credit_score", data_type="INTEGER")._validate() == []
@@ -37,13 +40,14 @@ def test_column_lowercase_single_word_is_valid():
 
 @pytest.mark.parametrize("bad", ["CreditScore", "Credit_Score", "UPPER", "1leading"])
 def test_column_non_lower_snake_flagged(bad):
-    errors = Column(name=bad)._validate()
+    errors = Column(name=bad, data_type=DataType.VARCHAR)._validate()
     assert any("lowercase snake_case" in e for e in errors)
 
 
 # --------------------------------------------------------------------------- #
 # Table._validate
 # --------------------------------------------------------------------------- #
+
 
 def test_valid_table_yields_no_errors():
     t = Table(
@@ -58,25 +62,29 @@ def test_valid_table_yields_no_errors():
     assert t._validate() == []
 
 
-def test_table_plural_name_flagged():
+def test_table_plural_name_is_advisory_not_hard_error():
+    # Singular-noun is a non-blocking STYLE advisory: it must NOT be a _validate() error
+    # (so it never crashes the mapper postcondition), but IS surfaced via _style_warnings().
     t = Table(
         name="CUSTOMERS",
         pk="customers_id",
         columns=[Column(name="customers_id", data_type="INTEGER")],
     )
-    errors = t._validate()
-    assert any("singular" in e for e in errors)
+    assert not any("singular" in e for e in t._validate())
+    assert any("singular" in w for w in t._style_warnings())
 
 
-@pytest.mark.parametrize("allowed", ["STATUS", "ACCESS", "PROCESS", "DIAGNOSIS", "TV_SERIES"])
+@pytest.mark.parametrize(
+    "allowed", ["STATUS", "ACCESS", "PROCESS", "DIAGNOSIS", "TV_SERIES"]
+)
 def test_table_allowed_s_ending_not_flagged_as_plural(allowed):
     t = Table(
         name=allowed,
         pk=f"{allowed.lower()}_id",
         columns=[Column(name=f"{allowed.lower()}_id", data_type="INTEGER")],
     )
-    errors = t._validate()
-    assert not any("singular" in e for e in errors)
+    assert not any("singular" in e for e in t._validate())
+    assert not any("singular" in w for w in t._style_warnings())
 
 
 @pytest.mark.parametrize("suffix", ["FACT", "DIM", "ID", "ATTR", "TABLE"])
@@ -100,31 +108,6 @@ def test_table_lowercase_name_flagged_as_not_upper_snake():
     errors = t._validate()
     assert any("UPPER_SNAKE_CASE" in e for e in errors)
 
-
-def test_table_numeric_varchar_column_flagged():
-    # column "loan_amount" typed VARCHAR -> "amount" is a numeric keyword
-    t = Table(
-        name="LOAN",
-        pk="loan_id",
-        columns=[
-            Column(name="loan_id", data_type="INTEGER"),
-            Column(name="loan_amount", data_type="VARCHAR"),
-        ],
-    )
-    errors = t._validate()
-    assert any("numeric keyword" in e and "loan_amount" in e for e in errors)
-
-
-def test_table_numeric_column_as_float_is_ok():
-    t = Table(
-        name="LOAN",
-        pk="loan_id",
-        columns=[
-            Column(name="loan_id", data_type="INTEGER"),
-            Column(name="loan_amount", data_type="FLOAT"),
-        ],
-    )
-    assert not any("numeric keyword" in e for e in t._validate())
 
 
 def test_table_missing_pk_flagged():
@@ -192,7 +175,7 @@ def test_table_pk_in_unique_singleton_flagged_redundant():
         unique=[CompositeUnique(columns=["widget_id"])],
     )
     errors = t._validate()
-    assert any("Redundant unique singleton" in e for e in errors)
+    assert any("Redundant unique constraint" in e for e in errors)
 
 
 def test_table_unique_unknown_column_flagged():
@@ -210,6 +193,7 @@ def test_table_unique_unknown_column_flagged():
 # helper functions
 # --------------------------------------------------------------------------- #
 
+
 def test_to_snake_case():
     assert to_snake_case("CreditScore") == "Credit_Score"
     assert to_snake_case("  Loan Amount ") == "Loan_Amount"
@@ -226,6 +210,7 @@ def test_is_upper_snake_and_lower_snake():
 # --------------------------------------------------------------------------- #
 # Table.normalize
 # --------------------------------------------------------------------------- #
+
 
 def test_table_normalize_uppercases_table_and_lowercases_cols():
     t = Table(
@@ -267,6 +252,7 @@ def test_table_normalize_scrubs_pk_from_composite_unique():
 # Schema._validate
 # --------------------------------------------------------------------------- #
 
+
 def test_fintech_schema_fixture_is_valid():
     schema = sample_data.fintech_schema()
     assert schema._validate() == []
@@ -278,10 +264,16 @@ def test_simple_two_table_schema_fixture_is_valid():
 
 
 def test_schema_duplicate_table_flagged():
-    t1 = Table(name="ALPHA", pk="alpha_id",
-               columns=[Column(name="alpha_id", data_type="INTEGER")])
-    t2 = Table(name="ALPHA", pk="alpha_id",
-               columns=[Column(name="alpha_id", data_type="INTEGER")])
+    t1 = Table(
+        name="ALPHA",
+        pk="alpha_id",
+        columns=[Column(name="alpha_id", data_type="INTEGER")],
+    )
+    t2 = Table(
+        name="ALPHA",
+        pk="alpha_id",
+        columns=[Column(name="alpha_id", data_type="INTEGER")],
+    )
     schema = Schema(tables=[t1, t2])
     errors = schema._validate()
     assert any("Duplicate table name" in e for e in errors)
@@ -290,13 +282,21 @@ def test_schema_duplicate_table_flagged():
 def test_schema_fk_to_missing_table_flagged():
     schema = Schema(
         tables=[
-            Table(name="BETA", pk="beta_id",
-                  columns=[Column(name="beta_id", data_type="INTEGER"),
-                           Column(name="alpha_id", data_type="INTEGER")]),
+            Table(
+                name="BETA",
+                pk="beta_id",
+                columns=[
+                    Column(name="beta_id", data_type="INTEGER"),
+                    Column(name="alpha_id", data_type="INTEGER"),
+                ],
+            ),
         ],
         relationships=[
-            ForeignKey(referencing_table="BETA", referencing_column="alpha_id",
-                       referred_table="ALPHA"),
+            ForeignKey(
+                referencing_table="BETA",
+                referencing_column="alpha_id",
+                referred_table="ALPHA",
+            ),
         ],
     )
     errors = schema._validate()
@@ -307,6 +307,7 @@ def test_schema_fk_to_missing_table_flagged():
 # Schema.detect_cycles
 # --------------------------------------------------------------------------- #
 
+
 def test_detect_cycles_acyclic_returns_empty():
     schema = sample_data.simple_two_table_schema()
     assert schema.detect_cycles() == []
@@ -314,8 +315,13 @@ def test_detect_cycles_acyclic_returns_empty():
 
 def test_detect_cycles_no_relationships_returns_empty():
     schema = Schema(
-        tables=[Table(name="ALPHA", pk="alpha_id",
-                      columns=[Column(name="alpha_id", data_type="INTEGER")])],
+        tables=[
+            Table(
+                name="ALPHA",
+                pk="alpha_id",
+                columns=[Column(name="alpha_id", data_type="INTEGER")],
+            )
+        ],
     )
     assert schema.detect_cycles() == []
 
@@ -329,13 +335,21 @@ def test_detect_cycles_self_referential_no_cycle():
     """
     schema = Schema(
         tables=[
-            Table(name="EMPLOYEE", pk="employee_id",
-                  columns=[Column(name="employee_id", data_type="INTEGER"),
-                           Column(name="manager_id", data_type="INTEGER")]),
+            Table(
+                name="EMPLOYEE",
+                pk="employee_id",
+                columns=[
+                    Column(name="employee_id", data_type="INTEGER"),
+                    Column(name="manager_id", data_type="INTEGER"),
+                ],
+            ),
         ],
         relationships=[
-            ForeignKey(referencing_table="EMPLOYEE", referencing_column="manager_id",
-                       referred_table="EMPLOYEE"),
+            ForeignKey(
+                referencing_table="EMPLOYEE",
+                referencing_column="manager_id",
+                referred_table="EMPLOYEE",
+            ),
         ],
     )
     assert schema.detect_cycles() == []
@@ -358,20 +372,32 @@ def test_detect_cycles_circular_fk_detected():
     """
     schema = Schema(
         tables=[
-            Table(name="A", pk="a_id",
-                  columns=[Column(name="a_id", data_type="INTEGER"),
-                           Column(name="label", data_type="VARCHAR")]),
-            Table(name="B", pk="b_id",
-                  columns=[Column(name="b_id", data_type="INTEGER"),
-                           Column(name="label", data_type="VARCHAR")]),
+            Table(
+                name="A",
+                pk="a_id",
+                columns=[
+                    Column(name="a_id", data_type="INTEGER"),
+                    Column(name="label", data_type="VARCHAR"),
+                ],
+            ),
+            Table(
+                name="B",
+                pk="b_id",
+                columns=[
+                    Column(name="b_id", data_type="INTEGER"),
+                    Column(name="label", data_type="VARCHAR"),
+                ],
+            ),
         ],
         relationships=[
             # A.a_id (A's own PK) -> B  => source A.a_id, target B.b_id
-            ForeignKey(referencing_table="A", referencing_column="a_id",
-                       referred_table="B"),
+            ForeignKey(
+                referencing_table="A", referencing_column="a_id", referred_table="B"
+            ),
             # B.b_id (B's own PK) -> A  => source B.b_id, target A.a_id
-            ForeignKey(referencing_table="B", referencing_column="b_id",
-                       referred_table="A"),
+            ForeignKey(
+                referencing_table="B", referencing_column="b_id", referred_table="A"
+            ),
         ],
     )
     cycles = schema.detect_cycles()

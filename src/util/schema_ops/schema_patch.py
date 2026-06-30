@@ -1,6 +1,12 @@
 import re as _re
 from typing import List, Optional, Any, Union, Annotated, Literal, TYPE_CHECKING
-from pydantic import BaseModel, Field, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
+)
 from enum import Enum
 from src.util.orchestration.loop_types import LoopOutputModel
 
@@ -162,10 +168,21 @@ class SimplifiedColumn(BaseModel):
 class SimplifiedTable(BaseModel):
     name: str = Field(description="UPPER_SNAKE_CASE table name.")
     columns: List[SimplifiedColumn] = Field(description="Column definitions.")
-    pk: str = Field(description="Primary key column name.")
+    primary_key: List[str] = Field(default_factory=list, description="Primary key column name(s).")
     unique: Optional[List[SimplifiedUnique]] = Field(
         default=None, description="Composite unique constraints."
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_pk(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "pk" in data and "primary_key" not in data:
+                pk_val = data.pop("pk")
+                data["primary_key"] = [pk_val] if pk_val else []
+            elif "primary_key" in data and isinstance(data["primary_key"], str):
+                data["primary_key"] = [data["primary_key"]] if data["primary_key"] else []
+        return data
 
 
 class RelationshipDefinition(BaseModel):
@@ -357,7 +374,15 @@ class DeleteRelationshipPatch(BasePatch):
 class UpdatePKPatch(BasePatch):
     action: Literal[ActionTag.UPDATE_PK] = ActionTag.UPDATE_PK
     table_name: str
-    column_name: str
+    column_name: List[str]
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_column_name(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "column_name" in data and isinstance(data["column_name"], str):
+                data["column_name"] = [data["column_name"]] if data["column_name"] else []
+        return data
 
 
 class UpdateColumnTypePatch(ColumnPatch):
@@ -502,6 +527,24 @@ SchemaPatch = Annotated[
     Field(discriminator="action"),
 ]
 
+# Reused to trial-validate individual patches so one malformed patch does not
+# discard the entire CritiqueReport (per-patch tolerant parsing).
+_PATCH_ADAPTER: TypeAdapter = TypeAdapter(SchemaPatch)
+
+
+def _log_dropped_patch(patch: dict, exc: ValidationError) -> None:
+    """Log (never raise) a patch that failed validation and was dropped.
+
+    Keeps dropped patches auditable so per-patch tolerance does not silently
+    mask systematic LLM/prompt regressions.
+    """
+    action = patch.get("action", "<unknown>")
+    summary = "; ".join(
+        f"{'.'.join(str(loc) for loc in e.get('loc', ()))}: {e.get('msg', '')}"
+        for e in exc.errors()[:3]
+    )
+    print(f"  [PatchNormalizer] Dropped invalid {action} patch: {summary}")
+
 
 def _normalize_action_tag(raw: str) -> str:
     """
@@ -547,6 +590,47 @@ def _normalize_action_tag(raw: str) -> str:
 
 
 _KNOWN_TAGS = {tag.value for tag in ActionTag}
+
+# Actions whose model has a required scalar `table_name` field. The table-name
+# alias move below is applied uniformly to all of these (notably DELETE_TABLE and
+# RENAME_TABLE, which were previously excluded — the reason DROP_TABLE cleanup
+# patches failed to parse and phantom tables were never removed).
+_TABLE_NAME_ACTIONS = {
+    "ADD_COLUMN",
+    "RENAME_COLUMN",
+    "DELETE_COLUMN",
+    "UPDATE_COLUMN_TYPE",
+    "UPDATE_PK",
+    "DELETE_TABLE",
+    "RENAME_TABLE",
+    "UPSERT_UNIQUE",
+    "DELETE_UNIQUE",
+}
+# Actions that additionally carry a scalar `column_name`.
+_COLUMN_NAME_ACTIONS = {
+    "ADD_COLUMN",
+    "RENAME_COLUMN",
+    "DELETE_COLUMN",
+    "UPDATE_COLUMN_TYPE",
+    "UPDATE_PK",
+}
+_TABLE_NAME_ALIASES = [
+    "table",
+    "tableName",
+    "table_name",
+    "target_table",
+    "targetTable",
+    "target",
+]
+_COLUMN_NAME_ALIASES = [
+    "column",
+    "columnName",
+    "column_name",
+    "col",
+    "old_column_name",
+    "oldColumnName",
+    "source_column_name",
+]
 
 
 class CritiqueReport(LoopOutputModel):
@@ -619,70 +703,74 @@ class CritiqueReport(LoopOutputModel):
 
                     normalised = _normalize_action_tag(str(raw_action))
                     if normalised in _KNOWN_TAGS:
-                        if normalised in {
-                            "ADD_COLUMN",
-                            "RENAME_COLUMN",
-                            "DELETE_COLUMN",
-                            "UPDATE_COLUMN_TYPE",
-                            "UPDATE_PK",
-                        }:
-                            table_value = _pop_key(
+                        # Extract rename destinations FIRST. For rename actions the
+                        # `target_table`/`to_table`/`target` aliases denote the NEW name,
+                        # so they must be consumed here before the generic table_name move
+                        # below (which would otherwise steal them as the current name).
+                        if normalised == "RENAME_COLUMN" and "new_name" not in patch:
+                            new_name = _pop_key(
                                 patch,
                                 [
-                                    "table",
-                                    "tableName",
-                                    "table_name",
-                                    "target_table",
-                                    "targetTable",
+                                    "new_column_name",
+                                    "newColumnName",
+                                    "newName",
+                                    "to_column",
+                                    "target_column",
                                 ],
                             )
-                            if table_value and "table_name" not in patch:
+                            if new_name:
+                                patch["new_name"] = new_name
+
+                        if normalised == "RENAME_TABLE" and "new_name" not in patch:
+                            new_name = _pop_key(
+                                patch,
+                                [
+                                    "new_table_name",
+                                    "newTableName",
+                                    "newName",
+                                    "to_table",
+                                    "target_table",
+                                    "target",
+                                ],
+                            )
+                            if new_name:
+                                patch["new_name"] = new_name
+
+                        # Uniform table_name aliasing for every action that has one
+                        # (now including DELETE_TABLE/RENAME_TABLE — the fix that lets
+                        # DROP_TABLE cleanup patches actually parse and remove phantoms).
+                        if (
+                            normalised in _TABLE_NAME_ACTIONS
+                            and "table_name" not in patch
+                        ):
+                            table_value = _pop_key(patch, _TABLE_NAME_ALIASES)
+                            if table_value:
                                 patch["table_name"] = table_value
 
-                            column_value = _pop_key(
-                                patch,
-                                [
-                                    "column",
-                                    "columnName",
-                                    "column_name",
-                                    "col",
-                                    "old_column_name",
-                                    "oldColumnName",
-                                    "source_column_name",
-                                ],
-                            )
-                            if column_value and "column_name" not in patch:
+                        # Column-name aliasing for column-bearing actions.
+                        if (
+                            normalised in _COLUMN_NAME_ACTIONS
+                            and "column_name" not in patch
+                        ):
+                            column_value = _pop_key(patch, _COLUMN_NAME_ALIASES)
+                            if column_value:
                                 patch["column_name"] = column_value
 
-                        if normalised == "RENAME_COLUMN":
-                            if "new_name" not in patch:
-                                new_name = _pop_key(
-                                    patch,
-                                    [
-                                        "new_column_name",
-                                        "newColumnName",
-                                        "newName",
-                                        "to_column",
-                                        "target_column",
-                                    ],
-                                )
-                                if new_name:
-                                    patch["new_name"] = new_name
-
-                        if normalised == "RENAME_TABLE":
-                            if "new_name" not in patch:
-                                new_name = _pop_key(
-                                    patch,
-                                    [
-                                        "new_table_name",
-                                        "newTableName",
-                                        "newName",
-                                        "to_table",
-                                        "target_table",
-                                    ],
-                                )
-                                if new_name:
-                                    patch["new_name"] = new_name
+                        # ADD_COLUMN: unwrap an object-valued column_name
+                        # ({"name":.., "data_type":..}) into scalar fields.
+                        if normalised == "ADD_COLUMN" and isinstance(
+                            patch.get("column_name"), dict
+                        ):
+                            cn = patch["column_name"]
+                            patch["column_name"] = (
+                                cn.get("name")
+                                or cn.get("column_name")
+                                or cn.get("columnName")
+                            )
+                            if "data_type" not in patch:
+                                dt = cn.get("data_type") or cn.get("type")
+                                if dt:
+                                    patch["data_type"] = dt
 
                         if normalised == "UPSERT_UNIQUE":
                             if "unique_definition" not in patch:
@@ -693,10 +781,32 @@ class CritiqueReport(LoopOutputModel):
 
                         if normalised == "UPDATE_COLUMN_TYPE":
                             if "new_type" not in patch:
-                                for type_key in ("data_type", "type", "newType"):
+                                for type_key in (
+                                    "new_data_type",
+                                    "newDataType",
+                                    "data_type",
+                                    "type",
+                                    "newType",
+                                ):
                                     if type_key in patch:
                                         patch["new_type"] = patch.pop(type_key)
                                         break
+
+                        if normalised == "UPDATE_PK" and "column_name" not in patch:
+                            pk_val = _pop_key(
+                                patch,
+                                [
+                                    "new_pk",
+                                    "newPk",
+                                    "pk",
+                                    "primary_key",
+                                    "primaryKey",
+                                    "new_column_name",
+                                ],
+                            )
+                            # Allow composite PKs to pass through
+                            if pk_val is not None:
+                                patch["column_name"] = pk_val
 
                         if normalised == "DELETE_COLUMN":
                             if "column_name" not in patch:
@@ -754,16 +864,14 @@ class CritiqueReport(LoopOutputModel):
                                 ):
                                     if key in patch:
                                         pk_val = patch.pop(key)
-                                        if isinstance(pk_val, list):
-                                            pk_val = pk_val[0] if pk_val else ""
-                                        defn["pk"] = pk_val
+                                        defn["primary_key"] = pk_val
                                         break
-                                if "pk" not in defn and defn.get("columns"):
-                                    defn["pk"] = defn["columns"][0]["name"]
+                                if "primary_key" not in defn and defn.get("columns"):
+                                    defn["primary_key"] = [defn["columns"][0]["name"]]
                                 if (
                                     defn.get("name")
                                     and defn.get("columns")
-                                    and defn.get("pk")
+                                    and defn.get("primary_key") is not None
                                 ):
                                     patch["table_definition"] = defn
 
@@ -800,7 +908,22 @@ class CritiqueReport(LoopOutputModel):
 
                         patch = {**patch, "action": normalised}
                         normalised_patches.append(patch)
-            data = {**data, "patches": normalised_patches}
+
+            # Per-patch tolerant parsing: trial-validate each normalized patch
+            # against the discriminated union and keep only the ones that
+            # construct. A single malformed patch can no longer fail the entire
+            # CritiqueReport (which previously discarded all valid patches and,
+            # for the un-wrapped auditor, aborted Stage 2). Dropped patches are
+            # logged so this tolerance does not silently mask regressions.
+            validated: List[dict] = []
+            for p in normalised_patches:
+                try:
+                    _PATCH_ADAPTER.validate_python(p)
+                except ValidationError as exc:
+                    _log_dropped_patch(p, exc)
+                    continue
+                validated.append(p)
+            data = {**data, "patches": validated}
         return data
 
     def _validate(

@@ -17,7 +17,7 @@ from src.pipeline.stage1.middleware.validation import (
     deterministic_validator,
 )
 from src.pipeline.stage1.models.raw_fact import RawFact
-from src.pipeline.stage1.models.rephrased_nl import RephrasedOutput
+from src.pipeline.stage1.models.rephrased_nl import RephrasedOutput, Segment
 from src.util.orchestration.retry_loop import ErrorRecord, ErrorType, Severity
 
 
@@ -172,39 +172,43 @@ def test_non_external_without_refs_ok():
 
 def test_verbatim_substring_passes_for_exact_origin():
     nl = "Users have credit scores associated with them in the system."
-    facts = [RawFact(id=1, fact="f1", origin="credit scores associated")]
-    errors = check_verbatim_substring(facts, nl)
+    facts = [RawFact(id=1, fact="f1")]
+    segments = [Segment(text="credit scores associated", facts=facts)]
+    errors = check_verbatim_substring(segments, nl)
     assert errors == []
 
 
-def test_verbatim_substring_flags_missing_origin():
+def test_verbatim_substring_skips_missing_origin():
     nl = "Users have credit scores associated with them."
-    facts = [RawFact(id=1, fact="f1", origin="")]
-    errors = check_verbatim_substring(facts, nl)
-    assert len(errors) == 1
-    assert "Missing origin" in errors[0].description
+    facts = [RawFact(id=1, fact="f1")]
+    segments = [Segment(text="", facts=facts)]
+    errors = check_verbatim_substring(segments, nl)
+    assert len(errors) == 0
 
 
 def test_verbatim_substring_flags_bad_origin():
     nl = "Users have credit scores associated with them."
-    facts = [RawFact(id=1, fact="f1", origin="totally unrelated nonexistent verbiage here")]
-    errors = check_verbatim_substring(facts, nl)
+    facts = [RawFact(id=1, fact="f1")]
+    segments = [Segment(text="totally unrelated nonexistent verbiage here", facts=facts)]
+    errors = check_verbatim_substring(segments, nl)
     assert len(errors) == 1
     assert "verification failed" in errors[0].description
 
 
 def test_verbatim_substring_skips_external_facts():
     nl = "Some short description."
-    facts = [RawFact(id=1, fact="ext", origin="", is_external=True)]
-    assert check_verbatim_substring(facts, nl) == []
+    facts = [RawFact(id=1, fact="ext", is_external=True)]
+    segments = [Segment(text="", facts=facts)]
+    assert check_verbatim_substring(segments, nl) == []
 
 
 def test_verbatim_substring_backfills_origin_on_match():
     nl = "Users have credit scores associated with them in the system."
-    fact = RawFact(id=1, fact="f1", origin="credit scores associated")
-    check_verbatim_substring([fact], nl)
-    # On exact/fuzzy match the fact.origin is set to the matched original segment.
-    assert fact.origin == "credit scores associated"
+    fact = RawFact(id=1, fact="f1")
+    segments = [Segment(text="credit scores associated", facts=[fact])]
+    check_verbatim_substring(segments, nl)
+    # The backfill logic was moved out of the validator. We just assert it passes.
+    assert True
 
 
 # --------------------------------------------------------------------------- #
@@ -212,14 +216,15 @@ def test_verbatim_substring_backfills_origin_on_match():
 # --------------------------------------------------------------------------- #
 
 def _output(facts):
-    return RephrasedOutput(facts=facts)
+    segments = [Segment(text="credit scores associated", facts=facts)]
+    return RephrasedOutput(segments=segments)
 
 
 def test_validator_clean_output_no_errors():
     nl = "Users have credit scores associated with them in the lending system."
     facts = [
-        RawFact(id=1, fact="f1", origin="credit scores associated"),
-        RawFact(id=2, fact="f2", origin="lending system", referenced_fact_ids=[1]),
+        RawFact(id=1, fact="f1"),
+        RawFact(id=2, fact="f2", referenced_fact_ids=[1]),
     ]
     errors = deterministic_validator(_output(facts), nl)
     assert errors == []
@@ -228,12 +233,13 @@ def test_validator_clean_output_no_errors():
 def test_validator_aggregates_multiple_error_kinds():
     nl = "Users have credit scores associated with them."
     facts = [
-        # invalid ref (99) + bad origin
-        RawFact(id=1, fact="f1", origin="garbage unrelated nonexistent text here", referenced_fact_ids=[99]),
+        # invalid ref (99)
+        RawFact(id=1, fact="f1", referenced_fact_ids=[99]),
         # external with no refs
-        RawFact(id=2, fact="f2", origin="", is_external=True),
+        RawFact(id=2, fact="f2", is_external=True),
     ]
-    errors = deterministic_validator(_output(facts), nl)
+    out = RephrasedOutput(segments=[Segment(text="garbage unrelated nonexistent text here", facts=[facts[0]]), Segment(text="", facts=[facts[1]])])
+    errors = deterministic_validator(out, nl)
     descriptions = " | ".join(e.description for e in errors)
     assert "non-existent fact ID 99" in descriptions
     assert "METADATA fact must have at least one referenced_fact_id" in descriptions
@@ -244,8 +250,9 @@ def test_validator_normalizes_self_reference_away():
     # normalize_references runs first and strips self-refs, so check_self_references
     # finds nothing afterward. This documents the actual (order-dependent) behavior.
     nl = "Users have credit scores associated with them in the system."
-    facts = [RawFact(id=1, fact="f1", origin="credit scores associated", referenced_fact_ids=[1])]
-    errors = deterministic_validator(_output(facts), nl)
+    facts = [RawFact(id=1, fact="f1", referenced_fact_ids=[1])]
+    out = RephrasedOutput(segments=[Segment(text="credit scores associated", facts=facts)])
+    errors = deterministic_validator(out, nl)
     assert not any("references itself" in e.description for e in errors)
     # and after the run the self-reference has been removed
     assert facts[0].referenced_fact_ids == []

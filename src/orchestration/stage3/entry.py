@@ -13,7 +13,7 @@ from src.pipeline.stage3.middleware.satisfiability import (
 from src.pipeline.stage3.models.sql_models import CardinalityConstraint, FanoutConstraint, LLMResponse, SQLGroundedConstraint
 from src.pipeline.stage3.agents.metadata_extractor.agent import extract_metadata, get_agent
 from src.orchestration.stage3.models import ShardMetadata, Output, RetryStep, RawSQLRule, HealingAttempt
-from src.orchestration.stage2.refinement_sharding import get_deterministic_shards
+
 from src.pipeline.stage2.models.schema import Schema
 from src.pipeline.stage2.models.registry import TableFactRegistry
 from src.pipeline.stage1.models.rephrased_nl import AtomicFact

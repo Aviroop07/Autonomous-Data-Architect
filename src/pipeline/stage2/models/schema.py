@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING, List, Optional, Dict, Set, Any
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_validator, computed_field
 from src.util.orchestration.loop_types import LoopOutputModel
+from src.pipeline.stage2.models.data_types import DataType
 
 if TYPE_CHECKING:
     from src.pipeline.stage2.models.registry import TableFactRegistry
@@ -12,7 +13,7 @@ UPPER_SNAKE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 LOWER_SNAKE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 FORBIDDEN_TABLE_SUFFIXES = {"FACT", "DIM", "ID", "ATTR", "TABLE"}
-ALLOWED_PK_TYPES = {"INTEGER", "VARCHAR"}
+
 SINGULAR_S_SUFFIXES = ("SS", "IS", "US")
 SINGULAR_S_EXCEPTIONS = {"NEWS", "SERIES", "SPECIES"}
 
@@ -35,36 +36,30 @@ def to_snake_case(s: str) -> str:
     return re.sub(r"_+", "_", s).strip("_")
 
 
+def looks_singular_noun(name: str) -> bool:
+    """Heuristic: True unless `name` looks like a plural.
+
+    A name looks plural when it ends in 'S' but not one of SINGULAR_S_SUFFIXES
+    (SS/IS/US) and contains no SINGULAR_S_EXCEPTIONS token. Shared by the table-name
+    style advisory and the mapper's junction-name acceptability check.
+    """
+    upper = name.upper()
+    if not upper.endswith("S") or upper.endswith(SINGULAR_S_SUFFIXES):
+        return True
+    tokens = set(upper.split("_"))
+    return any(token in SINGULAR_S_EXCEPTIONS for token in tokens)
+
+
 class Column(BaseModel):
     name: str = Field(description="Column name in lowercase snake_case.")
-    data_type: Optional[str] = Field(
-        default="VARCHAR",
-        description="The data type of the column (e.g., INT, FLOAT, VARCHAR).",
+    data_type: DataType = Field(
+        description="The data type of the column.",
     )
 
     def _validate(self) -> List[str]:
         errors = []
         if not is_lower_snake(self.name):
             errors.append(f"Column must be lowercase snake_case: {self.name}")
-
-        # [NEW] data_type validation (optional but good for consistency)
-        if self.data_type and self.data_type.upper() not in {
-            "INT",
-            "INTEGER",
-            "VARCHAR",
-            "FLOAT",
-            "NUMERIC",
-            "DECIMAL",
-            "BOOLEAN",
-            "DATE",
-            "DATETIME",
-            "TIMESTAMP",
-            "JSON",
-            "TEXT",
-            "UUID",
-        }:
-            # We don't report as hard error yet to be flexible, but we could.
-            pass
 
         return errors
 
@@ -87,10 +82,38 @@ class Table(BaseModel):
     columns: List[Column] = Field(
         description="List of column definitions for the table."
     )
-    pk: str = Field(description="Primary key column name (usually table_name_id).")
+    primary_key: List[str] = Field(
+        default_factory=list, description="Primary key column name(s)."
+    )
     unique: Optional[List[CompositeUnique]] = Field(
         default=None, description="Optional list of composite unique constraints."
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_pk(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "pk" in data and "primary_key" not in data:
+                pk_val = data.pop("pk")
+                data["primary_key"] = [pk_val] if pk_val else []
+            elif "primary_key" in data and isinstance(data["primary_key"], str):
+                data["primary_key"] = (
+                    [data["primary_key"]] if data["primary_key"] else []
+                )
+        return data
+
+    @computed_field
+    @property
+    def pk(self) -> str:
+        return self.primary_key[0] if self.primary_key else ""
+
+    @property
+    def pk_set(self) -> Set[str]:
+        return set(self.primary_key)
+
+    @property
+    def is_composite_pk(self) -> bool:
+        return len(self.primary_key) > 1
 
     def rename_column(self, old_name: str, new_name: str) -> None:
         """
@@ -100,8 +123,7 @@ class Table(BaseModel):
             if col.name == old_name:
                 col.name = new_name
 
-        if self.pk == old_name:
-            self.pk = new_name
+        self.primary_key = [new_name if c == old_name else c for c in self.primary_key]
 
         if self.unique:
             for uq in self.unique:
@@ -125,7 +147,7 @@ class Table(BaseModel):
                 self.rename_column(old_col_name, new_col_name)
 
         # Ensure pk is normalized
-        self.pk = to_snake_case(self.pk).lower()
+        self.primary_key = [to_snake_case(c).lower() for c in self.primary_key]
 
         # [HARDENING] Scrub redundant unique constraints
         if self.unique:
@@ -133,7 +155,7 @@ class Table(BaseModel):
             # 2. Filter out constraints that become empty or singleton-PK
             new_uniques = []
             for uq in self.unique:
-                scrubbed_cols = [c for c in uq.columns if c != self.pk]
+                scrubbed_cols = [c for c in uq.columns if c not in self.pk_set]
                 if scrubbed_cols:
                     new_uniques.append(CompositeUnique(columns=scrubbed_cols))
 
@@ -176,63 +198,38 @@ class Table(BaseModel):
             errors.append(f"Table {self.name} must have at least one column")
 
         column_names = set()
-        numeric_keywords = {
-            "amount",
-            "rate",
-            "price",
-            "balance",
-            "principal",
-            "salary",
-            "income",
-            "ratio",
-            "score",
-            "weight",
-            "cost",
-            "budget",
-        }
+
         for col in self.columns:
             errors.extend(col._validate())
             if col.name in column_names:
                 errors.append(f"Duplicate column in {self.name}: {col.name}")
 
-            # [HARDENING] Prevent VARCHAR for numeric-sounding columns
-            c_name_lower = col.name.lower()
-            if col.data_type and col.data_type.upper() == "VARCHAR":
-                found_keyword = next(
-                    (k for k in numeric_keywords if k in c_name_lower), None
-                )
-                if found_keyword:
-                    errors.append(
-                        f"Technical Error: Column '{col.name}' in {self.name} contains numeric keyword '{found_keyword}' but is typed as VARCHAR. You MUST use FLOAT, DECIMAL, or INTEGER for quantifiable attributes."
-                    )
-
             column_names.add(col.name)
 
         # Primary key validation
-        if not self.pk:
+        if not self.primary_key:
             errors.append(f"Table {self.name} must have a primary key")
         else:
-            pk_col = next((c for c in self.columns if c.name == self.pk), None)
-            if not pk_col:
-                errors.append(
-                    f"Primary key '{self.pk}' not found in columns for table {self.name}"
-                )
-            else:
-                # [STRICT DATA TYPE CHECK]
-                if (
-                    pk_col.data_type
-                    and pk_col.data_type.upper() not in ALLOWED_PK_TYPES
-                ):
+            for pk_member in self.primary_key:
+                pk_col = next((c for c in self.columns if c.name == pk_member), None)
+                if not pk_col:
                     errors.append(
-                        f"Primary key '{self.pk}' in table {self.name} must be of type {', '.join(ALLOWED_PK_TYPES)} (found {pk_col.data_type})."
+                        f"Primary key '{pk_member}' not found in columns for table {self.name}"
                     )
+                else:
+                    # [STRICT DATA TYPE CHECK]
+                    if (
+                        pk_col.data_type
+                        and pk_col.data_type not in {DataType.INTEGER, DataType.VARCHAR, DataType.UUID}
+                    ):
+                        errors.append(
+                            f"Primary key '{pk_member}' in table {self.name} must be of type INTEGER, VARCHAR, or UUID (found {pk_col.data_type})."
+                        )
 
-            # Singular check (heuristic)
-            if self.name.endswith("S") and not self.name.endswith(SINGULAR_S_SUFFIXES):
-                if not any(
-                    token in SINGULAR_S_EXCEPTIONS for token in normalized_tokens
-                ):
-                    errors.append(f"Table name should be singular: {self.name}")
+        # NOTE: the singular-noun check is intentionally NOT a hard error -- it is a
+        # naming-style advisory surfaced via _style_warnings() so it never crashes the
+        # mapper's structural postcondition. Junction names are fixed at the source
+        # (participant-based naming in the relational mapper).
 
         # Unique constraints validation
         unique_sets = []
@@ -241,15 +238,15 @@ class Table(BaseModel):
             unique_sets.append(curr_set)
 
             # Check for Primary Key inclusion
-            if self.pk in curr_set:
-                if len(curr_set) == 1:
+            if self.pk_set.issubset(curr_set):
+                if len(curr_set) == len(self.pk_set):
                     errors.append(
-                        f"Redundant unique singleton: Column '{self.pk}' is already the Primary Key of {self.name}."
+                        f"Redundant unique constraint: matches the Primary Key of {self.name}."
                     )
                 else:
                     cols_str = ", ".join(unique_constraint.columns)
                     errors.append(
-                        f"Redundant unique composite containing PK: '{self.pk}' in ({cols_str}) for table {self.name}."
+                        f"Redundant unique composite containing PK: in ({cols_str}) for table {self.name}."
                     )
 
             # Check for unknown columns
@@ -272,10 +269,21 @@ class Table(BaseModel):
 
         return errors
 
+    def _style_warnings(self) -> List[str]:
+        """Non-blocking naming-style advisories (never returned by _validate()).
+
+        These flag quality issues that must NOT crash the structural pipeline.
+        Currently: a table name that looks plural rather than singular.
+        """
+        warnings: List[str] = []
+        if not looks_singular_noun(self.name):
+            warnings.append(f"Table name should be singular: {self.name}")
+        return warnings
+
     def __str__(self) -> str:
         lines = [f"TABLE {self.name} ("]
         for col in self.columns:
-            if col.name == self.pk:
+            if col.name in self.pk_set:
                 lines.append(f"    {col.name} PRIMARY KEY,")
             else:
                 lines.append(f"    {col.name},")
@@ -328,10 +336,6 @@ class ForeignKey(BaseModel):
 
         if self.referencing_table in tables_map:
             ref_table = tables_map[self.referencing_table]
-            if ref_table.pk == self.referencing_column:
-                errors.append(
-                    f"FK error: Column '{self.referencing_column}' is the Primary Key of '{self.referencing_table}'. Using a PK as an FK is prohibited."
-                )
 
             # [STRICT TYPE MATCH CHECK]
             if self.referred_table in tables_map:
@@ -348,7 +352,7 @@ class ForeignKey(BaseModel):
                     if (
                         ref_col.data_type
                         and target_pk_col.data_type
-                        and ref_col.data_type.upper() != target_pk_col.data_type.upper()
+                        and ref_col.data_type != target_pk_col.data_type
                     ):
                         errors.append(
                             f"Type mismatch in Foreign Key: {self.referencing_table}.{self.referencing_column} "
@@ -491,7 +495,7 @@ class Schema(LoopOutputModel):
         new_fks: list[ForeignKey] = []
         for table in self.tables:
             for col in table.columns:
-                if col.name == table.pk:
+                if col.name in table.pk_set:
                     continue
                 if not col.name.endswith("_id"):
                     continue
@@ -548,7 +552,7 @@ class Schema(LoopOutputModel):
                 and ref_col.data_type
                 and target_pk_col.data_type
             ):
-                if ref_col.data_type.upper() != target_pk_col.data_type.upper():
+                if ref_col.data_type != target_pk_col.data_type:
                     ref_col.data_type = target_pk_col.data_type
 
     def _validate(self) -> List[str]:
@@ -566,60 +570,33 @@ class Schema(LoopOutputModel):
                 errors.append(f"Duplicate table name in schema: {table.name}")
             seen_tables.add(table.name)
 
-        adj: Dict[str, Set[str]] = {t.name.upper(): set() for t in self.tables}
+        # Hollow table check: a table with only its PK and no descriptive columns is
+        # evidence of incorrect entity separation. Guard on len > 1 to avoid false
+        # positives during single-entity shard generation. EXEMPT tables that are an
+        # FK target (referred_table): a PK-only table that other tables reference is a
+        # legitimate parent/lookup entity, NOT a collapse candidate -- dropping it would
+        # orphan the referencing FKs.
+        if len(self.tables) > 1:
+            referred = {fk.referred_table for fk in (self.relationships or [])}
+            for table in self.tables:
+                if table.is_composite_pk or table.name in referred:
+                    continue
+                non_pk_cols = [c for c in table.columns if c.name not in table.pk_set]
+                if not non_pk_cols:
+                    errors.append(
+                        f"Table '{table.name}' has only PK column(s) {', '.join(table.pk_set)} with no "
+                        f"descriptive attributes. Either add columns supported by the facts, "
+                        f"or collapse this entity into a VARCHAR attribute of its referencing table."
+                    )
+
         for fk in self.relationships or []:
             errors.extend(fk._validate(table_map))
-            t1 = fk.referencing_table.upper()
-            t2 = fk.referred_table.upper()
-            if t1 in adj and t2 in adj:
-                adj[t1].add(t2)
-                adj[t2].add(t1)
 
-        # BFS to find connected components
-        visited = set()
-        components = []
-        for table_name in adj:
-            if table_name not in visited:
-                component = set()
-                queue = [table_name]
-                visited.add(table_name)
-                while queue:
-                    curr = queue.pop(0)
-                    component.add(curr)
-                    for neighbor in adj[curr]:
-                        if neighbor not in visited:
-                            visited.add(neighbor)
-                            queue.append(neighbor)
-                components.append(component)
-
-        SKELETON_KEYWORDS = {
-            "ORDER",
-            "PAYMENT",
-            "TRANSACTION",
-            "METRIC",
-            "TRACE",
-            "LOG",
-            "SPAN",
-            "USER",
-            "CUSTOMER",
-            "PRODUCT",
-            "MERCHANT",
-            "FULFILLMENT",
-            "SHIPMENT",
-            "GAUGE",
-            "COUNTER",
-        }
-
-        if len(components) > 1:
-            for component in components:
-                if len(component) == 1:
-                    t_name = list(component)[0]
-                    is_skeleton = any(k in t_name.upper() for k in SKELETON_KEYWORDS)
-                    # Isolation is permitted for skeleton tables or single-table shards
-                    if not is_skeleton and len(self.tables) > 1:
-                        errors.append(
-                            f"Table '{t_name}' is strictly isolated (no relationships)."
-                        )
+        # NOTE: table isolation (a non-skeleton table with no relationships) is a
+        # naming/quality ADVISORY, not a structural error -- see _style_warnings().
+        # It must never be a hard error: doing so previously forced a destructive
+        # "prune to largest component" repair that silently deleted legitimately
+        # extracted entities. Isolated tables are valid SQL.
 
         # Cycle detection
         cycles = self.detect_cycles()
@@ -633,6 +610,31 @@ class Schema(LoopOutputModel):
             )
 
         return errors
+
+    def _style_warnings(self) -> List[str]:
+        """Non-blocking naming/quality advisories (never returned by _validate()).
+
+        Aggregates per-table advisories (e.g. plural names) and a schema-level
+        isolation advisory: a non-skeleton table that participates in no relationship.
+        Isolation is advisory, not a hard error, so it can never force a destructive
+        repair -- an isolated table is valid SQL and may be a legitimate standalone entity.
+        """
+        warnings: List[str] = [w for t in self.tables for w in t._style_warnings()]
+
+        if len(self.tables) > 1:
+            connected: Set[str] = set()
+            for fk in self.relationships or []:
+                connected.add(fk.referencing_table.upper())
+                connected.add(fk.referred_table.upper())
+            for table in self.tables:
+                upper = table.name.upper()
+                if upper in connected:
+                    continue
+                warnings.append(
+                    f"Table '{table.name}' is strictly isolated (no relationships)."
+                )
+
+        return warnings
 
     def detect_cycles(self) -> List[List[str]]:
         """

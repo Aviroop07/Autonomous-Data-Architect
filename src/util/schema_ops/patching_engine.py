@@ -80,8 +80,7 @@ def _delete_column(schema: Schema, patch: DeleteColumnPatch):
     for table in schema.tables:
         if table.name == patch.table_name:
             table.columns = [c for c in table.columns if c.name != patch.column_name]
-            if table.pk == patch.column_name:
-                table.pk = ""
+            table.primary_key = [c for c in table.primary_key if c != patch.column_name]
             if table.unique:
                 new_uniques = []
                 for uq in table.unique:
@@ -112,7 +111,7 @@ def _add_table(
         CompositeUnique(columns=u_defn.columns) for u_defn in (defn.unique or [])
     ]
     new_table = Table(
-        name=defn.name, columns=cols, pk=defn.pk, unique=uniques if uniques else None
+        name=defn.name, columns=cols, primary_key=defn.primary_key, unique=uniques if uniques else None
     )
     if not any(t.name == new_table.name for t in schema.tables):
         schema.tables.append(new_table)
@@ -232,7 +231,7 @@ def _delete_relationship(schema: Schema, patch: DeleteRelationshipPatch):
 def _update_pk(schema: Schema, patch: UpdatePKPatch):
     for table in schema.tables:
         if table.name == patch.table_name:
-            table.pk = patch.column_name
+            table.primary_key = patch.column_name
 
 
 def _update_column_type(schema: Schema, patch: UpdateColumnTypePatch):

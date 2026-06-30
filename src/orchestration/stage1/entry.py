@@ -30,7 +30,7 @@ from src.util.core.search_tool import clear_search_cache
 from src.util.orchestration.loop import AgentLoop
 
 
-NL_MAX_CHARS = 500
+NL_MAX_CHARS = 4000
 
 
 async def orchestrate(
@@ -74,7 +74,7 @@ async def _orchestrate_impl(
     extraction_output: RephrasedOutput = (
         raw_extraction
         if isinstance(raw_extraction, RephrasedOutput)
-        else RephrasedOutput(facts=[])
+        else RephrasedOutput(segments=[])
     )
     if not isinstance(raw_extraction, RephrasedOutput):
         print(
@@ -84,7 +84,7 @@ async def _orchestrate_impl(
 
     total_tokens = result.total_tokens
 
-    extracted_facts: List[RawFact] = extraction_output.facts
+    extracted_facts: List[RawFact] = extraction_output.flat_facts
     enrichment_filter_report = ExternalFactFilterResult()
     context_audit_trail: List[ContextAuditAttempt] = []
 
@@ -126,7 +126,23 @@ async def _orchestrate_impl(
     tag_results, t_tag = await tag_facts(facts=all_facts, model=model)
     total_tokens += t_tag
 
-    tagged_facts = normalize_stage1_tags(convert_to_atomic(all_facts, tag_results))
+    # Carry each fact's source segment (text + offsets) onto its AtomicFact so the graph
+    # chunker can group by segment. External/enrichment facts have no segment and are
+    # absent from the lookup (treated as standalone downstream).
+    segment_lookup = {
+        f.id: (s.text, s.start_char, s.end_char)
+        for s in extraction_output.segments
+        for f in s.facts
+    }
+    tagged_facts = normalize_stage1_tags(
+        convert_to_atomic(all_facts, tag_results, segment_lookup)
+    )
+
+    from src.util.schema_ops.graph_chunker import run_graph_chunker
+
+    print("[Stage 1] Clustering facts...")
+    plan = run_graph_chunker(tagged_facts)
+    # the graph chunker is deterministic and zero tokens
 
     output = Output(
         final_facts=tagged_facts,
@@ -136,6 +152,7 @@ async def _orchestrate_impl(
         original_nl=nl_description,
         enrichment_filter_report=enrichment_filter_report,
         context_audit_trail=context_audit_trail,
+        plan=plan,
         token_usage=total_tokens,
     )
 

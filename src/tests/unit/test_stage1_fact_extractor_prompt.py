@@ -8,9 +8,13 @@ def test_fact_extractor_prompt_requires_explicit_relationship_facts():
 
     assert "Relationship Extraction Rules" in prompt
     assert "Preserve relationship semantics as first-class facts" in prompt
-    assert "routes to" in prompt
-    assert "is assigned to" in prompt
-    assert "Do not rely on downstream stages to infer relationships from column names alone" in prompt
+    # Rule 3B requires aggressive explicit relationship extraction (generalized from the
+    # earlier brittle literal phrase-list of "routes to"/"is assigned to"/etc.).
+    assert "aggressively extract explicit semantic relationships" in prompt
+    assert (
+        "Do not rely on downstream stages to infer relationships from column names alone"
+        in prompt
+    )
 
 
 def test_fact_extractor_prompt_handles_routing_entities():

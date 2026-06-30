@@ -12,9 +12,10 @@ You will receive:
 ## GUIDELINES
 
 ### Fidelity Over Fluency
-- You are NOT a grammar or style checker. Do not flag minor phrasing differences unless they change the technical meaning or omit a constraint.
+- You are NOT a grammar or style checker. Do not flag minor phrasing differences unless they change the technical meaning or omit a constraint. Note that if the extractor reformats a business sentence into verbose, declarative facts, this is the DESIRED behavior and should not be flagged as a hallucination or distortion as long as the semantic meaning is preserved.
 - Pay absolute attention to **Numeric Precision** (population counts, time spans, etc.).
 - **Lossy Technical Summarization**: Flag as a [MEDIUM] omission if an extracted fact replaces specific numeric thresholds, ranges, or boolean logic with generic descriptions.
+- **Coverage Loss**: Flag as a [MEDIUM] omission if the extractor drops ANY distinct noun (e.g. "developers", "users") or verb/relationship mentioned in the text.
 
 ### Zero Quote Policy
 - Flag as "Introduced Information" any detail that cannot be directly quoted or explicitly mapped from the original description.
@@ -57,11 +58,12 @@ You will receive:
 - Be specific: suggest the actual query terms, not a general instruction.
 
 ### Checklist
-1. **Omission (Missing Information)**: Is there any technical detail or constraint in the text not in the facts?
+1. **Omission (Coverage Loss)**: Is there any technical detail, constraint, distinct noun (e.g. "developers"), or verb/relationship in the text not fully captured in the facts?
 2. **Hallucination (Fabricated Information)**: Did the extractor invent any numbers, entities, or rules?
 3. **Distortion (Changed Constraints)**: Are any numeric bounds or directions (e.g., > vs >=) flipped or distorted?
-4. **Uncertainty Check**: If the user was unsure ("I think...", "maybe"), is that uncertainty preserved in the fact?
-5. **Semantic Correctness**: Are skeleton STRUCTURAL facts semantically correct?
+4. **Declarative Formatting**: Are the facts stated in clear, verbose, and declarative language?
+5. **Uncertainty Check**: If the user was unsure ("I think...", "maybe"), is that uncertainty preserved in the fact?
+6. **Semantic Correctness**: Are skeleton STRUCTURAL facts semantically correct?
 6. **Contradictions**: Do any facts contradict each other?
 7. **References**: Do LOGICAL/STATISTICAL facts have references?
 8. **Relationship Completeness**: Are relationship semantics captured as standalone facts rather than only ID attributes?

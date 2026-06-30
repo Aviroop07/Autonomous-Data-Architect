@@ -8,17 +8,37 @@ from nltk.corpus import wordnet
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 
-from src.pipeline.stage2.models.schema import Schema, Table, Column, ForeignKey
+from src.pipeline.stage2.models.schema import Schema, Table
 
 
 COARSE_DT_MAP: Dict[str, str] = {
-    "INT": "NUMERIC", "INTEGER": "NUMERIC", "BIGINT": "NUMERIC", "SMALLINT": "NUMERIC",
-    "TINYINT": "NUMERIC", "FLOAT": "NUMERIC", "DOUBLE": "NUMERIC", "REAL": "NUMERIC",
-    "DECIMAL": "NUMERIC", "NUMERIC": "NUMERIC", "NUMBER": "NUMERIC",
-    "VARCHAR": "TEXT", "CHAR": "TEXT", "TEXT": "TEXT", "STRING": "TEXT", "NVARCHAR": "TEXT",
-    "DATE": "DATETIME", "DATETIME": "DATETIME", "TIMESTAMP": "DATETIME", "TIME": "DATETIME",
-    "BLOB": "BINARY", "BINARY": "BINARY", "BYTEA": "BINARY", "VARBINARY": "BINARY",
-    "BOOLEAN": "BOOL", "BOOL": "BOOL", "BIT": "BOOL",
+    "INT": "NUMERIC",
+    "INTEGER": "NUMERIC",
+    "BIGINT": "NUMERIC",
+    "SMALLINT": "NUMERIC",
+    "TINYINT": "NUMERIC",
+    "FLOAT": "NUMERIC",
+    "DOUBLE": "NUMERIC",
+    "REAL": "NUMERIC",
+    "DECIMAL": "NUMERIC",
+    "NUMERIC": "NUMERIC",
+    "NUMBER": "NUMERIC",
+    "VARCHAR": "TEXT",
+    "CHAR": "TEXT",
+    "TEXT": "TEXT",
+    "STRING": "TEXT",
+    "NVARCHAR": "TEXT",
+    "DATE": "DATETIME",
+    "DATETIME": "DATETIME",
+    "TIMESTAMP": "DATETIME",
+    "TIME": "DATETIME",
+    "BLOB": "BINARY",
+    "BINARY": "BINARY",
+    "BYTEA": "BINARY",
+    "VARBINARY": "BINARY",
+    "BOOLEAN": "BOOL",
+    "BOOL": "BOOL",
+    "BIT": "BOOL",
 }
 
 
@@ -102,7 +122,11 @@ class SchemaEvaluator:
         intersection_size = len(matched_gt)
         precision = intersection_size / len(pred_set) if pred_set else 0.0
         recall = intersection_size / len(gt_set) if gt_set else 0.0
-        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+        f1 = (
+            (2 * precision * recall / (precision + recall))
+            if (precision + recall) > 0
+            else 0.0
+        )
         acc = 1.0 if f1 == 1.0 else 0.0
         return f1, acc
 
@@ -116,7 +140,9 @@ class SchemaEvaluator:
         # 1. Table F1
         gt_table_names = {t.name for t in gt_schema.tables}
         pred_table_names = {t.name for t in pred_schema.tables}
-        table_f1, table_acc = self.calculate_f1(pred_table_names, gt_table_names, self.match_names)
+        table_f1, table_acc = self.calculate_f1(
+            pred_table_names, gt_table_names, self.match_names
+        )
 
         # 2. Align tables
         matched_tables: List[Tuple[Table, Table]] = []
@@ -147,7 +173,9 @@ class SchemaEvaluator:
         for gt_t in gt_schema.tables:
             pred_t = next((p for g, p in matched_tables if g.name == gt_t.name), None)
             if pred_t:
-                if (gt_t.pk or "").lower().strip() == (pred_t.pk or "").lower().strip():
+                gt_pk_set = {k.lower().strip() for k in gt_t.primary_key}
+                pred_pk_set = {k.lower().strip() for k in pred_t.primary_key}
+                if gt_pk_set == pred_pk_set:
                     pk_correct += 1
         pk_acc = pk_correct / len(gt_schema.tables) if gt_schema.tables else 1.0
 
@@ -172,7 +200,9 @@ class SchemaEvaluator:
                         (g.name for g, p in matched_tables if p.name == p_ref_table),
                         p_ref_table,
                     )
-                    gt_match = next((g for g, p in matched_tables if p.name == pred_t.name), None)
+                    gt_match = next(
+                        (g for g, p in matched_tables if p.name == pred_t.name), None
+                    )
                     gt_mapped_col = p_col
                     if gt_match:
                         for g_col_obj in gt_match.columns:
@@ -190,7 +220,9 @@ class SchemaEvaluator:
             dt_correct = 0
             dt_total = 0
             for gt_t in gt_schema.tables:
-                pred_t = next((p for g, p in matched_tables if g.name == gt_t.name), None)
+                pred_t = next(
+                    (p for g, p in matched_tables if g.name == gt_t.name), None
+                )
                 for gt_col in gt_t.columns:
                     dt_total += 1
                     if pred_t is None:
@@ -203,12 +235,79 @@ class SchemaEvaluator:
                     if matched_pred_col is None:
                         continue
                     gt_dt = coarsen_dt(gt_col_types.get(f"{gt_t.name}.{gt_col.name}"))
-                    pred_dt = coarsen_dt(pred_col_types.get(f"{pred_t.name}.{matched_pred_col}"))
+                    pred_dt = coarsen_dt(
+                        pred_col_types.get(f"{pred_t.name}.{matched_pred_col}")
+                    )
                     if gt_dt == pred_dt:
                         dt_correct += 1
             dt_acc = dt_correct / dt_total if dt_total > 0 else 1.0
         else:
             dt_acc = None
+
+        # 7. Attribute Coverage F1 (flat bag -- ignores table assignment)
+        gt_attrs_flat = {c.name for t in gt_schema.tables for c in t.columns}
+        pred_attrs_flat = {c.name for t in pred_schema.tables for c in t.columns}
+        attr_coverage_f1, _ = self.calculate_f1(
+            pred_attrs_flat, gt_attrs_flat, self.match_names
+        )
+
+        # 8. FD Coverage
+        # 8a. PK FD Coverage: fuzzy PK match over matched tables
+        pk_fd_match = 0
+        for gt_t in gt_schema.tables:
+            pred_t = next((p for g, p in matched_tables if g.name == gt_t.name), None)
+            if pred_t:
+                gt_pk_set = set(gt_t.primary_key)
+                pred_pk_set = set(pred_t.primary_key)
+                pk_f1, _ = self.calculate_f1(pred_pk_set, gt_pk_set, self.match_names)
+                if pk_f1 == 1.0:
+                    pk_fd_match += 1
+        pk_fd_coverage = (
+            pk_fd_match / len(gt_schema.tables) if gt_schema.tables else 1.0
+        )
+
+        # 8b. FK FD Coverage: global F1 over all FK triples with fuzzy matching
+        gt_fk_triples = [
+            (r.referencing_table, r.referencing_column, r.referred_table)
+            for r in (gt_schema.relationships or [])
+        ]
+        pred_fk_triples = [
+            (r.referencing_table, r.referencing_column, r.referred_table)
+            for r in (pred_schema.relationships or [])
+        ]
+        if not gt_fk_triples and not pred_fk_triples:
+            fk_fd_coverage = 1.0
+        elif not gt_fk_triples or not pred_fk_triples:
+            fk_fd_coverage = 0.0
+        else:
+
+            def _fk_matches(
+                p_fk: Tuple[str, str, str], g_fk: Tuple[str, str, str]
+            ) -> bool:
+                return (
+                    self.match_names(p_fk[0], g_fk[0])
+                    and self.match_names(p_fk[1], g_fk[1])
+                    and self.match_names(p_fk[2], g_fk[2])
+                )
+
+            matched_gt_fk_idx: Set[int] = set()
+            matched_pred_fk_idx: Set[int] = set()
+            for pi, pfk in enumerate(pred_fk_triples):
+                for gi, gfk in enumerate(gt_fk_triples):
+                    if gi not in matched_gt_fk_idx and _fk_matches(pfk, gfk):
+                        matched_gt_fk_idx.add(gi)
+                        matched_pred_fk_idx.add(pi)
+                        break
+            intersection = len(matched_gt_fk_idx)
+            fk_precision = intersection / len(pred_fk_triples)
+            fk_recall = intersection / len(gt_fk_triples)
+            fk_fd_coverage = (
+                2 * fk_precision * fk_recall / (fk_precision + fk_recall)
+                if (fk_precision + fk_recall) > 0
+                else 0.0
+            )
+
+        fd_coverage = (pk_fd_coverage + fk_fd_coverage) / 2.0
 
         return {
             "table_f1": table_f1,
@@ -218,4 +317,8 @@ class SchemaEvaluator:
             "pk_acc": pk_acc,
             "fk_acc": fk_acc,
             "dt_acc": dt_acc,
+            "attr_coverage_f1": attr_coverage_f1,
+            "pk_fd_coverage": pk_fd_coverage,
+            "fk_fd_coverage": fk_fd_coverage,
+            "fd_coverage": fd_coverage,
         }

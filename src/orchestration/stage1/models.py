@@ -4,6 +4,7 @@ from src.pipeline.stage1.models.atomic_fact import AtomicFact
 from src.pipeline.stage1.models.context_audit import ContextAuditAttempt
 from src.pipeline.stage1.models.rephrased_nl import EnrichedNL
 from src.pipeline.stage1.middleware.external_context_filter import ExternalFactFilterResult
+from src.pipeline.stage2.models.chunk import ChunkedPlan
 
 class Output(BaseModel):
     final_facts: List[AtomicFact] = Field(description="The finalized list of atomic facts.")
@@ -13,6 +14,7 @@ class Output(BaseModel):
     original_nl: str = Field(description="The original natural language description.")
     enrichment_filter_report: ExternalFactFilterResult = Field(default_factory=ExternalFactFilterResult)
     context_audit_trail: List[ContextAuditAttempt] = Field(default_factory=list)
+    plan: ChunkedPlan = Field(description="The finalized graph-based cluster plan.")
     token_usage: int = 0
 
     def __str__(self) -> str:

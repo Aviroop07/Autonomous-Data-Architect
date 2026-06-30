@@ -9,7 +9,9 @@ def format_errors_for_stage1(
     source_text: str
 ) -> str:
     all_facts = []
-    if hasattr(output, 'facts'):
+    if hasattr(output, 'flat_facts'):
+        all_facts = output.flat_facts
+    elif hasattr(output, 'facts'):
         all_facts = output.facts
     elif isinstance(output, list):
         all_facts = output
@@ -66,7 +68,6 @@ def format_errors_for_stage1(
                     lines.append(f"  Error: {e.description}")
                     lines.append(f"  Fact ID: {fact.id}")
                     lines.append(f"  Fact text: {fact.fact[:80]}...")
-                    lines.append(f"  Origin: '{fact.origin}'")
                     lines.append(f"  Fix: Remove this fact or find its exact source in the original text")
                 else:
                     lines.append(f"- [{severity_marker}] {e.description}")
@@ -97,13 +98,11 @@ def _format_deterministic_error(
     signature = error.signature()
     if signature.startswith("origin_missing") or signature.startswith("origin_failed"):
         if fact:
-            lines.append(f"- [{severity_marker}] ORIGIN REPAIR ONLY")
+            lines.append(f"- [{severity_marker}] SOURCE SEGMENT REPAIR ONLY")
             lines.append(f"  Error: {error.description}")
             lines.append(f"  Fact ID: {fact.id}")
             lines.append(f"  Fact text: {fact.fact[:120]}...")
-            lines.append(f"  Current origin: '{fact.origin}'")
-            lines.append(f"  Nearby source context: '...{_find_context(source_text, fact.origin)}...'")
-            lines.append("  Fix: Keep the fact text stable and replace only origin with an exact verbatim source substring.")
+            lines.append("  Fix: Ensure the fact is properly assigned to an exact verbatim source segment.")
         else:
             lines.append(f"- [{severity_marker}] {error.description}")
         return

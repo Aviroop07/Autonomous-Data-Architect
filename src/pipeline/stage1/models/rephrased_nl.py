@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional, Union
-from .raw_fact import RawFact
+from typing import Dict, List, Optional, Tuple, Union
+from .raw_fact import RawFact, Segment
 from .atomic_fact import AtomicFact, FactTag
 from .integrity_report import IntegrityReport
 from src.util.orchestration.loop_types import LoopOutputModel
@@ -14,8 +14,8 @@ class RephrasedOutput(LoopOutputModel):
         default="General Purpose",
         description="The primary analytical purpose of the dataset.",
     )
-    facts: List[RawFact] = Field(
-        description="An exhaustive list of extracted raw facts."
+    segments: List[Segment] = Field(
+        description="An exhaustive list of text segments and their extracted facts."
     )
 
     @field_validator("domain", "analytical_goal", mode="before")
@@ -27,6 +27,10 @@ class RephrasedOutput(LoopOutputModel):
 
     def get_errors(self) -> list[str]:
         return []
+
+    @property
+    def flat_facts(self) -> List[RawFact]:
+        return [f for s in self.segments for f in s.facts]
 
 
 class EnrichedNL(BaseModel):
@@ -43,7 +47,7 @@ class EnrichedNL(BaseModel):
             if self.integrity_report
             else "No integrity report."
         )
-        facts_count = len(self.extracted_output.facts)
+        facts_count = sum(len(s.facts) for s in self.extracted_output.segments)
         return f"EnrichedNL(Report: {report_str}, Facts: {facts_count})"
 
 
@@ -70,9 +74,18 @@ class TaggerOutput(BaseModel):
 
 
 def convert_to_atomic(
-    facts: List[RawFact], tag_results: List[TaggedFact]
+    facts: List[RawFact],
+    tag_results: List[TaggedFact],
+    segment_lookup: Optional[Dict[int, Tuple[str, int, int]]] = None,
 ) -> List[AtomicFact]:
-    """Converts RawFacts to AtomicFacts using tagger output for tag assignment."""
+    """Converts RawFacts to AtomicFacts using tagger output for tag assignment.
+
+    segment_lookup maps fact id -> (segment_text, start_char, end_char) so each atomic
+    fact carries the source segment it was extracted from. Without it, the graph chunker
+    sees no segments and degrades to a single chunk. External/enrichment facts have no
+    segment and are left with the default empty segment (handled as standalone downstream).
+    """
+    segment_lookup = segment_lookup or {}
     result = []
     for raw in facts:
         tag_result = next((t for t in tag_results if str(t.id) == str(raw.id)), None)
@@ -85,5 +98,14 @@ def convert_to_atomic(
                     continue
         if not tags:
             tags = [FactTag.STRUCTURAL]
-        result.append(AtomicFact.from_raw(raw, tags))
+        seg_text, start_char, end_char = segment_lookup.get(raw.id, ("", -1, -1))
+        result.append(
+            AtomicFact.from_raw(
+                raw,
+                tags,
+                segment_text=seg_text,
+                start_char=start_char,
+                end_char=end_char,
+            )
+        )
     return result

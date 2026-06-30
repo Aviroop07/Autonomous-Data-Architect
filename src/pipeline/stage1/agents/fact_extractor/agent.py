@@ -1,9 +1,8 @@
 from pathlib import Path
 from typing import List, Optional
 
-from src.util.core.agent import AgentType, _detect_provider, get_agent_
+from src.util.core.agent import AgentType, get_agent_
 from src.util.core.invoke import get_response
-from src.util.config.web_search import get_web_search_tool
 from src.util.orchestration.loop_types import (
     HistoryEntry,
     LoopAgent,
@@ -23,17 +22,10 @@ def build_extractor_agent(
     system_prompt: str,
     model: Optional[str] = None,
 ) -> AgentType:
-    # Gemini thinking models inject thought_signature fields into tool call
-    # responses that langchain_openai drops on subsequent turns, causing a 400.
-    # Skip tools for Gemini; the model relies on its training knowledge instead.
-    provider, _, _, _ = _detect_provider()
-    tools = [get_web_search_tool()] if provider == "openai" else None
     return get_agent_(
         system_prompt=system_prompt,
-        tools=tools,
         output_structure=RephrasedOutput,
         model=model,
-        use_responses_api=(provider == "openai"),
         name="atomic_fact_extractor",
     )
 
@@ -60,6 +52,41 @@ class FactExtractorLoopAgent(LoopAgent):
             )
         return self._agent
 
+    def _compute_segment_offsets(self, parsed: RephrasedOutput, text: str) -> None:
+        from src.util.algorithms.semantic_match import FactOriginMatcher
+
+        cursor = 0
+        normalized_text = text.lower()
+        matcher = None
+
+        for segment in parsed.segments:
+            if not segment.text:
+                continue
+
+            seg_lower = segment.text.lower()
+            idx = normalized_text.find(seg_lower, cursor)
+
+            if idx != -1:
+                # Exact match found
+                segment.start_char = idx
+                segment.end_char = idx + len(segment.text)
+                cursor = segment.end_char
+            else:
+                # Fallback to fuzzy matcher
+                if matcher is None:
+                    matcher = FactOriginMatcher(text)
+                best_span_res = matcher.find_best_source_span(segment.text)
+                if best_span_res:
+                    best_span = best_span_res.span
+                    if best_span.char_start >= cursor:
+                        segment.start_char = best_span.char_start
+                        segment.end_char = best_span.char_end
+                        cursor = best_span.char_end
+                    else:
+                        # found a match but it was before cursor (overlap or out of order)
+                        segment.start_char = best_span.char_start
+                        segment.end_char = best_span.char_end
+
     async def invoke(self, query: str) -> tuple[LoopOutputModel, int]:
         parsed, tokens = await get_response(
             agent=self._get_agent(),
@@ -67,9 +94,12 @@ class FactExtractorLoopAgent(LoopAgent):
             query=query,
         )
         assert isinstance(parsed, RephrasedOutput)
+        if hasattr(self, "_last_nl_description") and self._last_nl_description:
+            self._compute_segment_offsets(parsed, self._last_nl_description)
         return parsed, tokens
 
     def build_context(self, ctx: LoopContext) -> str:
+        self._last_nl_description = ctx.initial_context
         nl_description = ctx.initial_context
 
         extractor_output: Optional[RephrasedOutput] = None
@@ -108,14 +138,11 @@ class FactExtractorLoopAgent(LoopAgent):
         if extractor_output is not None and self._errored_ids_history:
             accepted = [
                 f
-                for f in extractor_output.facts
+                for f in extractor_output.flat_facts
                 if f.id not in self._errored_ids_history
             ]
             if accepted:
-                lines = [
-                    f"- id: {f.id}\n  fact: {f.fact}\n  origin: {f.origin or '(none)'}"
-                    for f in accepted
-                ]
+                lines = [f"- id: {f.id}\n  fact: {f.fact}" for f in accepted]
                 accepted_section = "\n".join(lines)
 
         # Reconstruct ErrorRecord list for the rich Stage 1 error formatter.
@@ -177,7 +204,7 @@ class FactExtractorLoopAgent(LoopAgent):
                 format_errors_for_stage1(
                     all_errors,
                     ctx.iteration,
-                    extractor_output or RephrasedOutput(facts=[]),
+                    extractor_output or RephrasedOutput(segments=[]),
                     nl_description,
                 )
             )
@@ -193,7 +220,7 @@ class FactExtractorLoopAgent(LoopAgent):
         node: str,
     ) -> HistoryEntry:
         assert isinstance(output, RephrasedOutput)
-        count = len(output.facts)
+        count = len(output.flat_facts)
         if prior is None:
             return HistoryEntry(
                 round=round_num,
@@ -202,7 +229,7 @@ class FactExtractorLoopAgent(LoopAgent):
                 was_improvement=None,
             )
         assert isinstance(prior, RephrasedOutput)
-        delta = count - len(prior.facts)
+        delta = count - len(prior.flat_facts)
         return HistoryEntry(
             round=round_num,
             node=node,

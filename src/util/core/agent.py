@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict, List, Optional, Type, TypeVar, Union
+from typing import Any, Dict, Optional, Type, TypeVar, Union
 
 from dotenv import load_dotenv
 from langchain_core.messages import SystemMessage  # type: ignore[import]
@@ -19,8 +19,14 @@ AgentType = Union["StructuredAgent", Runnable]
 # ------------------------------------------------------------------
 
 _GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
-_GEMINI_DEFAULT_MODEL = "gemini-3.1-flash-lite"
+_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+_GEMINI_DEFAULT_MODEL = "gemini-2.5-flash"
 _OPENAI_DEFAULT_MODEL = "gpt-4o"
+_OPENROUTER_DEFAULT_MODEL = "openai/gpt-4o"
+_GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+_GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile"
+_CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
+_CEREBRAS_DEFAULT_MODEL = "gpt-oss-120b"
 
 
 # ------------------------------------------------------------------
@@ -31,31 +37,59 @@ _OPENAI_DEFAULT_MODEL = "gpt-4o"
 def _detect_provider() -> tuple[str, str, str | None, str]:
     """Returns (provider, api_key, base_url_or_None, default_model).
 
-    Selection rules:
-      - Only GEMINI_API_KEY set        -> gemini
-      - Only OPENAI_API_KEY set        -> openai
-      - Both set, PROVIDER=openai      -> openai
-      - Both set, anything else        -> gemini (free tier preferred)
-      - Neither set                    -> RuntimeError
+    Selection rules (explicit PROVIDER override wins; otherwise key presence):
+      - PROVIDER=openrouter, or only OPENROUTER_API_KEY set  -> openrouter
+      - PROVIDER=openai, or only OPENAI_API_KEY set          -> openai
+      - PROVIDER=gemini, or only GEMINI_API_KEY set          -> gemini
+      - Multiple keys, no PROVIDER override                  -> openai > gemini > openrouter
+      - No keys                                              -> RuntimeError
     """
     load_dotenv()
     gemini_key = os.getenv("GEMINI_API_KEY", "")
     openai_key = os.getenv("OPENAI_API_KEY", "")
+    openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
+    groq_key = os.getenv("GROQ_API_KEY", "")
+    cerebras_key = os.getenv("CEREBRAS_API_KEY", "")
     provider_override = os.getenv("PROVIDER", "").lower()
 
-    if gemini_key and openai_key:
-        provider = "openai" if provider_override == "openai" else "gemini"
+    if provider_override == "cerebras":
+        provider = "cerebras"
+    elif provider_override == "groq":
+        provider = "groq"
+    elif provider_override == "openrouter":
+        provider = "openrouter"
+    elif provider_override == "openai":
+        provider = "openai"
+    elif provider_override == "gemini":
+        provider = "gemini"
+    elif groq_key:
+        provider = "groq"
+    elif cerebras_key:
+        provider = "cerebras"
     elif gemini_key:
         provider = "gemini"
     elif openai_key:
         provider = "openai"
+    elif openrouter_key:
+        provider = "openrouter"
     else:
         raise RuntimeError(
-            "No LLM API key found. Set GEMINI_API_KEY or OPENAI_API_KEY in .env."
+            "No LLM API key found. Set CEREBRAS_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, GROQ_API_KEY, or OPENROUTER_API_KEY in .env."
         )
 
+    if provider == "cerebras":
+        return "cerebras", cerebras_key, _CEREBRAS_BASE_URL, _CEREBRAS_DEFAULT_MODEL
+    if provider == "groq":
+        return "groq", groq_key, _GROQ_BASE_URL, _GROQ_DEFAULT_MODEL
     if provider == "gemini":
         return "gemini", gemini_key, _GEMINI_BASE_URL, _GEMINI_DEFAULT_MODEL
+    if provider == "openrouter":
+        return (
+            "openrouter",
+            openrouter_key,
+            _OPENROUTER_BASE_URL,
+            _OPENROUTER_DEFAULT_MODEL,
+        )
     return "openai", openai_key, None, _OPENAI_DEFAULT_MODEL
 
 
@@ -84,11 +118,32 @@ def _build_llm(
     Responses API). This is intentional — callers don't need to branch on
     provider when building tool-using agents.
     """
-    if provider == "gemini":
+    if provider == "cerebras":
+        resolved = (
+            model
+            or os.getenv("BASE_MODEL")
+            or os.getenv("CEREBRAS_BASE_MODEL")
+            or env_default
+        )
+    elif provider == "groq":
+        resolved = (
+            model
+            or os.getenv("BASE_MODEL")
+            or os.getenv("GROQ_BASE_MODEL")
+            or env_default
+        )
+    elif provider == "gemini":
         resolved = (
             model
             or os.getenv("BASE_MODEL")
             or os.getenv("GEMINI_BASE_MODEL")
+            or env_default
+        )
+    elif provider == "openrouter":
+        resolved = (
+            model
+            or os.getenv("BASE_MODEL")
+            or os.getenv("OPENROUTER_BASE_MODEL")
             or env_default
         )
     else:
@@ -102,6 +157,13 @@ def _build_llm(
     kwargs: Dict[str, Any] = dict(api_key=SecretStr(api_key), model=resolved)
     if base_url is not None:
         kwargs["base_url"] = base_url
+    if provider == "openrouter":
+        kwargs["default_headers"] = {
+            "HTTP-Referer": os.getenv(
+                "OPENROUTER_REFERER", "https://github.com/scribbledb"
+            ),
+            "X-Title": os.getenv("OPENROUTER_TITLE", "ScribbleDB"),
+        }
     if use_responses_api and provider == "openai":
         kwargs["use_responses_api"] = True
     return ChatOpenAI(**kwargs)
@@ -158,14 +220,30 @@ class StructuredAgent:
         )
 
     async def ainvoke(self, input_dict: Dict[str, Any]) -> Dict[str, Any]:
+        import asyncio as _asyncio
+
         messages = [SystemMessage(content=self.system_prompt)]
         messages.extend(input_dict.get("messages", []))
-        result = await self.chain.ainvoke(messages)
-        # result = {"raw": AIMessage, "parsed": PydanticModel | None, "parsing_error": ...}
-        if result.get("parsing_error"):
-            raise ValueError(
-                f"Structured output parsing failed: {result['parsing_error']}"
-            )
+
+        _PARSE_RETRIES = 3
+        last_error: Optional[str] = None
+        result: Dict[str, Any] = {}
+        for attempt in range(_PARSE_RETRIES):
+            result = await self.chain.ainvoke(messages)
+            # result = {"raw": AIMessage, "parsed": PydanticModel | None, "parsing_error": ...}
+            last_error = result.get("parsing_error")
+            if not last_error and result.get("parsed") is not None:
+                break
+            if attempt < _PARSE_RETRIES - 1:
+                wait = 2.0 * (attempt + 1)
+                print(
+                    f"[agent] Structured output parse failure "
+                    f"(attempt {attempt + 1}/{_PARSE_RETRIES}), retrying in {wait:.0f}s..."
+                )
+                await _asyncio.sleep(wait)
+
+        if last_error:
+            raise ValueError(f"Structured output parsing failed: {last_error}")
         if result.get("parsed") is None:
             raise ValueError(
                 f"Structured output returned None for {self.output_structure.__name__} "
@@ -184,70 +262,32 @@ class StructuredAgent:
 
 def get_agent_(
     system_prompt: str,
-    tools: Optional[List[Any]] = None,
-    output_structure: Optional[Type[T]] = None,
+    output_structure: Type[T],
     model: Optional[str] = None,
     name: Optional[str] = None,
     use_responses_api: bool = False,
-) -> AgentType:
-    """Create an agent. Returns an object supporting ainvoke({"messages": [...]}).
-
-    Routing:
-      - No tools  -> StructuredAgent (lightweight with_structured_output wrapper)
-                     Uses json_mode for Gemini, function_calling for OpenAI.
-      - With tools -> langgraph react agent via create_agent().
-                     web_search_preview dict is swapped for ddg_search on
-                     non-OpenAI providers (Gemini doesn't support that tool spec).
+) -> "StructuredAgent":
+    """Create a structured-output agent. Returns a StructuredAgent.
 
     The OUTPUT FORMAT section is dynamically appended to the system prompt from
-    the Pydantic schema whenever output_structure is provided.
+    the Pydantic schema. Uses json_mode for Gemini, function_calling for all others.
+
+    Web search is handled via pre-fetch (prefetch_and_format_searches) before
+    the agent call, not via tool-calling. See src/util/core/search_tool.py.
     """
-    # Single provider detection — result shared by LLM build, tool swap, method selection.
     provider, api_key, base_url, env_default = _detect_provider()
     llm = _build_llm(provider, api_key, base_url, env_default, model, use_responses_api)
 
-    if output_structure:
-        output_format = generate_hierarchical_schema_description(output_structure)
-        system_prompt = (
-            f"{system_prompt}\n\n"
-            f"## OUTPUT FORMAT\n"
-            f"Return a JSON object matching this structure:\n{output_format}"
-        )
-
-    if tools:
-        if provider != "openai":
-            from src.util.core.search_tool import get_ddg_search_tool
-
-            ddg = get_ddg_search_tool()
-            swapped = [
-                ddg
-                if (isinstance(t, dict) and t.get("type") == "web_search_preview")
-                else t
-                for t in tools
-            ]
-            if swapped != tools:
-                print(
-                    f"[agent] {name or 'agent'}: web_search_preview -> ddg_search "
-                    f"(provider: {provider})"
-                )
-            tools = swapped
-
-        from langchain.agents import create_agent  # type: ignore[import]
-
-        return create_agent(
-            model=llm,
-            tools=tools,
-            system_prompt=system_prompt,
-            response_format=output_structure,
-            name=name or "agent",
-        )
-
-    assert output_structure is not None, (
-        "output_structure is required when not using tools"
+    output_format = generate_hierarchical_schema_description(output_structure)
+    full_prompt = (
+        f"{system_prompt}\n\n"
+        f"## OUTPUT FORMAT\n"
+        f"Return a JSON object matching this structure:\n{output_format}"
     )
+
     method = "json_mode" if provider == "gemini" else "function_calling"
     return StructuredAgent(
-        system_prompt=system_prompt,
+        system_prompt=full_prompt,
         llm=llm,
         output_structure=output_structure,
         name=name or "structured_agent",

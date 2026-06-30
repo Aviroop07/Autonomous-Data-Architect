@@ -16,10 +16,6 @@ class RawFact(BaseModel):
     fact: str = Field(
         description="A rich, standalone declarative sentence expressing exactly one fact."
     )
-    origin: str = Field(
-        default="",
-        description="The exact verbatim substring from the source text. Empty for generated facts.",
-    )
     referenced_fact_ids: List[int] = Field(
         default_factory=list,
         description="IDs of facts this fact references (for external/context facts).",
@@ -38,8 +34,13 @@ class RawFact(BaseModel):
     )
 
     def __str__(self) -> str:
-        origin_str = f' | Origin: "{self.origin}"' if self.origin else ""
-        return f"{self.id}. {self.fact}{origin_str}"
+        return f"{self.id}. {self.fact}"
 
     def __repr__(self) -> str:
         return f"RawFact(id={self.id}, external={self.is_external})"
+
+class Segment(BaseModel):
+    text: str = Field(description="The exact verbatim substring from the source NL text.")
+    start_char: int = Field(default=-1, description="The starting character offset in the NL text.")
+    end_char: int = Field(default=-1, description="The ending character offset in the NL text.")
+    facts: List[RawFact] = Field(description="The atomic facts extracted from this segment.")

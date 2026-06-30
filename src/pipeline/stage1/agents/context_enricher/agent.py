@@ -128,7 +128,7 @@ class ContextEnricherLoopAgent(LoopAgent):
                 )
 
         facts_text = "\n".join(
-            f"- id: {f.id}\n  fact: {f.fact}\n  origin: {f.origin if f.origin else '(none)'}"
+            f"- id: {f.id}\n  fact: {f.fact}\n  origin: {f.segment_text if hasattr(f, 'segment_text') and f.segment_text else '(none)'}"
             for f in self._facts
         )
         query = f"## FACTS TO ENRICH\n{facts_text}"

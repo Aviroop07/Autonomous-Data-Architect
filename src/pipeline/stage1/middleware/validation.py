@@ -81,47 +81,44 @@ def check_cycles(facts: List[RawFact]) -> List[ErrorRecord]:
 
     return errors
 
-def check_verbatim_substring(facts: List[RawFact], source_text: str) -> List[ErrorRecord]:
+def check_verbatim_substring(segments: list, source_text: str) -> List[ErrorRecord]:
     matcher = FactOriginMatcher(source_text)
     errors = []
     
-    for fact in facts:
-        if hasattr(fact, 'is_external') and fact.is_external:
+    for segment in segments:
+        claimed_origin = segment.text if hasattr(segment, 'text') else ""
+        if not claimed_origin:
+            # Maybe it's an external metadata segment with no text, we can skip
             continue
+            
+        result = matcher.verify_origin(claimed_origin, claimed_origin)
 
-        claimed_origin = fact.origin if hasattr(fact, 'origin') else ""
-        result = matcher.verify_origin(fact.fact, claimed_origin)
-
-        if not result.is_valid:
+        if not result.is_valid or result.match_type != "verbatim":
             if not claimed_origin:
                 errors.append(ErrorRecord(
                     iteration=0,
                     error_type=ErrorType.DETERMINISTIC,
                     severity=Severity.CRITICAL,
-                    description=f"Fact #{fact.id}: Missing origin - must have source snippet",
-                    fact_id=fact.id,
-                    signature_key=f"origin_missing:{fact.id}",
+                    description=f"Segment missing text - must have source snippet",
+                    fact_id=None,
+                    signature_key=f"origin_missing:segment",
                 ))
             else:
-                # Skeleton facts often have short origins (minimal noun-phrase).
-                # If the claimed origin is very short (<= 3 words or < 15 chars)
-                # and has no verbatim match, downgrade to LOW since the
-                # semantic matcher cannot reliably score very short strings.
                 is_short_origin = len(claimed_origin.split()) <= 3 or len(claimed_origin) < 15
                 if is_short_origin:
                     severity = Severity.LOW
                 else:
-                    severity = Severity.LOW if result.match_type == "low" else Severity.MEDIUM
+                    severity = Severity.MEDIUM
+                # Find facts in this segment to attach the error to one of them, or just use fact_id=None
+                fact_id = segment.facts[0].id if hasattr(segment, 'facts') and segment.facts else None
                 errors.append(ErrorRecord(
                     iteration=0,
                     error_type=ErrorType.DETERMINISTIC,
                     severity=severity,
-                    description=f"Fact #{fact.id}: Origin verification failed ({result.match_type}). {result.warning} Best match: '{result.best_span[:120]}' (score: {result.score:.2f})",
-                    fact_id=fact.id,
-                    signature_key=f"origin_failed:{fact.id}:{result.match_type}",
+                    description=f"Segment text verification failed (not verbatim). Best match: '{result.best_span[:120]}' (score: {result.score:.2f})",
+                    fact_id=fact_id,
+                    signature_key=f"origin_failed:{fact_id or 'segment'}",
                 ))
-        else:
-            fact.origin = result.best_span
 
     return errors
 
@@ -143,10 +140,11 @@ def check_external_references(facts: List[RawFact]) -> List[ErrorRecord]:
 
 def deterministic_validator(output: RephrasedOutput, source_text: str) -> List[ErrorRecord]:
     errors = []
-    normalize_references(output.facts)
-    errors.extend(check_invalid_references(output.facts))
-    errors.extend(check_self_references(output.facts))
-    errors.extend(check_cycles(output.facts))
-    errors.extend(check_verbatim_substring(output.facts, source_text))
-    errors.extend(check_external_references(output.facts))
+    flat_facts = output.flat_facts
+    normalize_references(flat_facts)
+    errors.extend(check_invalid_references(flat_facts))
+    errors.extend(check_self_references(flat_facts))
+    errors.extend(check_cycles(flat_facts))
+    errors.extend(check_verbatim_substring(output.segments, source_text))
+    errors.extend(check_external_references(flat_facts))
     return errors

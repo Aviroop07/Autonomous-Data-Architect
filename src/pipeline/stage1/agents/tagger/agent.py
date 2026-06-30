@@ -28,7 +28,7 @@ async def tag_facts(
         tagger = get_agent(model)
 
     facts_text = "\n".join([
-        f"- id: {f.id}\n  fact: {f.fact}\n  origin: {f.origin}\n  is_external: {f.is_external}"
+        f"- id: {f.id}\n  fact: {f.fact}\n  origin: {f.segment_text if hasattr(f, 'segment_text') and f.segment_text else '(none)'}\n  is_external: {f.is_external}"
         for f in facts
     ])
 

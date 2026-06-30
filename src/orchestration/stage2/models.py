@@ -1,8 +1,7 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Any
 from src.pipeline.stage2.models.schema import Schema
 from src.pipeline.stage2.models.chunk import ChunkedPlan
-from src.pipeline.stage2.models.merge_decision import MergeDecisionLog
 from src.util.schema_ops.schema_patch import CritiqueReport
 from src.pipeline.stage2.models.corrections import FixHistoryStep
 
@@ -63,9 +62,9 @@ class Output(BaseModel):
         default_factory=list,
         description="IDs of required facts (STRUCTURAL/LOGICAL/STATISTICAL) not represented by any table in the final schema.",
     )
-    merge_decision_log: Optional[MergeDecisionLog] = Field(
+    merge_decision_log: Optional[Any] = Field(
         default=None,
-        description="Log of all merge decisions made during the initial deterministic merge.",
+        description="Legacy merge decisions, unused.",
     )
     cert_report: Optional[CritiqueReport] = Field(
         default=None,

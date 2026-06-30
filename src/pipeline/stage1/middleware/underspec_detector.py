@@ -90,28 +90,7 @@ def detect_underspecification(
         reasons.append("No constraints/rules extracted")
         searches.append(f"{domain} typical data constraints and validation rules")
     
-    # Domain-specific searches
-    domain_lower = domain.lower()
-    if "bank" in domain_lower or "loan" in domain_lower or "credit" in domain_lower:
-        searches.extend([
-            "banking database schema loan origination",
-            "credit score tiers interest rate calculation",
-        ])
-    elif "hospital" in domain_lower or "clinic" in domain_lower or "medical" in domain_lower:
-        searches.extend([
-            "hospital database schema patient encounter",
-            "clinical data model HL7 FHIR",
-        ])
-    elif "ecommerce" in domain_lower or "retail" in domain_lower or "shop" in domain_lower:
-        searches.extend([
-            "ecommerce database schema order product",
-            "retail inventory management schema",
-        ])
-    elif "saas" in domain_lower or "b2b" in domain_lower:
-        searches.extend([
-            "SaaS billing subscription database schema",
-            "multi-tenant database architecture",
-        ])
+    # Domain-specific generic searches (already added above if needed)
     
     return UnderspecReport(
         is_underspecified=is_underspecified,

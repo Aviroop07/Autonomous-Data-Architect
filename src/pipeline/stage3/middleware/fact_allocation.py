@@ -1,8 +1,11 @@
 from typing import List, Dict, Set, Tuple
 from src.pipeline.stage1.models.rephrased_nl import AtomicFact
 from src.pipeline.stage2.models.registry import TableFactRegistry
-from src.pipeline.stage2.middleware.schema_merging.similarity import SemanticSimilarity
+import difflib
 
+class SemanticSimilarity:
+    def get_score(self, a: str, b: str) -> float:
+        return difflib.SequenceMatcher(None, a, b).ratio()
 def allocate_facts_to_shards(
     all_facts: List[AtomicFact],
     shard_table_sets: List[Set[str]],
