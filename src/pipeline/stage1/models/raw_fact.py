@@ -24,6 +24,14 @@ class RawFact(BaseModel):
         default=False,
         description="True if this is a generated external fact (definition, context).",
     )
+    addresses_gap: Optional[int] = Field(
+        default=None,
+        description="The SpecGap.id this external fact targets.",
+    )
+    evidence_refs: List[str] = Field(
+        default_factory=list,
+        description="Evidence tags this fact is grounded in (empty for inference facts).",
+    )
     external_kind: Optional[ExternalFactKind] = Field(
         default=None,
         description="Quality category for accepted external context facts.",

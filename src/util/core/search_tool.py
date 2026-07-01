@@ -6,7 +6,7 @@ Three concurrent sources per query:
   [+] Full-page extraction from top web result (DDGS.extract, if available)
 
 Public API:
-  prefetch_and_format_searches(queries, max_results=5) -> str
+  EvidenceStore: fetch() and resolve() to get evidence and global tags.
   clear_search_cache() -> None
 
 Results are session-cached by (query, max_results) hash. Call clear_search_cache()
@@ -17,10 +17,10 @@ import asyncio
 import hashlib
 import threading
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal, Optional, Tuple, List, Dict
 
-# Session-level cache: keyed by sha256(query|max_results)[:16] -> formatted string
-_CACHE: dict[str, str] = {}
+# Session-level cache: keyed by sha256(query|max_results)[:16] -> tuple of (wiki, web, extracted)
+_CACHE: Dict[str, Tuple[List["_Result"], List["_Result"], Optional[str]]] = {}
 _CACHE_LOCK = threading.Lock()
 
 # Max chars from full-page extraction injected per result (keeps context window bounded)
@@ -92,88 +92,114 @@ def _extract_page(url: str) -> Optional[str]:
         return None
 
 
-def _format_query_section(
-    query: str,
-    wiki: list[_Result],
-    web: list[_Result],
-    extracted: Optional[str],
-) -> str:
-    """Merge sources into a formatted section for one query."""
-    lines = [f"### Query: {query}"]
-
-    for r in wiki:
-        lines.append(f"[W] {r.title}")
-        lines.append(f"    Source: {r.url}")
-        lines.append(f"    {r.snippet}")
-
-    for i, r in enumerate(web, 1):
-        snippet = extracted if (i == 1 and extracted) else r.snippet
-        lines.append(f"[{i}] {r.title}")
-        lines.append(f"    Source: {r.url}")
-        lines.append(f"    {snippet}")
-
-    if not wiki and not web:
-        lines.append("    No results found.")
-
-    return "\n".join(lines)
-
-
 def clear_search_cache() -> None:
     """Clear the session search cache. Call at pipeline start to avoid stale results."""
     with _CACHE_LOCK:
         _CACHE.clear()
 
 
-async def prefetch_and_format_searches(
-    queries: list[str],
-    max_results: int = 5,
-) -> str:
-    """Run all queries concurrently and return a formatted '## SEARCH RESULTS' block.
+@dataclass
+class EvidenceSnippet:
+    tag: str
+    query: str
+    title: str
+    url: str
+    text: str
+    source: Literal["web", "wikipedia"]
 
-    Sources per query (concurrent):
-      - Wikipedia-scoped DDG search (authoritative, labelled [W])
-      - General DDG web search (labelled [1], [2], ...)
-      - Full-page extraction from top web result (appended to [1] snippet when available)
 
-    Results are session-cached -- repeat calls with the same queries are free.
-    Returns an empty string when queries is empty.
-    """
-    if not queries:
-        return ""
+@dataclass
+class FetchResult:
+    formatted: str
 
-    loop = asyncio.get_running_loop()
 
-    async def _one(query: str) -> str:
-        q = query.strip()
-        if not q:
-            return ""
+class EvidenceStore:
+    def __init__(self):
+        self._by_tag: dict[str, EvidenceSnippet] = {}
+        self._tag_counter = 1
 
-        key = hashlib.sha256(f"{q}|{max_results}".encode()).hexdigest()[:16]
-        with _CACHE_LOCK:
-            if key in _CACHE:
-                return _CACHE[key]
+    async def fetch(self, queries: list[str], max_results: int = 5) -> FetchResult:
+        """Run all queries concurrently and return a formatted '## SEARCH RESULTS' block.
+        Also populates the tag->snippet map for later resolution by the auditor.
+        """
+        if not queries:
+            return FetchResult(formatted="")
 
-        # Web and Wikipedia searches run concurrently
-        wiki_results, web_results = await asyncio.gather(
-            loop.run_in_executor(None, _search_wiki, q),
-            loop.run_in_executor(None, _search_web, q, max_results),
-        )
+        loop = asyncio.get_running_loop()
+        sections = []
 
-        # Full-page extraction from top web result (best-effort; skip if slow/unavailable)
-        extracted: Optional[str] = None
-        if web_results and web_results[0].url:
-            extracted = await loop.run_in_executor(
-                None, _extract_page, web_results[0].url
+        async def _fetch_one(query: str) -> Optional[Tuple[str, List[_Result], List[_Result], Optional[str]]]:
+            q = query.strip()
+            if not q:
+                return None
+
+            key = hashlib.sha256(f"{q}|{max_results}".encode()).hexdigest()[:16]
+            
+            with _CACHE_LOCK:
+                if key in _CACHE:
+                    wiki, web, extracted = _CACHE[key]
+                    return q, wiki, web, extracted
+
+            wiki_results, web_results = await asyncio.gather(
+                loop.run_in_executor(None, _search_wiki, q),
+                loop.run_in_executor(None, _search_web, q, max_results),
             )
 
-        formatted = _format_query_section(q, wiki_results, web_results, extracted)
+            extracted: Optional[str] = None
+            if web_results and web_results[0].url:
+                extracted = await loop.run_in_executor(
+                    None, _extract_page, web_results[0].url
+                )
 
-        with _CACHE_LOCK:
-            _CACHE[key] = formatted
-        return formatted
+            with _CACHE_LOCK:
+                _CACHE[key] = (wiki_results, web_results, extracted)
+                
+            return q, wiki_results, web_results, extracted
 
-    sections = await asyncio.gather(*[_one(q) for q in queries])
-    sections = [s for s in sections if s]
-    if not sections:
-        return ""
-    return "## SEARCH RESULTS\n\n" + "\n\n".join(sections)
+        results = await asyncio.gather(*[_fetch_one(q) for q in queries])
+
+        for res in results:
+            if not res:
+                continue
+            
+            q, wiki, web, extracted = res
+            lines = [f"### Query: {q}"]
+            found = False
+
+            for r in wiki:
+                tag = f"E{self._tag_counter}"
+                self._tag_counter += 1
+                self._by_tag[tag] = EvidenceSnippet(
+                    tag=tag, query=q, title=r.title, url=r.url, text=r.snippet, source="wikipedia"
+                )
+                lines.append(f"[{tag}] {r.title}")
+                lines.append(f"    Source: {r.url}")
+                lines.append(f"    {r.snippet}")
+                found = True
+
+            for i, r in enumerate(web):
+                snippet = extracted if (i == 0 and extracted) else r.snippet
+                tag = f"E{self._tag_counter}"
+                self._tag_counter += 1
+                self._by_tag[tag] = EvidenceSnippet(
+                    tag=tag, query=q, title=r.title, url=r.url, text=snippet, source="web"
+                )
+                lines.append(f"[{tag}] {r.title}")
+                lines.append(f"    Source: {r.url}")
+                lines.append(f"    {snippet}")
+                found = True
+
+            if not found:
+                lines.append("    No results found.")
+
+            sections.append("\n".join(lines))
+
+        if not sections:
+            return FetchResult(formatted="")
+
+        formatted_block = "## SEARCH RESULTS\n\n" + "\n\n".join(sections)
+        return FetchResult(formatted=formatted_block)
+
+    def resolve(self, tags: list[str]) -> list[EvidenceSnippet]:
+        """Resolve evidence refs to their genuine snippets."""
+        return [self._by_tag[t] for t in tags if t in self._by_tag]

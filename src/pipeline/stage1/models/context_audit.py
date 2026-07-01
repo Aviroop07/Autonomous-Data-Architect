@@ -12,6 +12,7 @@ class ContextRejectionCode(str, Enum):
     TOO_SPECULATIVE = "TOO_SPECULATIVE"
     LOW_VALUE = "LOW_VALUE"
     INVALID_REFERENCE = "INVALID_REFERENCE"
+    UNGROUNDED = "UNGROUNDED"
 
 
 class ContextRejectedFact(BaseModel):
@@ -24,7 +25,7 @@ class ContextRejectedFact(BaseModel):
 
 class ContextAuditReport(LoopOutputModel):
     is_acceptable: bool = Field(
-        description="True if the proposed context can be used without retry."
+        description="True if no blocking/major gap remains open and proposed context is acceptable."
     )
     accepted_fact_ids: List[int] = Field(
         default_factory=list,
@@ -33,12 +34,18 @@ class ContextAuditReport(LoopOutputModel):
     rejected_facts: List[ContextRejectedFact] = Field(
         default_factory=list, description="Rejected proposed facts with reasons."
     )
-    missing_recommended_context: List[str] = Field(
-        default_factory=list, description="Optional high-value context still missing."
-    )
+
     retry_instructions: str = Field(
         default="",
         description="Instructions for the context enricher if another attempt is needed.",
+    )
+    unresolved_gap_ids: List[int] = Field(
+        default_factory=list,
+        description="IDs of gaps the auditor judges still open after this round.",
+    )
+    next_search_queries: List[str] = Field(
+        default_factory=list,
+        description="Directed DDG queries for those still-open gaps.",
     )
 
     def get_errors(self) -> list[str]:

@@ -7,6 +7,8 @@ from src.pipeline.stage1.models.context_audit import (
 )
 from src.pipeline.stage1.models.raw_fact import RawFact
 from src.pipeline.stage1.models.rephrased_nl import FactList
+from src.pipeline.stage1.models.coverage_report import SpecGap
+from src.util.core.search_tool import EvidenceStore
 from src.util.core.agent import AgentType, get_agent_
 from src.util.core.invoke import get_response
 from src.util.orchestration.loop_types import (
@@ -29,9 +31,13 @@ class ContextAuditorLoopAgent(LoopAgent):
     def __init__(
         self,
         original_facts: List[RawFact],
+        gaps: List[SpecGap],
+        evidence_store: EvidenceStore,
         model: Optional[str] = None,
     ) -> None:
         self._original_facts = original_facts
+        self._gaps = gaps
+        self._evidence_store = evidence_store
         self._model = model
         self._agent: Optional[AgentType] = None
         self._last_proposed_count: int = 0
@@ -72,14 +78,32 @@ class ContextAuditorLoopAgent(LoopAgent):
             for fact in self._original_facts
         )
         proposed_text = "\n".join(
-            f"- id: {fact.id}\n  fact: {fact.fact}\n  referenced_fact_ids: {fact.referenced_fact_ids}"
+            f"- id: {fact.id}\n  fact: {fact.fact}\n  referenced_fact_ids: {fact.referenced_fact_ids}\n  addresses_gap: {fact.addresses_gap}\n  evidence_refs: {fact.evidence_refs}"
             for fact in proposed_external_facts
         )
+        
+        # Inject EVIDENCE section
+        tags = set()
+        for fact in proposed_external_facts:
+            tags.update(fact.evidence_refs)
+            
+        resolved_evidence = self._evidence_store.resolve(list(tags))
+        evidence_text = ""
+        if resolved_evidence:
+            evidence_lines = []
+            for e in resolved_evidence:
+                evidence_lines.append(f"[{e.tag}] {e.title}\n    Source: {e.url}\n    {e.text}")
+            evidence_text = "\n".join(evidence_lines)
+        else:
+            evidence_text = "None cited."
+
         return (
             "## ORIGINAL FACTS\n"
             f"{original_text}\n\n"
             "## PROPOSED EXTERNAL CONTEXT FACTS\n"
-            f"{proposed_text}"
+            f"{proposed_text}\n\n"
+            "## EVIDENCE (as retrieved)\n"
+            f"{evidence_text}"
         )
 
     def emit_history(

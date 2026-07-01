@@ -272,7 +272,7 @@ def get_agent_(
     The OUTPUT FORMAT section is dynamically appended to the system prompt from
     the Pydantic schema. Uses json_mode for Gemini, function_calling for all others.
 
-    Web search is handled via pre-fetch (prefetch_and_format_searches) before
+    Web search is handled via EvidenceStore pre-fetching before
     the agent call, not via tool-calling. See src/util/core/search_tool.py.
     """
     provider, api_key, base_url, env_default = _detect_provider()

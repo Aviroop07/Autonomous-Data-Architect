@@ -15,7 +15,9 @@ class ExternalFactRejectionCode(str, Enum):
 
 class ExternalFactRejection(BaseModel):
     fact: RawFact = Field(description="Rejected external fact.")
-    code: ExternalFactRejectionCode = Field(description="Deterministic rejection reason code.")
+    code: ExternalFactRejectionCode = Field(
+        description="Deterministic rejection reason code."
+    )
     reason: str = Field(description="Human-readable rejection reason.")
 
 
@@ -36,6 +38,7 @@ ARCHITECTURE_TERMS = [
     "operational scheduling",
 ]
 
+
 def filter_external_facts(
     external_facts: List[RawFact],
     original_facts: List[RawFact],
@@ -45,11 +48,13 @@ def filter_external_facts(
     for fact in external_facts:
         normalized_fact = _normalize(fact.fact)
         if normalized_fact in seen_fact_texts:
-            result.rejected_facts.append(ExternalFactRejection(
-                fact=fact,
-                code=ExternalFactRejectionCode.DUPLICATE_EXTERNAL_FACT,
-                reason="Duplicate external fact text.",
-            ))
+            result.rejected_facts.append(
+                ExternalFactRejection(
+                    fact=fact,
+                    code=ExternalFactRejectionCode.DUPLICATE_EXTERNAL_FACT,
+                    reason="Duplicate external fact text.",
+                )
+            )
             continue
         seen_fact_texts.append(normalized_fact)
 
@@ -58,28 +63,60 @@ def filter_external_facts(
             result.rejected_facts.append(rejection)
             continue
 
-        kind = classify_external_fact(fact)
+        # The enricher sets external_kind directly (single source of truth). Fall
+        # back to deterministic classification only when it left the field empty.
+        kind = fact.external_kind or classify_external_fact(fact)
         fact.external_kind = kind
-        fact.novelty_reason = _novelty_reason(kind) if kind else "Accepted by context auditor and passed deterministic reference checks."
+        fact.novelty_reason = (
+            _novelty_reason(kind)
+            if kind
+            else "Accepted by context auditor and passed deterministic reference checks."
+        )
         fact.is_external = True
         result.accepted_facts.append(fact)
     return result
 
 
 def classify_external_fact(fact: RawFact) -> Optional[ExternalFactKind]:
+    """Deterministic fallback classifier, used only when the enricher did not set
+    external_kind. Prefix-independent (facts no longer carry a category prefix)."""
     text = _normalize(fact.fact)
-    if text.startswith("technical definition:") or "defined as" in text or "stands for" in text:
+    if "defined as" in text or "stands for" in text or "is a measure" in text:
         return ExternalFactKind.TECHNICAL_DEFINITION
     if any(term in text for term in ARCHITECTURE_TERMS):
         return ExternalFactKind.ARCHITECTURE_PATTERN
-    if any(term in text for term in ["domain pattern", "standard schema", "common tables", "typical entities", "industry standard"]):
+    if any(
+        term in text
+        for term in [
+            "domain pattern",
+            "standard schema",
+            "common tables",
+            "typical entities",
+            "industry standard",
+        ]
+    ):
         return ExternalFactKind.DOMAIN_PATTERN
-    if any(term in text for term in ["constraint", "threshold", "budget", "pricing", "rate", "discount", "capacity", "limit", "cap"]):
+    if any(
+        term in text
+        for term in [
+            "constraint",
+            "threshold",
+            "budget",
+            "pricing",
+            "rate",
+            "discount",
+            "capacity",
+            "limit",
+            "cap",
+        ]
+    ):
         return ExternalFactKind.DOMAIN_CONSTRAINT_HINT
     return None
 
 
-def _reject_reason(fact: RawFact, original_facts: List[RawFact]) -> Optional[ExternalFactRejection]:
+def _reject_reason(
+    fact: RawFact, original_facts: List[RawFact]
+) -> Optional[ExternalFactRejection]:
     if fact.id in fact.referenced_fact_ids:
         return ExternalFactRejection(
             fact=fact,
@@ -98,7 +135,9 @@ def _reject_reason(fact: RawFact, original_facts: List[RawFact]) -> Optional[Ext
 
 
 def _references_original_facts(fact: RawFact, original_facts: List[RawFact]) -> bool:
-    original_ids = [original.id for original in original_facts if not original.is_external]
+    original_ids = [
+        original.id for original in original_facts if not original.is_external
+    ]
     return any(ref_id in original_ids for ref_id in fact.referenced_fact_ids)
 
 

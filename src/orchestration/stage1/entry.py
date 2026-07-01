@@ -11,7 +11,8 @@ from src.pipeline.stage1.middleware.external_context_filter import (
     filter_external_facts,
 )
 from src.pipeline.stage1.middleware.tag_normalization import normalize_stage1_tags
-from src.pipeline.stage1.middleware.underspec_detector import detect_underspecification
+from src.pipeline.stage1.agents.spec_completeness_auditor.agent import audit_completeness
+from src.pipeline.stage1.models.coverage_report import SpecGap
 from src.pipeline.stage1.models.context_audit import ContextAuditAttempt
 from src.pipeline.stage1.models.integrity_report import IntegrityReport
 from src.pipeline.stage1.models.raw_fact import RawFact
@@ -94,19 +95,26 @@ async def _orchestrate_impl(
     if last_report is not None and last_report.search_suggestions:
         search_suggestions.extend(last_report.search_suggestions)
 
-    underspec_report = detect_underspecification(
-        extracted_facts, nl_description, domain=extraction_output.domain or "Unknown"
+    coverage_report, t_cov = await audit_completeness(
+        extracted_facts,
+        domain=extraction_output.domain or "Unknown",
+        analytical_goal=extraction_output.analytical_goal or "Unknown",
+        verifier_suggestions=search_suggestions,
+        model=model,
     )
-    if underspec_report.is_underspecified:
-        print(f"[Stage 1] Underspecified input detected: {underspec_report.reasoning}")
-        search_suggestions.extend(underspec_report.suggested_domain_searches)
+    total_tokens += t_cov
 
-    if ablation_config is None or ablation_config.enable_enrichment:
+    gate_open = coverage_report.is_underspecified
+    enrichment_enabled = ablation_config is None or ablation_config.enable_enrichment
+
+    if enrichment_enabled and gate_open:
+        gate_gaps = coverage_report.gaps_for_enrichment()
+        print(f"[Stage 1] Coverage gate OPEN: {len(gate_gaps)} gaps (minor gaps included for free).")
         external_facts, t_enrich = await _run_context_enrichment_loop(
             facts=extracted_facts,
+            gaps=gate_gaps,
             model=model,
             audit_trail=context_audit_trail,
-            search_suggestions=search_suggestions or None,
         )
         total_tokens += t_enrich
         enrichment_filter_report = filter_external_facts(
@@ -119,8 +127,11 @@ async def _orchestrate_impl(
                 "mechanically invalid external facts."
             )
         all_facts: List[RawFact] = extracted_facts + external_facts
-    else:
+    elif not enrichment_enabled:
         print("[Stage 1] Context enrichment disabled (ablation).")
+        all_facts = extracted_facts
+    else:
+        print("[Stage 1] Coverage gate CLOSED: spec sufficiently complete; skipping enrichment.")
         all_facts = extracted_facts
 
     tag_results, t_tag = await tag_facts(facts=all_facts, model=model)
@@ -161,13 +172,13 @@ async def _orchestrate_impl(
 
 async def _run_context_enrichment_loop(
     facts: List[RawFact],
+    gaps: List[SpecGap],
     model: Optional[str],
     audit_trail: List[ContextAuditAttempt],
-    search_suggestions: Optional[List[str]] = None,
 ) -> Tuple[List[RawFact], int]:
     config, enricher_agent, auditor_agent = make_enrichment_loop_config(
         original_facts=facts,
-        search_suggestions=search_suggestions,
+        gaps=gaps,
         model=model,
     )
     result = await AgentLoop(config).run("")

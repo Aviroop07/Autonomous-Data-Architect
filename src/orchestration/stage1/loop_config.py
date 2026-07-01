@@ -9,6 +9,8 @@ from src.pipeline.stage1.agents.context_enricher.agent import ContextEnricherLoo
 from src.pipeline.stage1.agents.fact_extractor.agent import FactExtractorLoopAgent
 from src.pipeline.stage1.agents.verifier.agent import VerifierLoopAgent
 from src.pipeline.stage1.models.raw_fact import RawFact
+from src.pipeline.stage1.models.coverage_report import SpecGap
+from src.util.core.search_tool import EvidenceStore
 from src.util.orchestration.loop_types import (
     AgentRoleConfig,
     EdgeCondition,
@@ -49,7 +51,7 @@ def make_stage1_loop_config(
 
 def make_enrichment_loop_config(
     original_facts: List[RawFact],
-    search_suggestions: Optional[List[str]] = None,
+    gaps: List[SpecGap],
     model: Optional[str] = None,
 ) -> tuple[LoopConfig, ContextEnricherLoopAgent, ContextAuditorLoopAgent]:
     """Build the AgentLoop config for context enrichment + auditing.
@@ -57,13 +59,18 @@ def make_enrichment_loop_config(
     Returns the config plus the two agent instances so callers can read
     accumulated_accepted and audit_trail after the loop completes.
     """
+    evidence_store = EvidenceStore()
+    
     enricher = ContextEnricherLoopAgent(
         original_facts=original_facts,
-        search_suggestions=search_suggestions,
+        gaps=gaps,
+        evidence_store=evidence_store,
         model=model,
     )
     auditor = ContextAuditorLoopAgent(
         original_facts=original_facts,
+        gaps=gaps,
+        evidence_store=evidence_store,
         model=model,
     )
 
