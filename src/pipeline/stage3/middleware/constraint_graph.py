@@ -6,11 +6,14 @@ Scope of this module: StatisticalManifest.distributions and moment_targets
 cardinalities/fanouts, and Q4's fork-key registry (conditional
 distributions and unconditional CrossColumnLogic branches, section 5) --
 see fork_registry.py for the registry itself. Explicitly NOT handled:
-UniqueConstraint and FormatConstraint (neither has a numeric parameter to
-pin -- not a DOF concept at all). Q3's derivation walk deliberately bails
-on a base column whose ONLY distribution facts are conditional (section
-4.4 discipline) rather than guessing which branch's mean applies -- see
-_base_mean_variable.
+UniqueConstraint, FormatConstraint, and ColumnCorrelation (D7) -- none has
+a numeric parameter to pin, so none is a DOF concept at all. Correlation
+is a joint-distribution shape parameter, not a variable/equation; it flows
+straight to Stage 4 generation instead (see constraints.py's
+ColumnCorrelation docstring for the validated mechanism). Q3's derivation
+walk deliberately bails on a base column whose ONLY distribution facts
+are conditional (section 4.4 discipline) rather than guessing which
+branch's mean applies -- see _base_mean_variable.
 """
 
 from __future__ import annotations

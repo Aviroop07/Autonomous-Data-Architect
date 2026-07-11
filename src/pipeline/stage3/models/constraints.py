@@ -243,9 +243,47 @@ class MomentTarget(ConstraintBase):
         return []
 
 
+class ColumnCorrelation(ConstraintBase):
+    """D7: a stated correlation between two columns (same table or FK-linked
+    across tables). NOT a DOF/structural-graph concept -- correlation is a
+    joint-distribution shape parameter, not something that pins or frees a
+    variable, so this is deliberately excluded from constraint_graph.py's
+    adapter (same bucket as UniqueConstraint/FormatConstraint). Consumed
+    directly by Stage 4 generation via the already-validated topo-ordered
+    conditional Gaussian copula mechanism (see
+    experiments/taxonomy_research/OPENCODE_CORRELATIONS.md and
+    CORRELATION_VALIDATION_REPORT.md) -- not built yet, tracked separately."""
+
+    table_name_a: str = Field(description="Table containing the first column.")
+    column_name_a: str = Field(description="First column name.")
+    table_name_b: str = Field(
+        description="Table containing the second column. Same as table_name_a for an intra-table correlation, or the FK-linked table for a cross-table one."
+    )
+    column_name_b: str = Field(description="Second column name.")
+    direction: Literal["POSITIVE", "NEGATIVE"] = Field(
+        description="Sign of the stated correlation."
+    )
+    strength: Literal["WEAK", "MODERATE", "STRONG"] = Field(
+        description="Qualitative strength -- maps to a target Spearman rho at generation time (weak=0.3, moderate=0.6, strong=0.9)."
+    )
+
+    def _validate(self) -> List[str]:
+        errors = []
+        if (self.table_name_a, self.column_name_a) == (
+            self.table_name_b,
+            self.column_name_b,
+        ):
+            errors.append(
+                f"ColumnCorrelation: a column cannot be correlated with itself "
+                f"({self.table_name_a}.{self.column_name_a})."
+            )
+        return errors
+
+
 class StatisticalManifest(BaseModel):
     distributions: List[DistributionConstraint] = Field(default_factory=list)
     moment_targets: List[MomentTarget] = Field(default_factory=list)
+    correlations: List[ColumnCorrelation] = Field(default_factory=list)
 
 
 class StructuralManifest(BaseModel):
