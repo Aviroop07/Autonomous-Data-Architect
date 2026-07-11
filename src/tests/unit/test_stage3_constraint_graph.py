@@ -1,8 +1,10 @@
 """Unit tests for the taxonomy-v2-to-DOF-graph adapter
-(src/pipeline/stage3/middleware/constraint_graph.py). Scope: distributions,
-cardinalities, and fanouts -- see the module docstring for what's
-deliberately not handled yet (AggregationConstraint, CrossColumnLogic,
-UniqueConstraint, FormatConstraint).
+(src/pipeline/stage3/middleware/constraint_graph.py). Scope: distributions
+(including Q3's moment-target derivation walk and Q4's conditional
+fork-key expansion), cardinalities, and fanouts -- see the module
+docstring for what's still deliberately not handled (UniqueConstraint,
+FormatConstraint, conditional CrossColumnLogic outside the moment-target
+walk).
 """
 
 from __future__ import annotations
@@ -16,11 +18,15 @@ from src.pipeline.stage3.middleware.constraint_graph import (
     table_cardinality_to_graph_nodes,
 )
 from src.pipeline.stage3.models.constraints import (
+    AggregationConstraint,
     BetaDistribution,
     CategoricalDistribution,
     ConstraintManifest,
+    CrossColumnLogic,
     FanoutConstraint,
     GaussianDistribution,
+    LogicManifest,
+    MomentTarget,
     PoissonDistribution,
     StatisticalManifest,
     StructuralManifest,
@@ -342,3 +348,115 @@ class TestConstraintManifestToGraphNodes:
             "ORDER.shipping_cost.std_dev",
             "CARRIER.row_count",
         }
+
+
+def test_q4_fork_registry_graph_expansion():
+    cat_dist = CategoricalDistribution(
+        table_name="CUSTOMER",
+        column_name="loyalty_tier",
+        categories=["Bronze", "Silver", "Gold", "Platinum"],
+        fact_references=[1],
+    )
+
+    cross_logic = CrossColumnLogic(
+        table_context="ORDER",
+        if_condition="CUSTOMER.loyalty_tier = 'Platinum'",
+        then_enforcement="shipping_cost = 0",
+        fact_references=[41],
+    )
+
+    gauss_dist = GaussianDistribution(
+        table_name="ORDER",
+        column_name="shipping_cost",
+        if_condition="CUSTOMER.loyalty_tier != 'Platinum'",
+        mean=8.0,
+        std_dev=2.0,
+        fact_references=[42],
+    )
+
+    manifest = ConstraintManifest(
+        statistical=StatisticalManifest(distributions=[cat_dist, gauss_dist]),
+        logic=LogicManifest(cross_column_logic=[cross_logic]),
+    )
+
+    variables, constraints = constraint_manifest_to_graph_nodes(manifest)
+
+    var_names = {v.name for v in variables}
+    assert "ORDER.shipping_cost.mean|CUSTOMER.loyalty_tier=Platinum" in var_names
+    assert "ORDER.shipping_cost.mean|CUSTOMER.loyalty_tier=Bronze" in var_names
+    assert "ORDER.shipping_cost.mean|CUSTOMER.loyalty_tier=Silver" in var_names
+    assert "ORDER.shipping_cost.mean|CUSTOMER.loyalty_tier=Gold" in var_names
+    assert "ORDER.shipping_cost.std_dev|CUSTOMER.loyalty_tier=Bronze" in var_names
+
+    cross_cons = [c for c in constraints if "pin_cross" in c.name]
+    assert len(cross_cons) == 1
+    assert (
+        "ORDER.shipping_cost.mean|CUSTOMER.loyalty_tier=Platinum"
+        in cross_cons[0].variables
+    )
+
+
+def test_q4_moment_target_bails_on_conditional_base():
+    """A MomentTarget whose derivation chain bottoms out at a base column
+    with ONLY conditional distribution facts must bail, not fabricate an
+    unconditional mean from whichever branch happens to be listed first.
+
+    Uses AVG deliberately, not SUM: AVG needs no FanoutConstraint match, so
+    nothing else in the derivation walk can bail first for an unrelated
+    reason -- this isolates the conditional-base-column check itself. (A
+    prior version of this test used SUM with no FanoutConstraint in the
+    manifest, which passed for the wrong reason: _resolve_aggregation bails
+    on the missing-fanout check before ever reaching this column, so the
+    test kept passing even when the conditional-base bug was still live.)
+    """
+    cat_dist = CategoricalDistribution(
+        table_name="CUSTOMER",
+        column_name="tier",
+        categories=["A", "B"],
+        fact_references=[1],
+    )
+
+    gauss_dist = GaussianDistribution(
+        table_name="ORDER",
+        column_name="shipping_cost",
+        if_condition="CUSTOMER.tier = 'A'",
+        mean=5.0,
+        std_dev=1.0,
+        fact_references=[2],
+    )
+
+    agg = AggregationConstraint(
+        parent_table="CUSTOMER",
+        parent_column="total_shipping",
+        descendant_table="ORDER",
+        descendant_column="shipping_cost",
+        operation="AVG",
+        fact_references=[3],
+    )
+
+    moment = MomentTarget(
+        table_name="CUSTOMER",
+        column_name="total_shipping",
+        statistic="MEAN",
+        target_value=100.0,
+        fact_references=[4],
+    )
+
+    manifest = ConstraintManifest(
+        statistical=StatisticalManifest(
+            distributions=[cat_dist, gauss_dist], moment_targets=[moment]
+        ),
+        structural=StructuralManifest(aggregations=[agg]),
+    )
+
+    variables, constraints = constraint_manifest_to_graph_nodes(manifest)
+    var_names = {v.name for v in variables}
+
+    assert "ORDER.shipping_cost.mean" not in var_names
+    assert "CUSTOMER.total_shipping" not in var_names
+    # The moment_target constraint itself must never have been created --
+    # the conditional distribution's own branch-suffixed variable is fine
+    # (that's Q4's normal output), but nothing should reference the bare,
+    # unconditional "ORDER.shipping_cost.mean" this bug used to fabricate.
+    assert not any("moment_target" in c.name for c in constraints)
+    assert "ORDER.shipping_cost.mean|CUSTOMER.tier=A" in var_names

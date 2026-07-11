@@ -2,11 +2,15 @@
 (src/util/algorithms/dof_graph.py), per STAGE3_PHASE2_DESIGN.md's taxonomy v2.
 
 Scope of this module: StatisticalManifest.distributions and moment_targets
-(Q3's derivation-chain walk, section 4), and StructuralManifest's
-cardinalities/fanouts. Explicitly NOT handled: UniqueConstraint and
-FormatConstraint (neither has a numeric parameter to pin -- not a DOF
-concept at all), and conditional CrossColumnLogic (if_condition is set --
-needs Q4's fork-key registry, no design yet).
+(Q3's derivation-chain walk, section 4), StructuralManifest's
+cardinalities/fanouts, and Q4's fork-key registry (conditional
+distributions and unconditional CrossColumnLogic branches, section 5) --
+see fork_registry.py for the registry itself. Explicitly NOT handled:
+UniqueConstraint and FormatConstraint (neither has a numeric parameter to
+pin -- not a DOF concept at all). Q3's derivation walk deliberately bails
+on a base column whose ONLY distribution facts are conditional (section
+4.4 discipline) rather than guessing which branch's mean applies -- see
+_base_mean_variable.
 """
 
 from __future__ import annotations
@@ -14,6 +18,10 @@ from __future__ import annotations
 import sqlglot
 from sqlglot import expressions as exp
 
+from src.pipeline.stage3.middleware.fork_registry import (
+    ForkKeyRegistry,
+    parse_if_condition,
+)
 from src.pipeline.stage3.models.constraints import (
     AggregationConstraint,
     BetaDistribution,
@@ -64,7 +72,10 @@ def _accumulate(
 
 
 def distribution_to_graph_nodes(
-    dist: DistributionConstraint, disambiguator: int
+    dist: DistributionConstraint,
+    disambiguator: int,
+    branches: list[str] | None = None,
+    fork_key_str: str | None = None,
 ) -> tuple[list[Variable], list[Constraint]]:
     """Split one distribution fact into per-parameter Variable/Constraint
     pairs -- one Constraint PER parameter, never one Constraint touching
@@ -81,17 +92,27 @@ def distribution_to_graph_nodes(
     qualified_column = f"{dist.table_name}.{dist.column_name}"
     refs = dist.fact_references
 
+    suffixes = []
+    if branches and fork_key_str:
+        suffixes = [f"|{fork_key_str}={b}" for b in branches]
+    else:
+        suffixes = [""]
+
     if isinstance(dist, CategoricalDistribution):
-        var_name = f"{qualified_column}.probabilities"
-        variable = Variable(name=var_name, fact_references=refs)
-        if dist.probabilities is None:
-            return [variable], []
-        constraint = Constraint(
-            name=f"pin_{var_name}#{disambiguator}",
-            variables=[var_name],
-            fact_references=refs,
-        )
-        return [variable], [constraint]
+        variables = []
+        constraints = []
+        for suffix in suffixes:
+            var_name = f"{qualified_column}.probabilities{suffix}"
+            variable = Variable(name=var_name, fact_references=refs)
+            variables.append(variable)
+            if dist.probabilities is not None:
+                constraint = Constraint(
+                    name=f"pin_{var_name}#{disambiguator}",
+                    variables=[var_name],
+                    fact_references=refs,
+                )
+                constraints.append(constraint)
+        return variables, constraints
 
     if isinstance(dist, (GaussianDistribution, LogNormalDistribution)):
         params = ["mean", "std_dev"]
@@ -107,33 +128,37 @@ def distribution_to_graph_nodes(
     variables = []
     constraints = []
     for param in params:
-        var_name = f"{qualified_column}.{param}"
-        variables.append(Variable(name=var_name, fact_references=refs))
-        constraints.append(
-            Constraint(
-                name=f"pin_{var_name}#{disambiguator}",
-                variables=[var_name],
-                fact_references=refs,
+        for suffix in suffixes:
+            var_name = f"{qualified_column}.{param}{suffix}"
+            variables.append(Variable(name=var_name, fact_references=refs))
+            constraints.append(
+                Constraint(
+                    name=f"pin_{var_name}#{disambiguator}",
+                    variables=[var_name],
+                    fact_references=refs,
+                )
             )
-        )
     return variables, constraints
 
 
 def statistical_manifest_to_graph_nodes(
-    manifest: StatisticalManifest,
+    manifest: StatisticalManifest, registry: ForkKeyRegistry | None = None
 ) -> tuple[list[Variable], list[Constraint]]:
-    """Flatten a whole StatisticalManifest into deduplicated Variables (one
-    per unique parameter, even if multiple facts pin it) and Constraints
-    (one per fact -- multiple facts pinning the same parameter stay as
-    separate Constraints, so DOFGraph's classification can flag the
-    conflict as an overconstrained block instead of this function silently
-    picking a winner)."""
+    """Flatten a whole StatisticalManifest into deduplicated Variables."""
     variables_by_name: dict[str, Variable] = {}
     constraints: list[Constraint] = []
 
     for index, dist in enumerate(manifest.distributions):
+        branches = None
+        fork_key_str = None
+        if registry and getattr(dist, "if_condition", None):
+            cond = parse_if_condition(dist.if_condition)
+            if cond:
+                branches = registry.get_branches_for_condition(cond)
+                fork_key_str = cond.fork_key.to_string()
+
         new_variables, new_constraints = distribution_to_graph_nodes(
-            dist, disambiguator=index
+            dist, disambiguator=index, branches=branches, fork_key_str=fork_key_str
         )
         _accumulate(variables_by_name, constraints, new_variables, new_constraints)
 
@@ -194,11 +219,11 @@ def structural_manifest_to_graph_nodes(
     manifest: StructuralManifest,
 ) -> tuple[list[Variable], list[Constraint]]:
     """Cardinalities and fan-outs only -- UniqueConstraint has no numeric
-    parameter to pin (not a DOF concept) and AggregationConstraint needs
-    Q3's dispatcher, not built yet. Both are silently skipped here, not
-    because they're unimportant, but because taxonomy v2 either doesn't
-    route them through this graph at all (uniqueness) or doesn't have a
-    design yet (aggregations)."""
+    parameter to pin (not a DOF concept, permanently out of scope here).
+    AggregationConstraint is deliberately absent too, but not because it's
+    unhandled: it's consumed by Q3's moment-target derivation walk
+    (moment_target_to_graph_nodes) rather than turned into its own graph
+    nodes here."""
     variables_by_name: dict[str, Variable] = {}
     constraints: list[Constraint] = []
 
@@ -234,17 +259,34 @@ def _base_mean_variable(
     a single parameter equal to the mean (it's a nonlinear combination of
     several) -- unsupported, bail. A column with no distribution at all is a
     genuinely free quantity: mint the same `.mean`-shaped name so it merges
-    cleanly with any distribution fact that might independently pin it."""
+    cleanly with any distribution fact that might independently pin it.
+
+    Conditional (Q4-forked, `if_condition` set) distributions are
+    deliberately skipped here -- an unconditional E[column] isn't any single
+    branch's mean, and this pass has no rule for combining branch means
+    weighted by branch probability into one population mean. A column whose
+    ONLY distribution facts are conditional therefore bails (section 4.4
+    discipline: unresolved, not guessed) rather than silently picking
+    whichever branch happened to be listed first."""
     qualified = f"{table_name}.{column_name}"
-    for dist in manifest.statistical.distributions:
-        if dist.table_name != table_name or dist.column_name != column_name:
-            continue
-        if isinstance(dist, (GaussianDistribution, LogNormalDistribution)):
-            return f"{qualified}.mean"
-        if isinstance(dist, PoissonDistribution):
-            return f"{qualified}.lam"
+    matches = [
+        dist
+        for dist in manifest.statistical.distributions
+        if dist.table_name == table_name and dist.column_name == column_name
+    ]
+    if not matches:
+        return f"{qualified}.mean"
+
+    unconditional = [d for d in matches if getattr(d, "if_condition", None) is None]
+    if not unconditional:
         return None
-    return f"{qualified}.mean"
+
+    dist = unconditional[0]
+    if isinstance(dist, (GaussianDistribution, LogNormalDistribution)):
+        return f"{qualified}.mean"
+    if isinstance(dist, PoissonDistribution):
+        return f"{qualified}.lam"
+    return None
 
 
 def _find_unconditional_cross_column(
@@ -349,18 +391,36 @@ def _resolve_aggregation(
     if aggregation.operation == "AVG":
         return descendant_vars, refs
 
-    matching_fanouts = [
-        fanout
-        for fanout in manifest.structural.fanouts
-        if fanout.parent_table == aggregation.parent_table
-        and fanout.child_table == aggregation.descendant_table
-    ]
-    if len(matching_fanouts) != 1:
+    from collections import deque
+
+    paths = []
+    queue = deque([(aggregation.parent_table, [])])
+    while queue:
+        current, path = queue.popleft()
+        if current == aggregation.descendant_table:
+            paths.append(path)
+            continue
+        for fanout in manifest.structural.fanouts:
+            if fanout.parent_table == current:
+                if any(f.child_table == fanout.child_table for f in path):
+                    continue
+                queue.append((fanout.child_table, path + [fanout]))
+
+    if len(paths) != 1:
         return None
-    fanout = matching_fanouts[0]
-    fk_suffix = "_".join(fanout.foreign_key_columns)
-    fanout_var = f"{fanout.parent_table}->{fanout.child_table}.fanout_mean[{fk_suffix}]"
-    return descendant_vars | {fanout_var}, refs | set(fanout.fact_references)
+
+    path = paths[0]
+    fanout_vars = set()
+    fanout_refs = set()
+    for fanout in path:
+        fk_suffix = "_".join(fanout.foreign_key_columns)
+        var_name = (
+            f"{fanout.parent_table}->{fanout.child_table}.fanout_mean[{fk_suffix}]"
+        )
+        fanout_vars.add(var_name)
+        fanout_refs.update(fanout.fact_references)
+
+    return descendant_vars | fanout_vars, refs | fanout_refs
 
 
 def moment_target_to_graph_nodes(
@@ -390,15 +450,32 @@ def moment_target_to_graph_nodes(
 def constraint_manifest_to_graph_nodes(
     manifest: ConstraintManifest,
 ) -> tuple[list[Variable], list[Constraint]]:
-    """Combine everything this module currently knows how to graph:
-    distributions, moment targets (via the section 4.2 derivation walk),
-    and cardinalities/fanouts. Explicitly NOT included: uniqueness and
-    formats (not DOF concepts), and conditional cross-column logic (Q4,
-    if_condition is set). A MomentTarget the derivation walk can't resolve
-    is logged and dropped rather than raising -- it's a known, enumerated
-    boundary (section 4.4), not an error."""
+    """Combine everything this module currently knows how to graph."""
+    registry = ForkKeyRegistry()
+
+    # Discovery Pass helper
+    def _discover_fork(if_condition: str | None):
+        if not if_condition:
+            return
+        cond = parse_if_condition(if_condition)
+        if not cond:
+            return
+        for cdist in manifest.statistical.distributions:
+            if (
+                isinstance(cdist, CategoricalDistribution)
+                and cdist.table_name == cond.fork_key.table_name
+                and cdist.column_name == cond.fork_key.column_name
+            ):
+                registry.register_fork(cond.fork_key, cdist.categories)
+                break
+
+    for dist in manifest.statistical.distributions:
+        _discover_fork(getattr(dist, "if_condition", None))
+    for cross in manifest.logic.cross_column_logic:
+        _discover_fork(cross.if_condition)
+
     stat_variables, stat_constraints = statistical_manifest_to_graph_nodes(
-        manifest.statistical
+        manifest.statistical, registry
     )
     struct_variables, struct_constraints = structural_manifest_to_graph_nodes(
         manifest.structural
@@ -407,6 +484,45 @@ def constraint_manifest_to_graph_nodes(
     variables_by_name = {v.name: v for v in stat_variables}
     constraints = list(stat_constraints)
     _accumulate(variables_by_name, constraints, struct_variables, struct_constraints)
+
+    # Handle conditional CrossColumnLogic
+    for index, cross in enumerate(manifest.logic.cross_column_logic):
+        if cross.if_condition:
+            cond = parse_if_condition(cross.if_condition)
+            if not cond:
+                continue
+            branches = registry.get_branches_for_condition(cond)
+            fork_key_str = cond.fork_key.to_string()
+
+            try:
+                parsed = sqlglot.parse_one(cross.then_enforcement)
+                if not isinstance(parsed, exp.EQ) or not isinstance(
+                    parsed.this, exp.Column
+                ):
+                    print(
+                        f"[Stage3] conditional cross-logic wrong shape: {cross.then_enforcement}"
+                    )
+                    continue
+                target_col = parsed.this.name
+            except Exception:
+                print(
+                    f"[Stage3] conditional cross-logic unparseable: {cross.then_enforcement}"
+                )
+                continue
+
+            for branch in branches:
+                var_name = (
+                    f"{cross.table_context}.{target_col}.mean|{fork_key_str}={branch}"
+                )
+                variable = Variable(
+                    name=var_name, fact_references=cross.fact_references
+                )
+                constraint = Constraint(
+                    name=f"pin_cross_{var_name}#{index}",
+                    variables=[var_name],
+                    fact_references=cross.fact_references,
+                )
+                _accumulate(variables_by_name, constraints, [variable], [constraint])
 
     for index, target in enumerate(manifest.statistical.moment_targets):
         resolved = moment_target_to_graph_nodes(target, manifest, disambiguator=index)

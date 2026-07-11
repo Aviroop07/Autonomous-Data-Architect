@@ -80,6 +80,18 @@ class AggregationConstraint(ConstraintBase):
 class DistributionBase(ConstraintBase):
     table_name: str = Field(description="Table containing the column.")
     column_name: str = Field(description="Column name.")
+    if_condition: Optional[str] = Field(
+        default=None,
+        description="Condition restricting when this distribution applies.",
+    )
+
+    def _validate(self) -> List[str]:
+        errors = []
+        if self.if_condition is not None and not self.if_condition.strip():
+            errors.append(
+                f"DistributionBase {self.column_name}: if_condition cannot be empty whitespace."
+            )
+        return errors
 
 
 class GaussianDistribution(DistributionBase):
@@ -212,6 +224,8 @@ class CrossColumnLogic(ConstraintBase):
             errors.append("CrossColumnLogic: table_context cannot be empty.")
         if not self.then_enforcement.strip():
             errors.append("CrossColumnLogic: then_enforcement cannot be empty.")
+        if self.if_condition is not None and not self.if_condition.strip():
+            errors.append("CrossColumnLogic: if_condition cannot be empty whitespace.")
         return errors
 
 
