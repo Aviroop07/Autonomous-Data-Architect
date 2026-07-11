@@ -18,8 +18,10 @@ dependencies = [
     "pandas",
     "psutil",
     "pydantic",
+    "pyomo",
     "requests",
     "scipy",
+    "sqlglot",
     "tqdm",
 ]
 
