@@ -340,7 +340,7 @@ class TestConstraintManifestToGraphNodes:
                 ],
             ),
         )
-        variables, constraints = constraint_manifest_to_graph_nodes(manifest)
+        variables, constraints, _ = constraint_manifest_to_graph_nodes(manifest)
         result = DOFGraph(variables, constraints).classify()
 
         assert set(result.square_variables) == {
@@ -379,7 +379,7 @@ def test_q4_fork_registry_graph_expansion():
         logic=LogicManifest(cross_column_logic=[cross_logic]),
     )
 
-    variables, constraints = constraint_manifest_to_graph_nodes(manifest)
+    variables, constraints, _ = constraint_manifest_to_graph_nodes(manifest)
 
     var_names = {v.name for v in variables}
     assert "ORDER.shipping_cost.mean|CUSTOMER.loyalty_tier=Platinum" in var_names
@@ -449,7 +449,7 @@ def test_q4_moment_target_bails_on_conditional_base():
         structural=StructuralManifest(aggregations=[agg]),
     )
 
-    variables, constraints = constraint_manifest_to_graph_nodes(manifest)
+    variables, constraints, _ = constraint_manifest_to_graph_nodes(manifest)
     var_names = {v.name for v in variables}
 
     assert "ORDER.shipping_cost.mean" not in var_names

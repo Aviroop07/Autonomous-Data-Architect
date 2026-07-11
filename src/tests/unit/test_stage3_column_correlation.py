@@ -74,7 +74,7 @@ class TestColumnCorrelationExcludedFromGraph:
                 ],
             )
         )
-        variables, constraints = constraint_manifest_to_graph_nodes(manifest)
+        variables, constraints, _ = constraint_manifest_to_graph_nodes(manifest)
 
         assert {v.name for v in variables} == {
             "CUSTOMER.age.mean",

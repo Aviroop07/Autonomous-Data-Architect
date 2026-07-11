@@ -42,7 +42,12 @@ from src.pipeline.stage3.models.constraints import (
     TableCardinality,
     UniformDistribution,
 )
-from src.util.algorithms.dof_graph import Constraint, Variable
+from src.pipeline.stage3.models.probe import (
+    MomentTargetProbe,
+    Stage3AnalysisReport,
+    VariableProbe,
+)
+from src.util.algorithms.dof_graph import Constraint, DOFGraph, Variable
 
 
 def _merge_variable(a: Variable, b: Variable) -> Variable:
@@ -452,8 +457,11 @@ def moment_target_to_graph_nodes(
 
 def constraint_manifest_to_graph_nodes(
     manifest: ConstraintManifest,
-) -> tuple[list[Variable], list[Constraint]]:
-    """Combine everything this module currently knows how to graph."""
+) -> tuple[list[Variable], list[Constraint], list[MomentTarget]]:
+    """Combine everything this module currently knows how to graph. The
+    third return value is every MomentTarget whose derivation walk bailed
+    -- Stage 3's job stops at reporting these (see analyze_constraint_manifest),
+    never at guessing or calibrating a value for them."""
     registry = ForkKeyRegistry()
 
     # Discovery Pass helper
@@ -527,6 +535,7 @@ def constraint_manifest_to_graph_nodes(
                 )
                 _accumulate(variables_by_name, constraints, [variable], [constraint])
 
+    unresolved_moment_targets: list[MomentTarget] = []
     for index, target in enumerate(manifest.statistical.moment_targets):
         resolved = moment_target_to_graph_nodes(target, manifest, disambiguator=index)
         if resolved is None:
@@ -534,8 +543,50 @@ def constraint_manifest_to_graph_nodes(
                 f"[Stage3] moment target unresolved (bailed derivation walk): "
                 f"{target.table_name}.{target.column_name}"
             )
+            unresolved_moment_targets.append(target)
             continue
         new_variables, new_constraints = resolved
         _accumulate(variables_by_name, constraints, new_variables, new_constraints)
 
-    return list(variables_by_name.values()), constraints
+    return list(variables_by_name.values()), constraints, unresolved_moment_targets
+
+
+def analyze_constraint_manifest(manifest: ConstraintManifest) -> Stage3AnalysisReport:
+    """Stage 3's complete output for a ConstraintManifest: what's
+    determined (square), what's genuinely free (loose -> VariableProbe),
+    what's contradictory (overconstrained_blocks), and which MomentTargets
+    couldn't be resolved (-> MomentTargetProbe). This is the boundary of
+    Stage 3's job -- it reports, it never fills a probe in itself (see
+    the project memory stage3_stage4_division_of_labor)."""
+    variables, constraints, unresolved_targets = constraint_manifest_to_graph_nodes(
+        manifest
+    )
+    classification = DOFGraph(variables, constraints).classify()
+
+    variables_by_name = {v.name: v for v in variables}
+    loose_probes = [
+        VariableProbe(
+            variable_name=name,
+            lower_bound=variables_by_name[name].lower_bound,
+            upper_bound=variables_by_name[name].upper_bound,
+            fact_references=variables_by_name[name].fact_references,
+        )
+        for name in classification.loose_variables
+    ]
+    moment_target_probes = [
+        MomentTargetProbe(
+            table_name=target.table_name,
+            column_name=target.column_name,
+            statistic=target.statistic,
+            target_value=target.target_value,
+            fact_references=target.fact_references,
+        )
+        for target in unresolved_targets
+    ]
+
+    return Stage3AnalysisReport(
+        square_variables=classification.square_variables,
+        loose_variable_probes=loose_probes,
+        unresolved_moment_target_probes=moment_target_probes,
+        overconstrained_blocks=classification.overconstrained_blocks,
+    )

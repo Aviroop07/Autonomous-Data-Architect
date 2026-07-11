@@ -121,7 +121,7 @@ class TestRealDataChain:
         to pin the otherwise-loose fanout mean, exactly like the multi
         -variable-elimination case validated in test_util_dof_graph.py."""
         manifest = _order_line_item_manifest(max_fanout=8)  # range, not pinned directly
-        variables, constraints = constraint_manifest_to_graph_nodes(manifest)
+        variables, constraints, _ = constraint_manifest_to_graph_nodes(manifest)
         result = DOFGraph(variables, constraints).classify()
 
         assert "ORDER->LINE_ITEM.fanout_mean[order_number]" in result.square_variables
@@ -234,7 +234,9 @@ class TestDerivationBuildingBlocks:
         variables, _ = resolved
         assert "LINE_ITEM.unit_price.mean" in {v.name for v in variables}
 
-        variables_full, constraints_full = constraint_manifest_to_graph_nodes(manifest)
+        variables_full, constraints_full, _ = constraint_manifest_to_graph_nodes(
+            manifest
+        )
         result = DOFGraph(variables_full, constraints_full).classify()
         assert set(result.loose_variables) == {
             "LINE_ITEM.unit_price.mean",
