@@ -330,3 +330,159 @@ def test_add_relationship_target_table_routes_to_fk_definition():
     fk = _only(rep, AddRelationshipPatch).fk_definition
     assert fk.referencing_table == "ORDER_LINE"
     assert fk.referred_table == "PRODUCT"
+
+
+# ---------------------------------------------------------------------------
+# Group 6 -- source_fact_ids provenance (the certifier-patch fact-id gap)
+# ---------------------------------------------------------------------------
+#
+# Root cause (confirmed empirically against a real cached schema, 2026-07-12):
+# BasePatch had no fact-id field at all, so certifier-added columns/FKs always
+# had empty source_fact_ids regardless of what the certifier LLM actually
+# grounded the patch in. These tests cover the alias normalization for the
+# new field, and the end-to-end propagation into Column/ForeignKey objects --
+# including the exact real-world reproduction: an ADD_COLUMN patch whose new
+# FK-shaped column gets auto-wired into a ForeignKey by wire_orphan_fk_columns()
+# (which apply_patches re-runs after every patch batch), and that ForeignKey
+# must inherit the column's fact_ids, not end up empty.
+
+
+def test_source_fact_ids_alias_normalized():
+    rep = _report(
+        {
+            "action": "ADD_COLUMN",
+            "table_name": "ORDER",
+            "column_name": "customer_id",
+            "fact_ids": [3, 7],
+            "reason": "r",
+        }
+    )
+    assert _only(rep, AddColumnPatch).source_fact_ids == [3, 7]
+
+
+def test_source_fact_ids_scalar_coerced_to_list():
+    rep = _report(
+        {
+            "action": "ADD_COLUMN",
+            "table_name": "ORDER",
+            "column_name": "customer_id",
+            "source_fact_ids": 5,
+            "reason": "r",
+        }
+    )
+    assert _only(rep, AddColumnPatch).source_fact_ids == [5]
+
+
+def test_source_fact_ids_defaults_to_empty():
+    rep = _report(
+        {
+            "action": "ADD_COLUMN",
+            "table_name": "ORDER",
+            "column_name": "customer_id",
+            "reason": "r",
+        }
+    )
+    assert _only(rep, AddColumnPatch).source_fact_ids == []
+
+
+def test_apply_add_column_propagates_fact_ids():
+    schema = Schema(
+        tables=[
+            Table(
+                name="ORDER",
+                pk="order_number",
+                columns=[Column(name="order_number", data_type="INTEGER")],
+            )
+        ],
+        relationships=[],
+    )
+    rep = _report(
+        {
+            "action": "ADD_COLUMN",
+            "table_name": "ORDER",
+            "column_name": "notes",
+            "data_type": "VARCHAR",
+            "fact_ids": [11],
+            "reason": "r",
+        }
+    )
+    apply_patches(schema, rep.patches)
+    col = next(c for c in schema.tables[0].columns if c.name == "notes")
+    assert col.source_fact_ids == [11]
+
+
+def test_apply_add_relationship_propagates_fact_ids_to_column_and_fk():
+    schema = Schema(
+        tables=[
+            Table(
+                name="CUSTOMER",
+                pk="customer_id",
+                columns=[Column(name="customer_id", data_type="INTEGER")],
+            ),
+            Table(
+                name="ORDER",
+                pk="order_number",
+                columns=[Column(name="order_number", data_type="INTEGER")],
+            ),
+        ],
+        relationships=[],
+    )
+    rep = _report(
+        {
+            "action": "ADD_RELATIONSHIP",
+            "referencing_table": "ORDER",
+            "referencing_column": "customer_id",
+            "referred_table": "CUSTOMER",
+            "fact_ids": [21],
+            "reason": "r",
+        }
+    )
+    apply_patches(schema, rep.patches)
+    order_table = next(t for t in schema.tables if t.name == "ORDER")
+    new_col = next(c for c in order_table.columns if c.name == "customer_id")
+    assert new_col.source_fact_ids == [21]
+    new_fk = next(
+        r for r in (schema.relationships or []) if r.referencing_table == "ORDER"
+    )
+    assert new_fk.source_fact_ids == [21]
+
+
+def test_add_column_then_orphan_wiring_inherits_fact_ids():
+    """The exact real-world scenario found in the cached brainstorm artifact:
+    a certifier ADD_COLUMN patch (no separate ADD_RELATIONSHIP) adds a
+    surrogate-key-named column; wire_orphan_fk_columns() -- re-run inside
+    apply_patches after every patch batch -- auto-wires it into a new FK.
+    That FK must inherit the column's fact_ids, not end up empty."""
+    schema = Schema(
+        tables=[
+            Table(
+                name="CUSTOMER",
+                pk="customer_id",
+                columns=[Column(name="customer_id", data_type="INTEGER")],
+            ),
+            Table(
+                name="ORDER",
+                pk="order_number",
+                columns=[Column(name="order_number", data_type="INTEGER")],
+            ),
+        ],
+        relationships=[],
+    )
+    rep = _report(
+        {
+            "action": "ADD_COLUMN",
+            "table_name": "ORDER",
+            "column_name": "customer_id",
+            "data_type": "INTEGER",
+            "fact_ids": [42],
+            "reason": "r",
+        }
+    )
+    apply_patches(schema, rep.patches)
+
+    auto_wired_fk = next(
+        (r for r in (schema.relationships or []) if r.referencing_table == "ORDER"),
+        None,
+    )
+    assert auto_wired_fk is not None
+    assert auto_wired_fk.source_fact_ids == [42]

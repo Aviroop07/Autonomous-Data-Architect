@@ -61,6 +61,11 @@ def apply_patches(
             _update_column_type(schema, patch)
 
     _cleanup_relationships(schema)
+    # AddColumnPatch (e.g. a certifier fix) can introduce a correctly-named FK column
+    # after the mapper's own wiring pass already ran once during initial mapping --
+    # re-run it here so newly-added FK-shaped columns get a real ForeignKey, not just
+    # a plausible-looking column with no relationship behind it.
+    schema.wire_orphan_fk_columns()
 
 
 def _add_column(schema: Schema, patch: AddColumnPatch):
@@ -68,7 +73,11 @@ def _add_column(schema: Schema, patch: AddColumnPatch):
         if table.name == patch.table_name:
             if not any(c.name == patch.column_name for c in table.columns):
                 table.columns.append(
-                    Column(name=patch.column_name, data_type=patch.data_type)
+                    Column(
+                        name=patch.column_name,
+                        data_type=patch.data_type,
+                        source_fact_ids=patch.source_fact_ids,
+                    )
                 )
 
 
@@ -106,12 +115,22 @@ def _add_table(
     owner_fact_ids: List[int] = [],
 ):
     defn = patch.table_definition
-    cols = [Column(name=c.name, data_type=c.data_type) for c in defn.columns]
+    cols = [
+        Column(
+            name=c.name,
+            data_type=c.data_type,
+            source_fact_ids=patch.source_fact_ids,
+        )
+        for c in defn.columns
+    ]
     uniques = [
         CompositeUnique(columns=u_defn.columns) for u_defn in (defn.unique or [])
     ]
     new_table = Table(
-        name=defn.name, columns=cols, primary_key=defn.primary_key, unique=uniques if uniques else None
+        name=defn.name,
+        columns=cols,
+        primary_key=defn.primary_key,
+        unique=uniques if uniques else None,
     )
     if not any(t.name == new_table.name for t in schema.tables):
         schema.tables.append(new_table)
@@ -188,13 +207,18 @@ def _add_relationship(schema: Schema, patch: AddRelationshipPatch):
             f" ({col_type}) — column was absent, inferred from {defn.referred_table} PK"
         )
         ref_table.columns.append(
-            Column(name=defn.referencing_column, data_type=col_type)
+            Column(
+                name=defn.referencing_column,
+                data_type=col_type,
+                source_fact_ids=patch.source_fact_ids,
+            )
         )
 
     new_rel = ForeignKey(
         referencing_table=defn.referencing_table,
         referencing_column=defn.referencing_column,
         referred_table=defn.referred_table,
+        source_fact_ids=patch.source_fact_ids,
     )
     if schema.relationships is None:
         schema.relationships = []

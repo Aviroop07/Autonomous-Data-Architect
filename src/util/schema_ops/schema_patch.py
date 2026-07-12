@@ -33,6 +33,12 @@ class ActionTag(str, Enum):
 class BasePatch(BaseModel):
     # action: ActionTag
     reason: str = Field(description="Why this patch is needed.")
+    source_fact_ids: List[int] = Field(
+        default_factory=list,
+        description="IDs of the source facts (from the SOURCE FACTS list) that "
+        "justify this patch. Empty only if no specific fact grounds it (a pure "
+        "structural/type-consistency fix with no NL basis).",
+    )
 
     def _validate(self, schema: "Schema") -> List[str]:
         errors = self._check_consistency()
@@ -168,7 +174,9 @@ class SimplifiedColumn(BaseModel):
 class SimplifiedTable(BaseModel):
     name: str = Field(description="UPPER_SNAKE_CASE table name.")
     columns: List[SimplifiedColumn] = Field(description="Column definitions.")
-    primary_key: List[str] = Field(default_factory=list, description="Primary key column name(s).")
+    primary_key: List[str] = Field(
+        default_factory=list, description="Primary key column name(s)."
+    )
     unique: Optional[List[SimplifiedUnique]] = Field(
         default=None, description="Composite unique constraints."
     )
@@ -181,7 +189,9 @@ class SimplifiedTable(BaseModel):
                 pk_val = data.pop("pk")
                 data["primary_key"] = [pk_val] if pk_val else []
             elif "primary_key" in data and isinstance(data["primary_key"], str):
-                data["primary_key"] = [data["primary_key"]] if data["primary_key"] else []
+                data["primary_key"] = (
+                    [data["primary_key"]] if data["primary_key"] else []
+                )
         return data
 
 
@@ -381,7 +391,9 @@ class UpdatePKPatch(BasePatch):
     def coerce_column_name(cls, data: Any) -> Any:
         if isinstance(data, dict):
             if "column_name" in data and isinstance(data["column_name"], str):
-                data["column_name"] = [data["column_name"]] if data["column_name"] else []
+                data["column_name"] = (
+                    [data["column_name"]] if data["column_name"] else []
+                )
         return data
 
 
@@ -692,6 +704,34 @@ class CritiqueReport(LoopOutputModel):
                     patch["reason"] = patch.pop(reason_key)
                 if not patch.get("reason"):
                     patch["reason"] = "Mandatory schema adjustment."
+
+                fact_ids_key = next(
+                    (
+                        k
+                        for k in patch.keys()
+                        if k.lower()
+                        in (
+                            "source_fact_ids",
+                            "fact_ids",
+                            "factids",
+                            "sourcefactids",
+                            "fact_id",
+                        )
+                    ),
+                    None,
+                )
+                if fact_ids_key is not None:
+                    raw_fact_ids = patch.pop(fact_ids_key)
+                    if isinstance(raw_fact_ids, (int, str)):
+                        raw_fact_ids = [raw_fact_ids]
+                    if isinstance(raw_fact_ids, list):
+                        coerced = []
+                        for fid in raw_fact_ids:
+                            try:
+                                coerced.append(int(fid))
+                            except TypeError, ValueError:
+                                continue
+                        patch["source_fact_ids"] = coerced
 
                 action_key = next(
                     (k for k in patch.keys() if k.lower() == "action"), None
