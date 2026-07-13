@@ -15,6 +15,7 @@ but that isn't in the shard's own projection.
 from __future__ import annotations
 
 import difflib
+import re
 
 from pydantic import BaseModel, Field
 
@@ -42,27 +43,63 @@ class ShardFactAllocation(BaseModel):
 def _table_name_variants(table_name: str) -> list[str]:
     """Lowercase natural-language variants of an UPPER_SNAKE_CASE table
     name to check for mentions in fact text, e.g. 'LINE_ITEM' ->
-    ['line_item', 'line item', 'line items']."""
+    ['line_item', 'line item', 'line items'].
+    Handles irregular plurals (consonant+y -> -ies, -us -> -i, etc.)."""
     lower = table_name.lower()
     spaced = lower.replace("_", " ")
     variants = {lower, spaced}
+
+    # Regular plural
     if not spaced.endswith("s"):
         variants.add(f"{spaced}s")
+
+    # Irregular plurals
+    if spaced.endswith("y") and len(spaced) > 1 and spaced[-2] not in "aeiou":
+        # consonant+y -> -ies (e.g. category -> categories, entity -> entities)
+        variants.add(f"{spaced[:-1]}ies")
+    elif spaced.endswith("us"):
+        # -us -> -i (e.g. status -> statuses is actually standard, but
+        # nucleus -> nuclei, stimulus -> stimuli are real irregulars)
+        variants.add(f"{spaced[:-2]}i")
+    elif spaced.endswith("is"):
+        # -is -> -es (e.g. analysis -> analyses, basis -> bases)
+        variants.add(f"{spaced[:-2]}es")
+    elif spaced.endswith("on"):
+        # -on -> -a (e.g. phenomenon -> phenomena, criterion -> criteria)
+        variants.add(f"{spaced[:-2]}a")
+    elif (
+        spaced.endswith("x")
+        or spaced.endswith("ch")
+        or spaced.endswith("sh")
+        or spaced.endswith("ss")
+        or spaced.endswith("z")
+    ):
+        # -x/-ch/-sh/-ss/-z -> add -es
+        variants.add(f"{spaced}es")
+    elif spaced.endswith("f"):
+        # -f -> -ves (e.g. leaf -> leaves, knife -> knives)
+        variants.add(f"{spaced[:-1]}ves")
+    elif spaced.endswith("fe"):
+        # -fe -> -ves (e.g. knife -> knives, life -> lives)
+        variants.add(f"{spaced[:-2]}ves")
+
     return list(variants)
 
 
 def find_mentioned_tables(text: str, table_names: list[str]) -> set[str]:
-    """Deterministic keyword-membership scan: does this fact's raw text
-    mention a known table name (or a simple natural-language variant)?
-    This is a table-identity signal, distinct from (and used before) pure
-    fact-to-fact text similarity, which has zero notion of which tables a
-    fact actually involves."""
+    """Deterministic word-boundary keyword scan: does this fact's raw text
+    mention a known table name (or a natural-language variant)?
+    Uses \\b word boundaries to prevent false positives (e.g. 'RATE' inside
+    'corporate', 'AGE' inside 'storage')."""
     text_lower = text.lower()
-    return {
-        table_name
-        for table_name in table_names
-        if any(variant in text_lower for variant in _table_name_variants(table_name))
-    }
+    mentioned: set[str] = set()
+    for table_name in table_names:
+        for variant in _table_name_variants(table_name):
+            pattern = r"\b" + re.escape(variant) + r"\b"
+            if re.search(pattern, text_lower):
+                mentioned.add(table_name)
+                break
+    return mentioned
 
 
 def allocate_facts_to_shards(

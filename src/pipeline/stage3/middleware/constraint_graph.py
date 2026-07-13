@@ -23,6 +23,7 @@ from sqlglot import expressions as exp
 
 from src.pipeline.stage3.middleware.fork_registry import (
     ForkKeyRegistry,
+    Unresolved,
     parse_if_condition,
 )
 from src.pipeline.stage3.models.constraints import (
@@ -162,8 +163,10 @@ def statistical_manifest_to_graph_nodes(
         if registry and getattr(dist, "if_condition", None):
             cond = parse_if_condition(dist.if_condition)
             if cond:
-                branches = registry.get_branches_for_condition(cond)
-                fork_key_str = cond.fork_key.to_string()
+                resolved = registry.get_branches_for_condition(cond)
+                if not isinstance(resolved, Unresolved):
+                    branches = resolved
+                    fork_key_str = cond.fork_key.to_string()
 
         new_variables, new_constraints = distribution_to_graph_nodes(
             dist, disambiguator=index, branches=branches, fork_key_str=fork_key_str
@@ -297,14 +300,14 @@ def _base_mean_variable(
     return None
 
 
-def _find_unconditional_cross_column(
+def _find_all_unconditional_cross_columns(
     table_name: str, column_name: str, manifest: ConstraintManifest
-) -> tuple[CrossColumnLogic, tuple[exp.Column, exp.Column]] | None:
-    """Find the unconditional CrossColumnLogic fact defining column_name as
-    a product or sum of exactly two base columns. Returns (fact, (lhs, rhs))
-    on a match, or None if no fact defines this column this way at all.
-    Raises `_BailOut` if a fact DOES define it but the shape isn't one this
-    pass supports (see design doc section 4.4)."""
+) -> list[tuple[CrossColumnLogic, tuple[exp.Column, exp.Column]]]:
+    """Find ALL unconditional CrossColumnLogic facts defining column_name
+    as a product or sum of exactly two base columns. Returns a list of
+    matches (possibly empty, possibly >1). Raises _BailOut if ANY matching
+    fact has an unsupported shape."""
+    matches: list[tuple[CrossColumnLogic, tuple[exp.Column, exp.Column]]] = []
     for cross in manifest.logic.cross_column_logic:
         if cross.table_context != table_name or cross.if_condition is not None:
             continue
@@ -322,8 +325,8 @@ def _find_unconditional_cross_column(
         operands = (rhs.this, rhs.expression)
         if not all(isinstance(operand, exp.Column) for operand in operands):
             raise _BailOut
-        return cross, operands
-    return None
+        matches.append((cross, operands))
+    return matches
 
 
 def _resolve_mean(
@@ -353,13 +356,23 @@ def _resolve_mean(
         return _resolve_aggregation(aggregation, manifest, visited)
 
     try:
-        cross_match = _find_unconditional_cross_column(
+        cross_matches = _find_all_unconditional_cross_columns(
             table_name, column_name, manifest
         )
     except _BailOut:
         return None
-    if cross_match is not None:
-        cross, operands = cross_match
+    if cross_matches:
+        if len(cross_matches) > 1:
+            # Multiple unconditional derivations for the same column -- check
+            # if they agree. If they disagree (different operands/formulas),
+            # this is a confirmed contradiction flagged for LLM reconciliation
+            # (ISSUES.md #11 fix: never silently pick first-match-wins).
+            first_operands = frozenset((op.name for op in cross_matches[0][1]))
+            for _, other_operands in cross_matches[1:]:
+                other_frozenset = frozenset((op.name for op in other_operands))
+                if other_frozenset != first_operands:
+                    raise _BailOut
+        cross, operands = cross_matches[0]
         resolved: list[tuple[set[str], set[int]]] = []
         for operand in operands:
             operand_result = _resolve_mean(table_name, operand.name, manifest, visited)
@@ -464,7 +477,7 @@ def constraint_manifest_to_graph_nodes(
     never at guessing or calibrating a value for them."""
     registry = ForkKeyRegistry()
 
-    # Discovery Pass helper
+    # Discovery Pass helper -- union from EVERY matching fact, no first-match-wins
     def _discover_fork(if_condition: str | None):
         if not if_condition:
             return
@@ -478,7 +491,6 @@ def constraint_manifest_to_graph_nodes(
                 and cdist.column_name == cond.fork_key.column_name
             ):
                 registry.register_fork(cond.fork_key, cdist.categories)
-                break
 
     for dist in manifest.statistical.distributions:
         _discover_fork(getattr(dist, "if_condition", None))
@@ -502,7 +514,10 @@ def constraint_manifest_to_graph_nodes(
             cond = parse_if_condition(cross.if_condition)
             if not cond:
                 continue
-            branches = registry.get_branches_for_condition(cond)
+            resolved = registry.get_branches_for_condition(cond)
+            if isinstance(resolved, Unresolved):
+                continue
+            branches = resolved
             fork_key_str = cond.fork_key.to_string()
 
             try:
