@@ -35,18 +35,25 @@ from src.pipeline.stage3.models.condition_nodes import (
     RLiteral,
 )
 from src.pipeline.stage3.models.cross_shard import DerivedColumnConstraint
+from src.pipeline.stage3.models.probe import CycleIssue
 
 
-def detect_derived_cycles(derived: List[DerivedColumnConstraint]) -> List[str]:
+def detect_derived_cycles(
+    derived: List[DerivedColumnConstraint],
+) -> List[CycleIssue]:
     """Detect circular dependencies in derived-column expressions.
 
-    Returns a list of human-readable descriptions, one per genuine
-    contradiction found (a cycle with no fixed point). An empty list means
-    no unresolvable cycle exists -- this does NOT mean every cycle is
-    reported: a cycle with a valid fixed point (x = 0.5*x + 3, solvable at
-    x=6) is informational, not a contradiction, and is not included."""
+    Returns one CycleIssue per genuine contradiction found (a cycle with
+    no fixed point). An empty list means no unresolvable cycle exists --
+    this does NOT mean every cycle is reported: a cycle with a valid fixed
+    point (x = 0.5*x + 3, solvable at x=6) is informational, not a
+    contradiction, and is not included."""
     if not derived:
         return []
+
+    by_target: dict[str, DerivedColumnConstraint] = {
+        f"{dc.target_table}.{dc.target_column}": dc for dc in derived
+    }
 
     graph: dict[str, list[str]] = {}
     for dc in derived:
@@ -70,22 +77,45 @@ def detect_derived_cycles(derived: List[DerivedColumnConstraint]) -> List[str]:
     except nx.NetworkXError:
         return []
 
-    issues: List[str] = []
+    issues: List[CycleIssue] = []
     for cycle_nodes in cycles:
+        fact_refs = tuple(
+            sorted(
+                {
+                    fid
+                    for node in cycle_nodes
+                    if node in by_target
+                    for fid in by_target[node].fact_references
+                }
+            )
+        )
         composed = _compose_cycle_expressions(cycle_nodes, derived)
         if composed is None:
             issues.append(
-                f"Circular dependency ({' -> '.join(cycle_nodes)} -> "
-                f"{cycle_nodes[0]}): non-linear expressions, cannot verify "
-                f"whether a fixed point exists."
+                CycleIssue(
+                    description=(
+                        f"Circular dependency ({' -> '.join(cycle_nodes)} -> "
+                        f"{cycle_nodes[0]}): non-linear expressions, cannot "
+                        f"verify whether a fixed point exists."
+                    ),
+                    nodes=tuple(cycle_nodes),
+                    fact_references=fact_refs,
+                )
             )
             continue
 
         coeff, const = composed
         if math.isclose(coeff, 1.0) and not math.isclose(const, 0.0):
             issues.append(
-                f"Circular dependency ({' -> '.join(cycle_nodes)} -> "
-                f"{cycle_nodes[0]}): x = x + {const:.4g} has no solution."
+                CycleIssue(
+                    description=(
+                        f"Circular dependency ({' -> '.join(cycle_nodes)} -> "
+                        f"{cycle_nodes[0]}): x = x + {const:.4g} has no "
+                        f"solution."
+                    ),
+                    nodes=tuple(cycle_nodes),
+                    fact_references=fact_refs,
+                )
             )
         # coeff != 1.0 has a real fixed point (x = const / (1 - coeff)) --
         # informational, not a contradiction, not reported as an issue.

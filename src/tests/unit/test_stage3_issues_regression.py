@@ -58,7 +58,11 @@ class TestNonLinearCycleCrash:
         )
         issues = detect_derived_cycles([dc_x, dc_y])  # must not raise
         assert len(issues) == 1
-        assert "non-linear" in issues[0].lower()
+        assert "non-linear" in issues[0].description.lower()
+        # fact_references must trace back to BOTH originating facts -- this
+        # is what lets the conflict-reconciliation agent find the right NL
+        # text to re-examine.
+        assert set(issues[0].fact_references) == {1, 2}
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +285,8 @@ class TestCrossTableCycleVisibility:
         )
         issues = detect_derived_cycles([dc_order, dc_tax])
         assert len(issues) == 1
-        assert "no solution" in issues[0]
+        assert "no solution" in issues[0].description
+        assert set(issues[0].fact_references) == {1, 2}
 
 
 # ---------------------------------------------------------------------------

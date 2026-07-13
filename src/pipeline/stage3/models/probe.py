@@ -10,9 +10,86 @@ here.
 
 from __future__ import annotations
 
+from enum import Enum
+from typing import Literal, Tuple
+
 from pydantic import BaseModel, Field
 
 from src.util.algorithms.dof_graph import OverconstrainedBlock
+
+
+class CycleIssue(BaseModel):
+    """A genuine (no-fixed-point) derived-column cycle. Carries enough
+    structure for the conflict-reconciliation agent to trace back to the
+    originating facts -- a bare description string isn't enough to know
+    which NL facts to re-examine or which family produced it (always
+    `logic`, since DerivedColumnConstraint is only ever emitted by
+    logic_extractor). See middleware/cycles.py's detect_derived_cycles."""
+
+    description: str
+    nodes: Tuple[str, ...] = Field(
+        default_factory=tuple,
+        description="'table.column' identifiers around the cycle.",
+    )
+    fact_references: Tuple[int, ...] = Field(default_factory=tuple)
+
+
+class ReconciliationVerdict(str, Enum):
+    """What the conflict-reconciliation agent decided about one detected
+    conflict, after re-examining the original NL facts against what was
+    extracted."""
+
+    MISEXTRACTION = "MISEXTRACTION"
+    FALSE_POSITIVE = "FALSE_POSITIVE"
+    GENUINE_CONTRADICTION = "GENUINE_CONTRADICTION"
+
+
+class MisextractionFix(BaseModel):
+    """One correction the reconciliation agent identified -- which family's
+    extraction was wrong, which fact it should re-derive from, and a
+    natural-language hint describing the mistake, to be injected into that
+    family's next extraction-loop round. A single conflict can require
+    fixes across more than one family (e.g. a structural cardinality bound
+    disagreeing with a statistical distribution's support)."""
+
+    family: Literal["statistical", "structural", "logic"]
+    fact_id: int
+    guidance: str = Field(
+        description="What the prior extraction got wrong and how to fix it, "
+        "e.g. 'fact 42 states the distribution is conditional on loyalty_tier "
+        "= Platinum -- your prior extraction dropped this condition.'"
+    )
+
+
+class ConflictReconciliation(BaseModel):
+    """The conflict-reconciliation agent's structured output for one
+    detected conflict (a confirmed_conflict flat name, an overconstrained
+    block, or a derived-column cycle)."""
+
+    conflict_ref: str = Field(
+        description="Identifies which conflict this addresses -- the flat "
+        "variable name, block identifier, or cycle description it was given."
+    )
+    verdict: ReconciliationVerdict
+    reasoning: str = Field(
+        description="Why this verdict -- cite the specific facts and what "
+        "they actually say."
+    )
+    fixes: list[MisextractionFix] = Field(
+        default_factory=list,
+        description="Populated only when verdict == MISEXTRACTION.",
+    )
+
+
+class DismissedConflict(BaseModel):
+    """A conflict the reconciliation agent judged FALSE_POSITIVE -- kept
+    visible (not silently dropped) so a systematically-wrong reconciler can
+    be caught, and so the report stays honest about what was actually
+    decided vs. never came up."""
+
+    conflict_ref: str
+    reason: str
+    fact_references: list[int] = Field(default_factory=list)
 
 
 class VariableProbe(BaseModel):
@@ -63,11 +140,16 @@ class Stage3AnalysisReport(BaseModel):
         default_factory=list
     )
     overconstrained_blocks: list[OverconstrainedBlock] = Field(default_factory=list)
-    derived_cycle_conflicts: list[str] = Field(
+    derived_cycle_conflicts: list[CycleIssue] = Field(
         default_factory=list,
-        description="Human-readable descriptions of derived-column circular "
-        "dependencies with no fixed point (a genuine contradiction, e.g. "
-        "x = x + 5) -- see cycles.py's detect_derived_cycles.",
+        description="Derived-column circular dependencies with no fixed "
+        "point (a genuine contradiction, e.g. x = x + 5) -- see "
+        "middleware/cycles.py's detect_derived_cycles.",
+    )
+    dismissed_conflicts: list[DismissedConflict] = Field(
+        default_factory=list,
+        description="Conflicts the reconciliation agent judged FALSE_POSITIVE "
+        "-- kept visible for audit, not silently dropped.",
     )
 
     @property
