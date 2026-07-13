@@ -63,7 +63,13 @@ class Stage3AnalysisReport(BaseModel):
         default_factory=list
     )
     overconstrained_blocks: list[OverconstrainedBlock] = Field(default_factory=list)
+    derived_cycle_conflicts: list[str] = Field(
+        default_factory=list,
+        description="Human-readable descriptions of derived-column circular "
+        "dependencies with no fixed point (a genuine contradiction, e.g. "
+        "x = x + 5) -- see cycles.py's detect_derived_cycles.",
+    )
 
     @property
     def is_feasible(self) -> bool:
-        return not self.overconstrained_blocks
+        return not self.overconstrained_blocks and not self.derived_cycle_conflicts

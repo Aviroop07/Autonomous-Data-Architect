@@ -43,6 +43,7 @@ import sqlglot
 from sqlglot import expressions as exp
 
 from src.pipeline.stage2.models.schema import Schema
+from src.pipeline.stage3.middleware.cycles import detect_derived_cycles
 from src.pipeline.stage3.middleware.fork_registry import (
     ForkKey,
     ForkKeyRegistry,
@@ -1243,9 +1244,14 @@ def analyze_cross_shard_constraints(
     logic = logic or []
     derived = derived or []
 
+    # Independent of grain/DOF conversion below -- a circular derived-column
+    # definition (e.g. x = x + 5) is a genuine contradiction regardless of
+    # whether anything else in this batch produces a single DOF variable.
+    cycle_issues = detect_derived_cycles(derived)
+
     if schema is None:
         logger.warning("No schema provided; returning empty analysis.")
-        return Stage3AnalysisReport()
+        return Stage3AnalysisReport(derived_cycle_conflicts=cycle_issues)
 
     if registry is None:
         registry = ForkKeyRegistry()
@@ -1258,7 +1264,7 @@ def analyze_cross_shard_constraints(
     )
 
     if not all_vars:
-        return Stage3AnalysisReport()
+        return Stage3AnalysisReport(derived_cycle_conflicts=cycle_issues)
 
     classification = build_and_classify(all_vars, all_cons)
 
@@ -1305,6 +1311,7 @@ def analyze_cross_shard_constraints(
         loose_variable_probes=loose_probes,
         unresolved_moment_target_probes=[],
         overconstrained_blocks=overconstrained,
+        derived_cycle_conflicts=cycle_issues,
     )
 
 
