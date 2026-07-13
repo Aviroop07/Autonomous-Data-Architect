@@ -51,7 +51,7 @@ def _schema_to_text(schema: Schema, stub_tables: Optional[List[str]] = None) -> 
             if fk.referencing_table == table.name:
                 lines.append(
                     f"  FK: {fk.referencing_column} -> "
-                    f"{fk.referred_table}.{fk.referred_column}"
+                    f"{fk.referred_table} (its primary key)"
                 )
 
     if stub_tables:
@@ -179,6 +179,18 @@ class StructuralExtractorLoopAgent(LoopAgent):
                     "## ACCEPTED OUTPUT (keep these unchanged)\n"
                     + SEO(constraints=accepted).model_dump_json(indent=2)
                 )
+
+        # Reconciliation guidance (a conflict-reconciliation pass judged a
+        # prior conflict a MISEXTRACTION and pinpointed what this family got
+        # wrong -- only present on a targeted re-extraction run, read from
+        # initial_context since there is no prior node_outputs entry yet).
+        reconciliation_guidance = context_data.get("reconciliation_guidance")
+        if reconciliation_guidance:
+            parts.append(
+                "## RECONCILIATION GUIDANCE (a conflict-reconciliation pass "
+                "found a misextraction in a prior round -- fix this)\n"
+                + reconciliation_guidance
+            )
 
         if ctx.det_errors:
             feedback = "\n".join(f"- {err}" for err in ctx.det_errors)
