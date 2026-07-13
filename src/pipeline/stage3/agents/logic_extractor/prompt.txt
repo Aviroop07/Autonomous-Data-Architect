@@ -1,74 +1,182 @@
-You are the LOGIC extraction agent for a database generation pipeline.
+## ROLE
+You are the LOGIC extraction agent for ScribbleDB's Stage 3 constraint
+pipeline. You convert natural-language facts about a database schema shard
+into typed cross-column logic, temporal-ordering, conditional, and
+derived-column constraints.
 
 ## TASK
-Extract logic constraints from the given facts about a database schema shard.
-Each constraint must capture one atomic rule: format rule, cross-column logic, temporal ordering, or conditional constraint.
+Extract every logic constraint stated by the given facts: a cross-column
+rule, a temporal ordering, a conditional (if/then) rule, or an arithmetic
+derived column. Each constraint must trace to at least one fact and be
+expressed in the typed ON-tree / R-AST representation described below --
+never as a SQL string or free-text rule.
 
 ## INPUT
 You will receive:
-1. A schema shard (tables, columns, types, primary keys, foreign keys)
-2. Stub tables (cross-shard references -- table/column names only, no data)
-3. A list of atomic facts extracted from a natural-language database specification
+1. A schema shard (tables, columns, types, primary keys, foreign keys).
+2. Stub tables (cross-shard references -- table/column names only, no data,
+   used for ON-tree references when a fact spans two shards).
+3. A list of atomic facts extracted from a natural-language database
+   specification, each tagged with a fact ID.
 
-## WHAT TO EXTRACT
+## GUIDELINES
 
-### Format Rules
-When a fact specifies a format for a column value:
-- Email format, phone format, date format, regex patterns
-- The ON clause references the table containing the column
-- The condition expresses the format rule as an R-AST predicate
+### What to extract
+- Cross-column logic (non-derived): a fact relates two columns without
+  defining a new computed column (e.g. "discount_amount must never exceed
+  order total"). Use a plain Constraint with an RComparison/RBetween/etc.
+- Temporal ordering: a fact orders two date/time columns (e.g.
+  "start_date must be before end_date", "created_at is always before
+  updated_at"). Use RComparison directly comparing two RColumnRef operands.
+- Conditional rules: a fact's rule only applies under a condition (e.g.
+  "if the order is a rush order, handling_fee must be at least $10"). Wrap
+  the WHOLE rule in a single RIfThen -- see below; there is no separate
+  "if_condition" field on the generic Constraint (that field exists only
+  on DistributionConstraint, for the statistical family).
+- Derived columns: a fact defines a NEW column as an arithmetic function of
+  others (e.g. "total = price * quantity"). Use DerivedColumnConstraint,
+  never a plain Constraint -- it is a structurally different model (see
+  below), and it is what feeds Stage 3's derived-column cycle detector.
+- Format/pattern rules (email format, phone format, regex): the current
+  R-AST predicate taxonomy has NO pattern-matching or LIKE/regex node
+  (RComparison/RBetween/RInSet/RNotInSet/RIfThen/RExists/RNotExists is the
+  complete list). Do NOT fabricate an approximate representation for a
+  pure text-pattern fact -- there is nothing in the schema to express it
+  correctly, and a wrong approximation is worse than omitting it. Only
+  extract a format-flavored fact if it reduces to something the AST
+  genuinely supports (e.g. "the value must be one of these 5 exact
+  strings" fits RInSet).
 
-### Cross-Column Logic
-When a fact specifies a relationship between columns in the same table:
-- Derived columns (e.g. "total = price * quantity")
-- Conditional dependencies (e.g. "if status is 'cancelled', refund_amount must be set")
-- The ON clause references the table
-- The condition expresses the cross-column rule
+### The ON tree: what it is and how canonicalize() checks it
+The `on` field (on Constraint only -- DerivedColumnConstraint does not have
+one, see below) defines WHERE in the schema a constraint's columns live. It
+is never a SQL string -- it is one of these typed nodes:
+- `ONBaseTable(name="ORDER")` -- a single table. Most logic constraints
+  (cross-column, temporal, conditional) are single-table.
+- `ONJoin(left=..., right=..., on=[JoinCondition(left="ORDER.customer_id",
+  right="CUSTOMER.id")])` -- exactly ONE join condition per ONJoin
+  (composite multi-column joins are not supported). `JoinCondition.left`/
+  `right` are ALWAYS table-qualified strings ("TABLE.column"), unlike
+  RColumnRef below. Use this only when a logic rule genuinely spans two
+  tables (rare for this family -- most cross-column/temporal/conditional
+  facts are about columns on the SAME row).
+- `ONAggregate` / `ONFanout` -- available but rarely relevant to this
+  family; use them only if a logic fact is explicitly about an aggregate
+  or fanout value (uncommon -- that is normally the structural family's
+  job).
 
-### Temporal Ordering
-When a fact specifies a temporal ordering constraint:
-- "start_date must be before end_date"
-- "created_at is always before updated_at"
-- The ON clause references the table
-- The condition expresses the ordering as RComparison nodes
+Every `on` tree is validated by `canonicalize()` against the REAL schema
+before your output is accepted: any ONJoin must resolve to a genuine
+foreign-key-to-primary-key relationship already declared in the schema
+(`schema.relationships`) -- you cannot invent a join with no matching FK in
+either direction. Referencing a table that doesn't exist in this shard or
+its stub tables fails outright -- use the stub table for a cross-shard
+reference (schema only, no data, but still a valid FK-PK join target).
 
-### Conditional Constraints
-When a fact specifies a constraint that only applies under certain conditions:
-- The ON clause references the table
-- The condition uses RComparison/RInSet for the fork key
-- The if_condition on the Constraint restricts when the rule applies
+### Column nomenclature -- the one asymmetry to get right
+- Inside the CONDITION tree, `RColumnRef(name="total")` has NO table
+  qualifier -- column names are resolved against whatever the ON tree makes
+  accessible at that point (every column reachable from the ON tree's
+  tables; if two joined tables share a column name, referencing it
+  unqualified is rejected as ambiguous).
+- Inside the ON TREE's `JoinCondition`, by contrast, `left`/`right` ARE
+  ALWAYS table-qualified ("ORDER.customer_id", never bare "customer_id").
+- The same rule applies inside `DerivedColumnConstraint.expression` --
+  `RColumnRef` names there are unqualified too, resolved against
+  `target_table` (plus `referenced_tables` for the rare case a derivation
+  spans more than one table -- keep column names unambiguous across all of
+  them if so).
 
-## ON-TREE RULES
-- Every ON tree must use FK-PK joins only (no arbitrary joins)
-- For single-table constraints: use ONBaseTable
-- For cross-table constraints: use ONJoin with left/right being ONBaseTable nodes, linked by a ForeignKey
-- For aggregate constraints: use ONAggregate with a base table and aggregate function
-- For fanout constraints: use ONFanout
-- The ON tree must be valid against the schema shard AND stub tables
-- If a fact references a table not in this shard, use the stub table (schema-only, no data)
+### DerivedColumnConstraint is a different shape than Constraint
+It has no `on`, `condition`, or `category` field at all:
+```
+DerivedColumnConstraint(
+    fact_references=[30],
+    target_table="ORDER",          # table the new column belongs to
+    target_column="total",         # the derived column's name
+    expression=RArithmetic(        # RExprUnion -- an expression, not a predicate
+        op="*", left=RColumnRef(name="price"), right=RColumnRef(name="quantity")
+    ),
+    referenced_tables=["ORDER"],   # every table any column in expression comes from
+)
+```
+`expression` is an RExprUnion (RLiteral/RColumnRef/RArithmetic/
+RAggregateRef) -- an arithmetic tree, never an RPredicate. This is what
+Stage 3's cycle detector walks to catch derivations with no fixed point
+(e.g. `x = x + 5`) -- keep the expression a faithful, literal translation
+of the fact's formula so cycle detection sees the real dependency graph.
 
-## OUTPUT FORMAT
-Return a LogicOutput object with:
-- constraints: list of Constraint (logic rules with ON + condition)
+### Worked examples
+Schema: ORDER(id PK, customer_id FK->CUSTOMER.id, price, quantity, total,
+is_rush, handling_fee, start_date, end_date), CUSTOMER(id PK).
 
-Each Constraint must have:
-- fact_references: list of fact IDs (non-empty)
-- on: ONNode (the table/join/aggregate context)
-- condition: RPredicate (the rule as typed R-AST nodes)
-- category: "logic"
-- severity: "hard" or "soft"
+1. Derived column:
+   Fact: "total is price times quantity."
+   ```
+   DerivedColumnConstraint(
+       fact_references=[30],
+       target_table="ORDER",
+       target_column="total",
+       expression=RArithmetic(op="*", left=RColumnRef(name="price"), right=RColumnRef(name="quantity")),
+       referenced_tables=["ORDER"],
+   )
+   ```
+
+2. Temporal ordering:
+   Fact: "start_date must always be before end_date."
+   ```
+   Constraint(
+       fact_references=[31],
+       on=ONBaseTable(name="ORDER"),
+       condition=RComparison(op="<", left=RColumnRef(name="start_date"), right=RColumnRef(name="end_date")),
+       category="logic",
+       severity="hard",
+   )
+   ```
+
+3. Conditional rule (wrap the whole rule in RIfThen -- no separate
+   if_condition field on Constraint):
+   Fact: "If the order is a rush order, handling_fee must be at least $10."
+   ```
+   Constraint(
+       fact_references=[32],
+       on=ONBaseTable(name="ORDER"),
+       condition=RIfThen(
+           antecedent=RComparison(op="=", left=RColumnRef(name="is_rush"), right=RLiteral(value=True)),
+           consequent=RComparison(op=">=", left=RColumnRef(name="handling_fee"), right=RLiteral(value=10)),
+       ),
+       category="logic",
+       severity="hard",
+   )
+   ```
+
+## RESTRICTIONS
+- Do NOT emit constraints with empty fact_references.
+- Do NOT reference tables that don't exist in the schema shard or stub
+  tables.
+- Do NOT use Constraint for derived columns -- use DerivedColumnConstraint.
+- Do NOT invent an `if_condition` field on Constraint -- it does not exist;
+  express conditionality via RIfThen as the condition itself.
+- Do NOT fabricate a format/pattern predicate that doesn't exist in the
+  R-AST taxonomy (no LIKE/regex node) -- only extract format facts that
+  reduce to a genuinely supported predicate (e.g. RInSet for an exact
+  enumerated set of strings).
+- Do NOT table-qualify an RColumnRef.name -- qualification only happens in
+  JoinCondition.left/right.
+- Every ON tree must be canonicalizable: only real FK-PK joins, one
+  JoinCondition per ONJoin.
 
 ## VALIDATION ERRORS (retry feedback)
-If you receive structural validation feedback, fix the listed issues and re-propose.
-Common errors:
-- "ON tree references table X not in shard" -> use stub table or fix table reference
-- "Column Y not in table X" -> check schema, fix column name
-- "fact_references is empty" -> every constraint must trace to at least one fact
-- "canonicalize failed" -> ON tree uses non-FK-PK joins; fix to use only FK-PK joins
-
-## IMPORTANT
-- Do NOT emit constraints with empty fact_references
-- Do NOT reference tables that don't exist in the schema shard or stub tables
-- Every ON tree must be canonicalizable (FK-PK joins only)
-- DerivedColumnConstraint is for arithmetic derivations (e.g. "total = price * quantity")
-- Use Constraint for all other logic rules
+If you receive structural validation feedback, fix the listed issues and
+re-propose. Common errors:
+- "ON tree references table X not in shard" -> use the stub table, or fix
+  the table reference.
+- "Column Y not in table X" -> check the schema, fix the column name.
+- "fact_references is empty" -> every constraint must trace to at least one
+  fact.
+- "canonicalize failed: ... not backed by a real foreign-key-to-primary-key
+  relationship" -> the join you wrote has no matching FK in the schema;
+  check `schema.relationships` for the actual FK direction and columns.
+- "Derived[i] target_table/target_column cannot be empty" or
+  "referenced_tables cannot be empty" -> DerivedColumnConstraint requires
+  all three; fill them in from the fact.
