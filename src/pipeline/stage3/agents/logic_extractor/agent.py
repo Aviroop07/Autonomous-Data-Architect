@@ -9,14 +9,12 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-from src.pipeline.stage3.agents.extraction_outputs import LogicOutput
-from src.pipeline.stage3.models.cross_shard import (
-    Constraint,
-    LogicExtractionOutput,
-)
+from src.pipeline.stage3.agents.extraction_outputs import AuditReport, LogicOutput
+from src.pipeline.stage3.models.cross_shard import LogicExtractionOutput
 from src.pipeline.stage3.models.grain import CanonicalizationFailure, canonicalize
+from src.pipeline.stage3.models.on_nodes import ONBaseTable
 from src.pipeline.stage2.models.schema import Schema
 from src.util.core.agent import AgentType, get_agent_
 from src.util.core.invoke import get_response
@@ -98,12 +96,20 @@ class LogicExtractorLoopAgent(LoopAgent):
     def _validate_output(
         self, output: LogicExtractionOutput, schema: Schema
     ) -> List[str]:
-        """Deterministic validation: canonicalize every ON tree."""
+        """Deterministic validation: canonicalize every ON tree, plus
+        derived columns' synthetic base-table ON (mirrors how
+        constraint_graph.py's _derived_column_to_rich canonicalizes them)."""
         errors: List[str] = []
         for i, c in enumerate(output.constraints):
             result = canonicalize(c.on, schema)
             if isinstance(result, CanonicalizationFailure):
                 errors.append(f"Logic[{i}] ON canonicalization failed: {result.reason}")
+        for i, dc in enumerate(output.derived):
+            result = canonicalize(ONBaseTable(name=dc.target_table), schema)
+            if isinstance(result, CanonicalizationFailure):
+                errors.append(
+                    f"Derived[{i}] target_table canonicalization failed: {result.reason}"
+                )
         return errors
 
     async def invoke(self, query: str) -> tuple[LoopOutputModel, int]:
@@ -119,7 +125,7 @@ class LogicExtractorLoopAgent(LoopAgent):
         if self._last_schema is not None:
             det_errors = self._validate_output(parsed, self._last_schema)
 
-        wrapped = LogicOutput(constraints=parsed.constraints)
+        wrapped = LogicOutput(constraints=parsed.constraints, derived=parsed.derived)
         wrapped._det_errors = det_errors  # type: ignore[attr-defined]
         return wrapped, tokens
 
@@ -169,14 +175,20 @@ class LogicExtractorLoopAgent(LoopAgent):
                     fid in self._errored_ids_history for fid in c.fact_references
                 )
             ]
-            if accepted:
-                from src.pipeline.stage3.models.cross_shard import (
-                    LogicExtractionOutput as LEO,
+            accepted_derived = [
+                dc
+                for dc in prior_output.derived
+                if not any(
+                    fid in self._errored_ids_history for fid in dc.fact_references
                 )
-
+            ]
+            if accepted or accepted_derived:
+                accepted_output = LogicExtractionOutput(
+                    constraints=accepted, derived=accepted_derived
+                )
                 parts.append(
                     "## ACCEPTED OUTPUT (keep these unchanged)\n"
-                    + LEO(constraints=accepted).model_dump_json(indent=2)
+                    + accepted_output.model_dump_json(indent=2)
                 )
 
         if ctx.det_errors:
@@ -184,6 +196,18 @@ class LogicExtractorLoopAgent(LoopAgent):
             parts.append(
                 "## VALIDATION FEEDBACK (correct these issues and re-propose)\n"
                 + feedback
+            )
+
+        # Semantic audit feedback (logic_auditor re-read the facts against
+        # the extraction and found real problems -- distinct from the
+        # structural VALIDATION FEEDBACK above, which canonicalize()
+        # produces and can't catch things like a wrong derivation formula).
+        audit_output = ctx.node_outputs.get("logic_auditor")
+        if isinstance(audit_output, AuditReport) and not audit_output.is_valid:
+            audit_feedback = "\n".join(f"- {issue}" for issue in audit_output.issues)
+            parts.append(
+                "## AUDIT FEEDBACK (a second reader found these problems -- fix them)\n"
+                + audit_feedback
             )
 
         parts.append("## TASK\nExtract logic constraints from the facts above.")
@@ -197,32 +221,43 @@ class LogicExtractorLoopAgent(LoopAgent):
         node: str,
     ) -> HistoryEntry:
         assert isinstance(output, LogicOutput)
-        n = len(output.constraints)
+        n = len(output.constraints) + len(output.derived)
 
         # Track errored fact IDs
         det_errors = getattr(output, "_det_errors", [])
         if det_errors:
             for c in output.constraints:
                 for e in det_errors:
-                    if f"Logic" in e:
+                    if "Logic" in e:
                         self._errored_ids_history.update(c.fact_references)
+                        break
+            for dc in output.derived:
+                for e in det_errors:
+                    if "Derived" in e:
+                        self._errored_ids_history.update(dc.fact_references)
                         break
 
         if prior is None:
             return HistoryEntry(
                 round=round_num,
                 node=node,
-                changes_summary=f"extracted {n} logic constraints",
+                changes_summary=(
+                    f"extracted {n} constraints "
+                    f"({len(output.constraints)} logic, {len(output.derived)} derived)"
+                ),
                 was_improvement=None,
             )
 
         assert isinstance(prior, LogicOutput)
-        prior_n = len(prior.constraints)
+        prior_n = len(prior.constraints) + len(prior.derived)
         delta = n - prior_n
 
         return HistoryEntry(
             round=round_num,
             node=node,
-            changes_summary=f"{n} logic constraints ({delta:+d} vs prior)",
+            changes_summary=(
+                f"{n} constraints ({len(output.constraints)} logic, "
+                f"{len(output.derived)} derived) ({delta:+d} vs prior)"
+            ),
             was_improvement=(delta != 0),
         )

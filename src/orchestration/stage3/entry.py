@@ -272,6 +272,7 @@ async def orchestrate(
         all_correlations.extend(stat_output.correlations)
         all_structural.extend(struct_output.constraints)
         all_logic.extend(logic_output.constraints)
+        all_derived.extend(logic_output.derived)
         total_tokens += tokens
 
     logger.info(

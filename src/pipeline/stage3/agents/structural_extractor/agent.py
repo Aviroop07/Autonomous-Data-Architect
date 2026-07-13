@@ -9,13 +9,10 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-from src.pipeline.stage3.agents.extraction_outputs import StructuralOutput
-from src.pipeline.stage3.models.cross_shard import (
-    Constraint,
-    StructuralExtractionOutput,
-)
+from src.pipeline.stage3.agents.extraction_outputs import AuditReport, StructuralOutput
+from src.pipeline.stage3.models.cross_shard import StructuralExtractionOutput
 from src.pipeline.stage3.models.grain import CanonicalizationFailure, canonicalize
 from src.pipeline.stage2.models.schema import Schema
 from src.util.core.agent import AgentType, get_agent_
@@ -190,6 +187,18 @@ class StructuralExtractorLoopAgent(LoopAgent):
                 + feedback
             )
 
+        # Semantic audit feedback (structural_auditor re-read the facts
+        # against the extraction and found real problems -- distinct from
+        # the structural VALIDATION FEEDBACK above, which canonicalize()
+        # produces and can't catch things like a wrong fanout direction).
+        audit_output = ctx.node_outputs.get("structural_auditor")
+        if isinstance(audit_output, AuditReport) and not audit_output.is_valid:
+            audit_feedback = "\n".join(f"- {issue}" for issue in audit_output.issues)
+            parts.append(
+                "## AUDIT FEEDBACK (a second reader found these problems -- fix them)\n"
+                + audit_feedback
+            )
+
         parts.append(
             "## TASK\nExtract structural and aggregate constraints from the facts above."
         )
@@ -210,7 +219,7 @@ class StructuralExtractorLoopAgent(LoopAgent):
         if det_errors:
             for c in output.constraints:
                 for e in det_errors:
-                    if f"Structural" in e:
+                    if "Structural" in e:
                         self._errored_ids_history.update(c.fact_references)
                         break
 

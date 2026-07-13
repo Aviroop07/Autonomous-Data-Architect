@@ -21,7 +21,7 @@ Design doc: experiments/CONSTRAINT_REPRESENTATION_SPEC.md (v0.2)
 from __future__ import annotations
 
 import math
-from typing import Annotated, List, Literal, Optional, Union
+from typing import List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -305,11 +305,16 @@ class StructuralExtractionOutput(BaseModel):
 class LogicExtractionOutput(BaseModel):
     """Output of the Logic extraction agent.
 
-    All outputs are generic Constraint objects -- the ON/condition
-    distinguishes format rules, cross-column logic, temporal ordering.
+    Generic Constraint objects for format/cross-column/temporal rules,
+    plus DerivedColumnConstraint separately (specialized: arithmetic
+    derivations like `total = price * quantity`, fed to cycle detection).
     """
 
     constraints: List[Constraint] = Field(
         default_factory=list,
         description="Logic constraints (format, cross-column, temporal).",
+    )
+    derived: List[DerivedColumnConstraint] = Field(
+        default_factory=list,
+        description="Arithmetic column derivations (e.g. total = price * quantity).",
     )
