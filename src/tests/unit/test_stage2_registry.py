@@ -5,7 +5,6 @@ delete_table, and get_facts_for_tables operations.
 """
 from __future__ import annotations
 
-import pytest
 
 from src.pipeline.stage2.models.registry import TableFactRegistry
 

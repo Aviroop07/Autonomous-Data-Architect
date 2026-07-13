@@ -1,4 +1,3 @@
-from typing import List
 from src.pipeline.stage2.mapper.conceptual_model import (
     CMAttribute,
     ConceptualModel,
