@@ -55,6 +55,7 @@ from src.pipeline.stage3.models.condition_nodes import (
     RComparison,
     RLiteral,
     RPredicate,
+    extract_columns,
 )
 from src.pipeline.stage3.models.constraints import (
     AggregationConstraint,
@@ -1020,7 +1021,7 @@ def _range_constraint_to_rich(
     """Convert a range/bounds constraint (e.g. ORDER.total >= 5) into a
     RichVariable with bound metadata. No pinning constraint -- bounds are
     domain metadata, not DOF-consuming equations."""
-    cols = _extract_columns_from_condition(c.condition)
+    cols = extract_columns(c.condition)
     if len(cols) != 1:
         return [], []
     col = next(iter(cols))
@@ -1119,13 +1120,6 @@ def _derived_column_to_rich(
         fact_references=refs,
     )
     return [rv], [constraint]
-
-
-def _extract_columns_from_condition(pred: RPredicate) -> set[str]:
-    """Extract column names from an R-predicate tree."""
-    from src.pipeline.stage3.middleware.conflict_detection import extract_columns
-
-    return extract_columns(pred)
 
 
 # ---------------------------------------------------------------------------

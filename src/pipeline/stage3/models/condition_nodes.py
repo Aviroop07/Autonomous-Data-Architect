@@ -39,10 +39,9 @@ Design decisions:
 
 from __future__ import annotations
 
-import math
-from typing import Annotated, List, Literal, Optional, Union
+from typing import Annotated, List, Literal, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
@@ -415,3 +414,48 @@ def _validate_predicate(node: RPredicate) -> List[str]:
 def validate_condition_tree(root: RPredicate) -> List[str]:
     """Public entry point for recursive condition validation."""
     return _validate_predicate(root)
+
+
+# ---------------------------------------------------------------------------
+# Column extraction -- used by constraint_graph.py to determine how many
+# distinct columns a condition references (e.g. to tell a single-column
+# range constraint apart from a genuine multi-table cross-column one).
+# ---------------------------------------------------------------------------
+
+
+def extract_columns(node: RPredicate) -> set[str]:
+    """Recursively extract all column names referenced in a condition tree."""
+    cols: set[str] = set()
+    _collect_columns_pred(node, cols)
+    return cols
+
+
+def _collect_columns_expr(node: RExprUnion, out: set[str]) -> None:
+    if isinstance(node, RColumnRef):
+        out.add(node.name)
+    elif isinstance(node, RArithmetic):
+        _collect_columns_expr(node.left, out)
+        _collect_columns_expr(node.right, out)
+    # RLiteral, RAggregateRef: no column names
+
+
+def _collect_columns_pred(node: RPredicate, out: set[str]) -> None:
+    if isinstance(node, RComparison):
+        _collect_columns_expr(node.left, out)
+        _collect_columns_expr(node.right, out)
+    elif isinstance(node, (RAnd, ROr)):
+        for op in node.operands:
+            _collect_columns_pred(op, out)
+    elif isinstance(node, RNot):
+        _collect_columns_pred(node.operand, out)
+    elif isinstance(node, RBetween):
+        _collect_columns_expr(node.expr, out)
+        _collect_columns_expr(node.low, out)
+        _collect_columns_expr(node.high, out)
+    elif isinstance(node, (RInSet, RNotInSet)):
+        _collect_columns_expr(node.expr, out)
+    elif isinstance(node, RIfThen):
+        _collect_columns_pred(node.antecedent, out)
+        _collect_columns_pred(node.consequent, out)
+    # RExists/RNotExists: subquery references a different table context,
+    # not a column of the current ON scope -- nothing to collect.
