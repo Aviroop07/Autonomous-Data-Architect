@@ -605,3 +605,631 @@ def analyze_constraint_manifest(manifest: ConstraintManifest) -> Stage3AnalysisR
         unresolved_moment_target_probes=moment_target_probes,
         overconstrained_blocks=classification.overconstrained_blocks,
     )
+
+
+# =============================================================================
+# NEW: cross_shard.py pathway (Phase 3.10)
+# =============================================================================
+
+import logging
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Dict, List, Optional, Tuple
+
+from src.pipeline.stage2.models.schema import Schema
+from src.pipeline.stage3.middleware.fork_registry import (
+    ForkKey,
+    ForkKeyRegistry,
+    Unresolved,
+    parse_if_condition,
+)
+from src.pipeline.stage3.models import cross_shard
+from src.pipeline.stage3.models.condition_nodes import (
+    RColumnRef,
+    RComparison,
+    RLiteral,
+    RPredicate,
+)
+from src.pipeline.stage3.models.grain import (
+    Grain,
+    CanonicalizationFailure,
+    _SchemaView,
+    canonicalize,
+)
+from src.pipeline.stage3.models.on_nodes import ONBaseTable, ONAggregate, ONNode
+from src.pipeline.stage3.models.probe import (
+    MomentTargetProbe,
+    Stage3AnalysisReport,
+    VariableProbe,
+)
+from src.util.algorithms.dof_graph import (
+    Constraint as DOFConstraint,
+    DOFClassification,
+    DOFGraph,
+    Variable as DOFVariable,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Rich variable model (adapted from experiments/stage3_conflict_v2/dof_engine.py)
+# ---------------------------------------------------------------------------
+
+
+class VariableKind(str, Enum):
+    COLUMN_DISTRIBUTION_PARAM = "column_distribution_param"
+    COLUMN_RANGE = "column_range"
+    TABLE_CARDINALITY = "table_cardinality"
+    DERIVED_COLUMN = "derived_column"
+    CORRELATION = "correlation"
+
+
+@dataclass(frozen=True)
+class BranchTag:
+    """A Q4-style conditional fork: this variable applies only within this
+    branch. Variables in different, mutually-exclusive branches of the SAME
+    fork key must never be unified."""
+
+    fork_table: str
+    fork_column: str
+    branch_value: str
+
+
+@dataclass(frozen=True)
+class RichVariable:
+    grain: Grain
+    kind: VariableKind
+    name: str
+    branch: Optional[BranchTag] = None
+    fact_references: Tuple[int, ...] = ()
+    lower_bound: Optional[float] = None
+    upper_bound: Optional[float] = None
+
+    def flat_name(self) -> str:
+        """Collapse to the flat string identity DOFGraph operates on.
+        Grain-scoped and branch-scoped so two variables with the same short
+        name but different grain/branch are never accidentally unified."""
+        grain_id = (
+            f"{self.grain.table}"
+            f"[{sorted((fk.child_table, fk.fk_column, fk.parent_table, occ) for fk, occ in self.grain.edges)}]"
+        )
+        narrowed_id = "|narrowed" if self.grain.narrowed else ""
+        agg_id = f"|agg={self.grain.agg_signature}" if self.grain.agg_signature else ""
+        branch_id = (
+            f"|{self.branch.fork_table}.{self.branch.fork_column}={self.branch.branch_value}"
+            if self.branch
+            else ""
+        )
+        return f"{grain_id}{narrowed_id}{agg_id}::{self.kind.value}::{self.name}{branch_id}"
+
+
+@dataclass(frozen=True)
+class RichConstraint:
+    name: str
+    variables: Tuple[RichVariable, ...]
+    fact_references: Tuple[int, ...] = ()
+
+
+@dataclass
+class RichClassification:
+    square: List[RichVariable] = field(default_factory=list)
+    loose: List[RichVariable] = field(default_factory=list)
+    overconstrained_blocks: List[Tuple[List[RichVariable], List[str]]] = field(
+        default_factory=list
+    )
+
+
+# ---------------------------------------------------------------------------
+# Build and classify (bridge to real DOFGraph)
+# ---------------------------------------------------------------------------
+
+
+def build_and_classify(
+    variables: List[RichVariable], constraints: List[RichConstraint]
+) -> RichClassification:
+    """Deduplicate RichVariables by flat_name, build bipartite graph,
+    classify via Dulmage-Mendelsohn, map results back to rich objects."""
+    by_flat: Dict[str, RichVariable] = {}
+    for v in variables:
+        by_flat.setdefault(v.flat_name(), v)
+    for c in constraints:
+        for v in c.variables:
+            by_flat.setdefault(v.flat_name(), v)
+
+    raw_vars = [DOFVariable(name=flat) for flat in by_flat]
+    raw_constraints = [
+        DOFConstraint(
+            name=c.name,
+            variables=sorted({v.flat_name() for v in c.variables}),
+            fact_references=list(c.fact_references),
+        )
+        for c in constraints
+    ]
+
+    graph = DOFGraph(raw_vars, raw_constraints)
+    result: DOFClassification = graph.classify()
+
+    out = RichClassification()
+    out.square = [by_flat[n] for n in result.square_variables]
+    out.loose = [by_flat[n] for n in result.loose_variables]
+    for block in result.overconstrained_blocks:
+        out.overconstrained_blocks.append(
+            ([by_flat[n] for n in block.variables if n in by_flat], block.constraints)
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Fork/branch resolution
+# ---------------------------------------------------------------------------
+
+
+def _resolve_branch(
+    condition: Optional[RPredicate],
+    registry: ForkKeyRegistry,
+) -> Optional[BranchTag]:
+    """If condition is a simple EQ/IN against a known categorical fork,
+    resolve it to a BranchTag. Returns None for non-fork conditions or
+    unresolved forks."""
+    if condition is None:
+        return None
+    if not isinstance(condition, RComparison):
+        return None
+    if condition.op not in ("=", "==", "in"):
+        return None
+    if not isinstance(condition.left, RColumnRef):
+        return None
+    if not isinstance(condition.right, RLiteral):
+        return None
+
+    col_name = condition.left.name
+    val = condition.right.value
+    if not isinstance(val, str):
+        return None
+
+    # Try to find the fork key across all tables (we don't know the table
+    # from the RColumnRef alone -- it's deliberately unqualified).
+    # Check all registered fork keys for a matching column.
+    for fk, _cats in registry.forks.items():
+        if fk.column_name == col_name:
+            branch_vals = registry.get_branches_for_condition(
+                __import__(
+                    "src.pipeline.stage3.middleware.fork_registry",
+                    fromlist=["BranchCondition"],
+                ).BranchCondition(
+                    fork_key=fk,
+                    operator="EQ",
+                    values=[val],
+                )
+            )
+            if isinstance(branch_vals, Unresolved):
+                return None
+            return BranchTag(
+                fork_table=fk.table_name,
+                fork_column=fk.column_name,
+                branch_value=val,
+            )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Conversion: cross_shard.py shapes -> RichVariable + RichConstraint
+# ---------------------------------------------------------------------------
+
+
+def _on_base_table(node: ONNode) -> Optional[str]:
+    """Extract the base table name from an ON tree."""
+    if isinstance(node, ONBaseTable):
+        return node.name
+    if isinstance(node, ONAggregate):
+        return _on_base_table(node.source)
+    return None
+
+
+def _distribution_to_rich(
+    dc: cross_shard.DistributionConstraint,
+    grain: Grain,
+    view: _SchemaView,
+    registry: ForkKeyRegistry,
+    disambiguator: int,
+) -> Tuple[List[RichVariable], List[RichConstraint]]:
+    """Convert one DistributionConstraint into RichVariable/RichConstraint
+    pairs -- one Constraint PER parameter, never one touching several."""
+    table = grain.table
+    col = dc.column
+    refs = tuple(dc.fact_references)
+    branch = _resolve_branch(dc.if_condition, registry)
+
+    family = dc.family
+    if family in ("GAUSSIAN", "LOG_NORMAL"):
+        params = ["mean", "std_dev"]
+    elif family == "BETA":
+        params = ["alpha", "beta"]
+    elif family == "POISSON":
+        params = ["lam"]
+    elif family == "UNIFORM":
+        params = ["min_value", "max_value"]
+    elif family == "CATEGORICAL":
+        # Categorical: one variable for probabilities
+        variables = []
+        constraints = []
+        var_name = f"{col}.probabilities"
+        rv = RichVariable(
+            grain=grain,
+            kind=VariableKind.COLUMN_DISTRIBUTION_PARAM,
+            name=var_name,
+            branch=branch,
+            fact_references=refs,
+        )
+        variables.append(rv)
+        probs = dc.parameters.get("probabilities")
+        if probs is not None:
+            constraints.append(
+                RichConstraint(
+                    name=f"pin_{table}.{var_name}#{disambiguator}",
+                    variables=(rv,),
+                    fact_references=refs,
+                )
+            )
+        return variables, constraints
+    else:
+        logger.warning("Unknown distribution family: %s", family)
+        return [], []
+
+    variables = []
+    constraints = []
+    for param in params:
+        var_name = f"{col}.{param}"
+        rv = RichVariable(
+            grain=grain,
+            kind=VariableKind.COLUMN_DISTRIBUTION_PARAM,
+            name=var_name,
+            branch=branch,
+            fact_references=refs,
+        )
+        variables.append(rv)
+        # Pinning constraint: one per parameter
+        constraints.append(
+            RichConstraint(
+                name=f"pin_{table}.{var_name}#{disambiguator}",
+                variables=(rv,),
+                fact_references=refs,
+            )
+        )
+    return variables, constraints
+
+
+def _range_constraint_to_rich(
+    c: cross_shard.Constraint,
+    grain: Grain,
+    view: _SchemaView,
+    registry: ForkKeyRegistry,
+    disambiguator: int,
+) -> Tuple[List[RichVariable], List[RichConstraint]]:
+    """Convert a range/bounds constraint (e.g. ORDER.total >= 5) into a
+    RichVariable with bound metadata. No pinning constraint -- bounds are
+    domain metadata, not DOF-consuming equations."""
+    cols = _extract_columns_from_condition(c.condition)
+    if len(cols) != 1:
+        return [], []
+    col = next(iter(cols))
+    refs = tuple(c.fact_references)
+    branch = _resolve_branch(c.condition, registry)
+
+    lower_bound = None
+    upper_bound = None
+    if isinstance(c.condition, RComparison) and isinstance(c.condition.right, RLiteral):
+        val = c.condition.right.value
+        if isinstance(val, (int, float)):
+            val = float(val)
+            if c.condition.op in (">=", ">"):
+                lower_bound = val if c.condition.op == ">=" else val + 1e-9
+            elif c.condition.op in ("<=", "<"):
+                upper_bound = val if c.condition.op == "<=" else val - 1e-9
+            elif c.condition.op in ("=", "=="):
+                lower_bound = val
+                upper_bound = val
+
+    rv = RichVariable(
+        grain=grain,
+        kind=VariableKind.COLUMN_RANGE,
+        name=col,
+        branch=branch,
+        fact_references=refs,
+        lower_bound=lower_bound,
+        upper_bound=upper_bound,
+    )
+    return [rv], []
+
+
+def _cardinality_to_rich(
+    c: cross_shard.Constraint,
+    grain: Grain,
+    disambiguator: int,
+) -> Tuple[List[RichVariable], List[RichConstraint]]:
+    """Convert a table cardinality constraint into a RichVariable."""
+    table = grain.table
+    refs = tuple(c.fact_references)
+
+    lower_bound = None
+    upper_bound = None
+    pinned = False
+    if isinstance(c.condition, RComparison) and isinstance(c.condition.right, RLiteral):
+        val = c.condition.right.value
+        if isinstance(val, (int, float)):
+            val = float(val)
+            if c.condition.op in (">=", ">"):
+                lower_bound = val if c.condition.op == ">=" else val + 1e-9
+            elif c.condition.op in ("<=", "<"):
+                upper_bound = val if c.condition.op == "<=" else val - 1e-9
+            elif c.condition.op in ("=", "=="):
+                lower_bound = val
+                upper_bound = val
+                pinned = True
+
+    rv = RichVariable(
+        grain=grain,
+        kind=VariableKind.TABLE_CARDINALITY,
+        name="row_count",
+        fact_references=refs,
+        lower_bound=lower_bound,
+        upper_bound=upper_bound,
+    )
+    constraints = []
+    if pinned:
+        constraints.append(
+            RichConstraint(
+                name=f"pin_{table}.row_count#{disambiguator}",
+                variables=(rv,),
+                fact_references=refs,
+            )
+        )
+    return [rv], constraints
+
+
+def _derived_column_to_rich(
+    dc: cross_shard.DerivedColumnConstraint,
+    grain: Grain,
+    disambiguator: int,
+) -> Tuple[List[RichVariable], List[RichConstraint]]:
+    """Convert a DerivedColumnConstraint into RichVariable + pinning
+    constraint. The variable is the derived column itself; the constraint
+    pins it to its formula."""
+    refs = tuple(dc.fact_references)
+    rv = RichVariable(
+        grain=grain,
+        kind=VariableKind.DERIVED_COLUMN,
+        name=dc.target_column,
+        fact_references=refs,
+    )
+    constraint = RichConstraint(
+        name=f"derived_{dc.target_table}.{dc.target_column}#{disambiguator}",
+        variables=(rv,),
+        fact_references=refs,
+    )
+    return [rv], [constraint]
+
+
+def _extract_columns_from_condition(pred: RPredicate) -> set[str]:
+    """Extract column names from an R-predicate tree."""
+    from src.pipeline.stage3.middleware.conflict_detection import extract_columns
+
+    return extract_columns(pred)
+
+
+# ---------------------------------------------------------------------------
+# Main conversion: cross_shard.py -> RichVariable + RichConstraint lists
+# ---------------------------------------------------------------------------
+
+
+def _convert_cross_shard_constraints(
+    distributions: List[cross_shard.DistributionConstraint],
+    structural: List[cross_shard.Constraint],
+    logic: List[cross_shard.Constraint],
+    derived: List[cross_shard.DerivedColumnConstraint],
+    schema: Schema,
+    registry: ForkKeyRegistry,
+) -> Tuple[List[RichVariable], List[RichConstraint]]:
+    """Convert all cross_shard.py extraction outputs into RichVariable +
+    RichConstraint lists, ready for build_and_classify."""
+    view = _SchemaView.from_schema(schema)
+    all_vars: List[RichVariable] = []
+    all_cons: List[RichConstraint] = []
+
+    # 1. Distribution constraints
+    for i, dc in enumerate(distributions):
+        grain_result = canonicalize(dc.on, schema)
+        if isinstance(grain_result, CanonicalizationFailure):
+            logger.warning(
+                "Cannot canonicalize distribution ON tree: %s",
+                grain_result.reason,
+            )
+            continue
+        vars, cons = _distribution_to_rich(
+            dc, grain_result, view, registry, disambiguator=i
+        )
+        all_vars.extend(vars)
+        all_cons.extend(cons)
+
+    # 2. Structural constraints (cardinality + range)
+    for i, c in enumerate(structural):
+        grain_result = canonicalize(c.on, schema)
+        if isinstance(grain_result, CanonicalizationFailure):
+            logger.warning(
+                "Cannot canonicalize structural ON tree: %s",
+                grain_result.reason,
+            )
+            continue
+
+        on_tables = set()
+        from src.pipeline.stage3.models.on_nodes import extract_tables
+
+        on_tables = extract_tables(c.on)
+
+        if len(on_tables) == 1:
+            # Single-table constraint -> cardinality
+            vars, cons = _cardinality_to_rich(c, grain_result, disambiguator=i)
+        else:
+            # Multi-table / range constraint
+            vars, cons = _range_constraint_to_rich(
+                c, grain_result, view, registry, disambiguator=i
+            )
+        all_vars.extend(vars)
+        all_cons.extend(cons)
+
+    # 3. Logic constraints (range / cross-column / format)
+    for i, c in enumerate(logic):
+        grain_result = canonicalize(c.on, schema)
+        if isinstance(grain_result, CanonicalizationFailure):
+            logger.warning(
+                "Cannot canonicalize logic ON tree: %s",
+                grain_result.reason,
+            )
+            continue
+        vars, cons = _range_constraint_to_rich(
+            c, grain_result, view, registry, disambiguator=i
+        )
+        all_vars.extend(vars)
+        all_cons.extend(cons)
+
+    # 4. Derived column constraints
+    for i, dc in enumerate(derived):
+        # Build a synthetic ON tree for the target table
+        on = ONBaseTable(name=dc.target_table)
+        grain_result = canonicalize(on, schema)
+        if isinstance(grain_result, CanonicalizationFailure):
+            logger.warning(
+                "Cannot canonicalize derived column ON tree: %s",
+                grain_result.reason,
+            )
+            continue
+        vars, cons = _derived_column_to_rich(dc, grain_result, disambiguator=i)
+        all_vars.extend(vars)
+        all_cons.extend(cons)
+
+    return all_vars, all_cons
+
+
+# ---------------------------------------------------------------------------
+# New entry point: analyze cross_shard.py shapes
+# ---------------------------------------------------------------------------
+
+
+def analyze_cross_shard_constraints(
+    distributions: List[cross_shard.DistributionConstraint] | None = None,
+    structural: List[cross_shard.Constraint] | None = None,
+    logic: List[cross_shard.Constraint] | None = None,
+    derived: List[cross_shard.DerivedColumnConstraint] | None = None,
+    schema: Schema | None = None,
+    registry: ForkKeyRegistry | None = None,
+) -> Stage3AnalysisReport:
+    """Stage 3's complete DOF analysis for cross_shard.py-shaped extraction
+    outputs. This is the NEW entry point that consumes the real extraction
+    agent output shapes (on: ONNode, condition: RPredicate) and routes
+    through grain canonicalization + real DOFGraph.
+
+    Returns a Stage3AnalysisReport with:
+    - square_variables: determined parameters (pinned by facts)
+    - loose_variable_probes: free parameters for Stage 4
+    - overconstrained_blocks: genuine contradictions flagged for review
+    """
+    distributions = distributions or []
+    structural = structural or []
+    logic = logic or []
+    derived = derived or []
+
+    if schema is None:
+        logger.warning("No schema provided; returning empty analysis.")
+        return Stage3AnalysisReport()
+
+    if registry is None:
+        registry = ForkKeyRegistry()
+
+    # Build fork registry: scan all categorical distributions for fork keys
+    _build_fork_registry(distributions, registry)
+
+    all_vars, all_cons = _convert_cross_shard_constraints(
+        distributions, structural, logic, derived, schema, registry
+    )
+
+    if not all_vars:
+        return Stage3AnalysisReport()
+
+    classification = build_and_classify(all_vars, all_cons)
+
+    # Build probes from classification results
+    loose_probes = [
+        VariableProbe(
+            variable_name=v.flat_name(),
+            lower_bound=v.lower_bound,
+            upper_bound=v.upper_bound,
+            fact_references=list(v.fact_references),
+        )
+        for v in classification.loose
+    ]
+
+    overconstrained = []
+    for block_vars, block_cons in classification.overconstrained_blocks:
+        from src.util.algorithms.dof_graph import OverconstrainedBlock
+
+        overconstrained.append(
+            OverconstrainedBlock(
+                variables=[v.flat_name() for v in block_vars],
+                constraints=block_cons,
+            )
+        )
+
+    return Stage3AnalysisReport(
+        square_variables=[v.flat_name() for v in classification.square],
+        loose_variable_probes=loose_probes,
+        unresolved_moment_target_probes=[],
+        overconstrained_blocks=overconstrained,
+    )
+
+
+def _build_fork_registry(
+    distributions: List[cross_shard.DistributionConstraint],
+    registry: ForkKeyRegistry,
+) -> None:
+    """Scan categorical distributions to populate the fork registry with
+    all known category lists. This replaces the old _discover_fork pattern
+    with a proper scan-and-union over cross_shard.py shapes."""
+    for dc in distributions:
+        if dc.family != "CATEGORICAL":
+            continue
+        if dc.if_condition is None:
+            continue
+        cond = parse_if_condition_from_predicate(dc.if_condition)
+        if cond is None:
+            continue
+        cats = dc.parameters.get("categories", [])
+        if isinstance(cats, list) and cats:
+            registry.register_fork(cond.fork_key, cats)
+
+
+def parse_if_condition_from_predicate(
+    pred: RPredicate,
+) -> Optional:
+    """Parse an R-predicate into a BranchCondition for fork registry lookup.
+    Handles RComparison EQ/IN against literal values."""
+    from src.pipeline.stage3.middleware.fork_registry import BranchCondition, Operator
+
+    if isinstance(pred, RComparison):
+        if not isinstance(pred.left, RColumnRef):
+            return None
+        if not isinstance(pred.right, RLiteral):
+            return None
+        col_name = pred.left.name
+        val = pred.right.value
+        if not isinstance(val, str):
+            return None
+        # We don't know the table from RColumnRef alone -- use a placeholder
+        # and let the registry's column-based lookup find the right key
+        op = Operator.EQ if pred.op in ("=", "==") else Operator.NEQ
+        return BranchCondition(
+            fork_key=ForkKey(table_name="", column_name=col_name),
+            operator=op,
+            values=[val],
+        )
+    return None
