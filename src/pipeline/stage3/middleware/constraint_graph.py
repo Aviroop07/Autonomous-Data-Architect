@@ -1228,16 +1228,22 @@ def analyze_cross_shard_constraints(
     derived: List[cross_shard.DerivedColumnConstraint] | None = None,
     schema: Schema | None = None,
     registry: ForkKeyRegistry | None = None,
-) -> Stage3AnalysisReport:
+) -> Tuple[Stage3AnalysisReport, Dict[str, List[int]]]:
     """Stage 3's complete DOF analysis for cross_shard.py-shaped extraction
     outputs. This is the NEW entry point that consumes the real extraction
     agent output shapes (on: ONNode, condition: RPredicate) and routes
     through grain canonicalization + real DOFGraph.
 
-    Returns a Stage3AnalysisReport with:
+    Returns (Stage3AnalysisReport, variable_fact_map). The report has:
     - square_variables: determined parameters (pinned by facts)
     - loose_variable_probes: free parameters for Stage 4
     - overconstrained_blocks: genuine contradictions flagged for review
+
+    variable_fact_map maps each flat variable name (as it appears in
+    overconstrained_blocks/confirmed_conflicts) back to the fact IDs that
+    produced it -- callers doing conflict reconciliation need this to find
+    which NL facts to re-examine; the report itself only carries flat
+    names (Stage 4's contract doesn't need fact-level detail).
     """
     distributions = distributions or []
     structural = structural or []
@@ -1251,7 +1257,7 @@ def analyze_cross_shard_constraints(
 
     if schema is None:
         logger.warning("No schema provided; returning empty analysis.")
-        return Stage3AnalysisReport(derived_cycle_conflicts=cycle_issues)
+        return Stage3AnalysisReport(derived_cycle_conflicts=cycle_issues), {}
 
     if registry is None:
         registry = ForkKeyRegistry()
@@ -1263,8 +1269,18 @@ def analyze_cross_shard_constraints(
         distributions, structural, logic, derived, schema, registry
     )
 
+    variable_fact_map: Dict[str, List[int]] = {}
+    for v in all_vars:
+        existing = variable_fact_map.setdefault(v.flat_name(), [])
+        for fid in v.fact_references:
+            if fid not in existing:
+                existing.append(fid)
+
     if not all_vars:
-        return Stage3AnalysisReport(derived_cycle_conflicts=cycle_issues)
+        return (
+            Stage3AnalysisReport(derived_cycle_conflicts=cycle_issues),
+            variable_fact_map,
+        )
 
     classification = build_and_classify(all_vars, all_cons)
 
@@ -1306,12 +1322,15 @@ def analyze_cross_shard_constraints(
             OverconstrainedBlock(variables=[flat_name], constraints=[])
         )
 
-    return Stage3AnalysisReport(
-        square_variables=[v.flat_name() for v in classification.square],
-        loose_variable_probes=loose_probes,
-        unresolved_moment_target_probes=[],
-        overconstrained_blocks=overconstrained,
-        derived_cycle_conflicts=cycle_issues,
+    return (
+        Stage3AnalysisReport(
+            square_variables=[v.flat_name() for v in classification.square],
+            loose_variable_probes=loose_probes,
+            unresolved_moment_target_probes=[],
+            overconstrained_blocks=overconstrained,
+            derived_cycle_conflicts=cycle_issues,
+        ),
+        variable_fact_map,
     )
 
 
