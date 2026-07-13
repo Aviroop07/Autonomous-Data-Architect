@@ -1,30 +1,60 @@
 """Converts extracted Stage 3 constraints into the generic DOF graph
-(src/util/algorithms/dof_graph.py), per STAGE3_PHASE2_DESIGN.md's taxonomy v2.
+(src/util/algorithms/dof_graph.py).
 
-Scope of this module: StatisticalManifest.distributions and moment_targets
-(Q3's derivation-chain walk, section 4), StructuralManifest's
-cardinalities/fanouts, and Q4's fork-key registry (conditional
-distributions and unconditional CrossColumnLogic branches, section 5) --
-see fork_registry.py for the registry itself. Explicitly NOT handled:
-UniqueConstraint, FormatConstraint, and ColumnCorrelation (D7) -- none has
-a numeric parameter to pin, so none is a DOF concept at all. Correlation
-is a joint-distribution shape parameter, not a variable/equation; it flows
-straight to Stage 4 generation instead (see constraints.py's
-ColumnCorrelation docstring for the validated mechanism). Q3's derivation
-walk deliberately bails on a base column whose ONLY distribution facts
-are conditional (section 4.4 discipline) rather than guessing which
-branch's mean applies -- see _base_mean_variable.
+Two pathways, kept side by side because they cover genuinely
+non-overlapping fact families -- this is NOT two versions of the same
+thing:
+
+1. `analyze_constraint_manifest` (ConstraintManifest -> DOF graph): the
+   ONLY pathway that resolves Q3 MomentTarget facts (the derivation-chain
+   walk in section 4 of STAGE3_PHASE2_DESIGN.md, `_resolve_mean`/
+   `_resolve_aggregation`) and handles Q4's fork-key conditional
+   expansion for CrossColumnLogic. `cross_shard.py` (the shape the new
+   extraction agents emit) has no MomentTarget/AggregationConstraint/
+   ColumnCorrelation equivalent at all yet -- extending it to express
+   Q3's derivation chain and D7 correlation over real Grain-scoped
+   quantities is real, separate design work, not a quick migration, and
+   is an explicit open follow-up, not silently pretended-solved.
+   Explicitly NOT handled here: UniqueConstraint, FormatConstraint, and
+   ColumnCorrelation (D7) -- none has a numeric parameter to pin, so none
+   is a DOF concept at all; correlation is a joint-distribution shape
+   parameter, not a variable/equation, and flows straight to Stage 4
+   generation instead (see constraints.py's ColumnCorrelation docstring).
+2. `analyze_cross_shard_constraints` (cross_shard.py Constraint/
+   DistributionConstraint/DerivedColumnConstraint -> DOF graph): the LIVE
+   path for everything the 3 real extraction agents
+   (statistical/structural/logic_extractor) actually produce today --
+   distributions, cardinalities, ranges, derived columns -- routed
+   through Grain canonicalization so ON-scope comparability is handled
+   correctly (see grain.py).
+
+Both call the same real DOFGraph/Dulmage-Mendelsohn classifier
+(src/util/algorithms/dof_graph.py) -- neither reimplements it.
 """
 
 from __future__ import annotations
 
+import logging
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Dict, List, Optional, Tuple
+
 import sqlglot
 from sqlglot import expressions as exp
 
+from src.pipeline.stage2.models.schema import Schema
 from src.pipeline.stage3.middleware.fork_registry import (
+    ForkKey,
     ForkKeyRegistry,
     Unresolved,
     parse_if_condition,
+)
+from src.pipeline.stage3.models import cross_shard
+from src.pipeline.stage3.models.condition_nodes import (
+    RColumnRef,
+    RComparison,
+    RLiteral,
+    RPredicate,
 )
 from src.pipeline.stage3.models.constraints import (
     AggregationConstraint,
@@ -43,12 +73,29 @@ from src.pipeline.stage3.models.constraints import (
     TableCardinality,
     UniformDistribution,
 )
+from src.pipeline.stage3.models.grain import (
+    CanonicalizationFailure,
+    Grain,
+    _SchemaView,
+    canonicalize,
+)
+from src.pipeline.stage3.models.on_nodes import ONAggregate, ONBaseTable, ONNode
 from src.pipeline.stage3.models.probe import (
     MomentTargetProbe,
     Stage3AnalysisReport,
     VariableProbe,
 )
-from src.util.algorithms.dof_graph import Constraint, DOFGraph, Variable
+from src.util.algorithms.dof_graph import (
+    Constraint,
+    Constraint as DOFConstraint,
+    DOFClassification,
+    DOFGraph,
+    OverconstrainedBlock,
+    Variable,
+    Variable as DOFVariable,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def _merge_variable(a: Variable, b: Variable) -> Variable:
@@ -608,48 +655,8 @@ def analyze_constraint_manifest(manifest: ConstraintManifest) -> Stage3AnalysisR
 
 
 # =============================================================================
-# NEW: cross_shard.py pathway (Phase 3.10)
+# cross_shard.py pathway -- the live path for the 3 real extraction agents
 # =============================================================================
-
-import logging
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Dict, List, Optional, Tuple
-
-from src.pipeline.stage2.models.schema import Schema
-from src.pipeline.stage3.middleware.fork_registry import (
-    ForkKey,
-    ForkKeyRegistry,
-    Unresolved,
-    parse_if_condition,
-)
-from src.pipeline.stage3.models import cross_shard
-from src.pipeline.stage3.models.condition_nodes import (
-    RColumnRef,
-    RComparison,
-    RLiteral,
-    RPredicate,
-)
-from src.pipeline.stage3.models.grain import (
-    Grain,
-    CanonicalizationFailure,
-    _SchemaView,
-    canonicalize,
-)
-from src.pipeline.stage3.models.on_nodes import ONBaseTable, ONAggregate, ONNode
-from src.pipeline.stage3.models.probe import (
-    MomentTargetProbe,
-    Stage3AnalysisReport,
-    VariableProbe,
-)
-from src.util.algorithms.dof_graph import (
-    Constraint as DOFConstraint,
-    DOFClassification,
-    DOFGraph,
-    Variable as DOFVariable,
-)
-
-logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -685,6 +692,10 @@ class RichVariable:
     fact_references: Tuple[int, ...] = ()
     lower_bound: Optional[float] = None
     upper_bound: Optional[float] = None
+    # Only set for CATEGORICAL distribution facts -- the stated category
+    # set, compared via set-overlap rather than interval-overlap (see
+    # pins_conflict below).
+    categories: Optional[frozenset] = None
 
     def flat_name(self) -> str:
         """Collapse to the flat string identity DOFGraph operates on.
@@ -718,6 +729,51 @@ class RichClassification:
     overconstrained_blocks: List[Tuple[List[RichVariable], List[str]]] = field(
         default_factory=list
     )
+    # Flat names where merging two or more RichVariables under the SAME
+    # identity produced a provable contradiction (an empty bound interval,
+    # or disjoint category sets) -- a genuine value-level conflict, not
+    # just a structural DOF degree-count. Distinguished from
+    # overconstrained_blocks (which DOF flags purely from constraint-to-
+    # variable ratio and cannot tell "two facts stating the same value" --
+    # harmless redundancy -- apart from "two facts stating incompatible
+    # values" -- a real bug).
+    confirmed_conflicts: List[str] = field(default_factory=list)
+
+
+def _merge_rich_bounds(
+    a: RichVariable, b: RichVariable
+) -> Tuple[Optional[float], Optional[float], Optional[frozenset], bool]:
+    """Merge two RichVariables sharing a flat_name into one bound/category
+    pair, and report whether the merge is genuinely valid (non-empty).
+
+    Interval merge is a plain max-lower/min-upper intersection (same rule
+    the pre-existing ConstraintManifest pathway's _merge_variable already
+    uses, and the same rule the multi-shard range-tightening behavior in
+    test_stage3_constraint_graph.py's
+    test_two_range_facts_about_the_same_table_tighten_the_bound depends
+    on) -- this function is what actually performs that merge for the
+    cross_shard.py pathway; without it, build_and_classify previously kept
+    only the FIRST-seen RichVariable's bounds and silently discarded every
+    other fact's bounds entirely.
+
+    Category sets merge via intersection too -- if a CATEGORICAL fact
+    states {Bronze, Silver} and another states {Gold, Platinum} for the
+    exact same variable, that IS a genuine contradiction (disjoint), not
+    resolvable by picking either side.
+
+    Returns (lower, upper, categories, is_valid). is_valid=False means a
+    genuine value-level conflict was found (empty interval or disjoint
+    categories) -- callers must not treat the returned bounds as usable."""
+    if a.categories is not None and b.categories is not None:
+        merged_categories = a.categories & b.categories
+        return None, None, merged_categories, bool(merged_categories)
+
+    lower_candidates = [x for x in (a.lower_bound, b.lower_bound) if x is not None]
+    upper_candidates = [x for x in (a.upper_bound, b.upper_bound) if x is not None]
+    lower = max(lower_candidates) if lower_candidates else None
+    upper = min(upper_candidates) if upper_candidates else None
+    is_valid = lower is None or upper is None or lower <= upper
+    return lower, upper, None, is_valid
 
 
 # ---------------------------------------------------------------------------
@@ -728,16 +784,50 @@ class RichClassification:
 def build_and_classify(
     variables: List[RichVariable], constraints: List[RichConstraint]
 ) -> RichClassification:
-    """Deduplicate RichVariables by flat_name, build bipartite graph,
-    classify via Dulmage-Mendelsohn, map results back to rich objects."""
+    """Deduplicate RichVariables by flat_name (properly MERGING bounds/
+    categories across every fact sharing that identity, not just keeping
+    whichever RichVariable happened to be seen first), build the bipartite
+    graph, classify via Dulmage-Mendelsohn, map results back to rich
+    objects. Variables whose merge is genuinely invalid (an empty bound
+    interval or disjoint category sets) are pulled out as confirmed_conflicts
+    BEFORE reaching DOFGraph -- a provable value contradiction is real
+    infeasibility regardless of what the structural degree-count would say."""
     by_flat: Dict[str, RichVariable] = {}
+    confirmed_conflicts: List[str] = []
     for v in variables:
-        by_flat.setdefault(v.flat_name(), v)
+        existing = by_flat.get(v.flat_name())
+        if existing is None:
+            by_flat[v.flat_name()] = v
+            continue
+        lower, upper, categories, is_valid = _merge_rich_bounds(existing, v)
+        if not is_valid:
+            if v.flat_name() not in confirmed_conflicts:
+                confirmed_conflicts.append(v.flat_name())
+        merged_refs = tuple(
+            sorted(set(existing.fact_references) | set(v.fact_references))
+        )
+        by_flat[v.flat_name()] = RichVariable(
+            grain=existing.grain,
+            kind=existing.kind,
+            name=existing.name,
+            branch=existing.branch,
+            fact_references=merged_refs,
+            lower_bound=lower,
+            upper_bound=upper,
+            categories=categories,
+        )
     for c in constraints:
         for v in c.variables:
             by_flat.setdefault(v.flat_name(), v)
 
-    raw_vars = [DOFVariable(name=flat) for flat in by_flat]
+    raw_vars = [
+        DOFVariable(
+            name=flat,
+            lower_bound=rv.lower_bound if flat not in confirmed_conflicts else None,
+            upper_bound=rv.upper_bound if flat not in confirmed_conflicts else None,
+        )
+        for flat, rv in by_flat.items()
+    ]
     raw_constraints = [
         DOFConstraint(
             name=c.name,
@@ -751,8 +841,13 @@ def build_and_classify(
     result: DOFClassification = graph.classify()
 
     out = RichClassification()
-    out.square = [by_flat[n] for n in result.square_variables]
-    out.loose = [by_flat[n] for n in result.loose_variables]
+    out.confirmed_conflicts = confirmed_conflicts
+    out.square = [
+        by_flat[n] for n in result.square_variables if n not in confirmed_conflicts
+    ]
+    out.loose = [
+        by_flat[n] for n in result.loose_variables if n not in confirmed_conflicts
+    ]
     for block in result.overconstrained_blocks:
         out.overconstrained_blocks.append(
             ([by_flat[n] for n in block.variables if n in by_flat], block.constraints)
@@ -851,16 +946,22 @@ def _distribution_to_rich(
     elif family == "UNIFORM":
         params = ["min_value", "max_value"]
     elif family == "CATEGORICAL":
-        # Categorical: one variable for probabilities
+        # Categorical: one variable for probabilities. The stated category
+        # NAMES (not the probabilities) are the variable's pin content for
+        # value-conflict comparison -- two facts naming disjoint category
+        # sets for the same column is a genuine contradiction (see
+        # _merge_rich_bounds), independent of whether either states weights.
         variables = []
         constraints = []
         var_name = f"{col}.probabilities"
+        categories = dc.parameters.get("categories", [])
         rv = RichVariable(
             grain=grain,
             kind=VariableKind.COLUMN_DISTRIBUTION_PARAM,
             name=var_name,
             branch=branch,
             fact_references=refs,
+            categories=frozenset(categories) if isinstance(categories, list) else None,
         )
         variables.append(rv)
         probs = dc.parameters.get("probabilities")
@@ -881,12 +982,21 @@ def _distribution_to_rich(
     constraints = []
     for param in params:
         var_name = f"{col}.{param}"
+        # An exact value pin: lower_bound == upper_bound == the stated
+        # value. Lets two facts agreeing on this exact value merge cleanly
+        # (see _merge_rich_bounds) instead of the value being invisible to
+        # the graph entirely -- previously nothing recorded WHAT value a
+        # distribution parameter was pinned to, only that it was pinned.
+        raw_value = dc.parameters.get(param)
+        value = float(raw_value) if isinstance(raw_value, (int, float)) else None
         rv = RichVariable(
             grain=grain,
             kind=VariableKind.COLUMN_DISTRIBUTION_PARAM,
             name=var_name,
             branch=branch,
             fact_references=refs,
+            lower_bound=value,
+            upper_bound=value,
         )
         variables.append(rv)
         # Pinning constraint: one per parameter
@@ -1169,15 +1279,31 @@ def analyze_cross_shard_constraints(
         for v in classification.loose
     ]
 
+    confirmed_conflict_set = set(classification.confirmed_conflicts)
     overconstrained = []
     for block_vars, block_cons in classification.overconstrained_blocks:
-        from src.util.algorithms.dof_graph import OverconstrainedBlock
-
-        overconstrained.append(
-            OverconstrainedBlock(
-                variables=[v.flat_name() for v in block_vars],
-                constraints=block_cons,
+        # Variables already reported via confirmed_conflicts (below) are
+        # excluded here to avoid double-listing the same flat_name under
+        # both mechanisms.
+        remaining = [
+            v for v in block_vars if v.flat_name() not in confirmed_conflict_set
+        ]
+        if remaining:
+            overconstrained.append(
+                OverconstrainedBlock(
+                    variables=[v.flat_name() for v in remaining],
+                    constraints=block_cons,
+                )
             )
+    # Genuine value-level contradictions (empty merged interval, disjoint
+    # category sets) -- these bypass DOF's structural degree-count entirely
+    # (a provable value conflict is real infeasibility regardless of
+    # constraint-to-variable ratio) and would otherwise never surface, since
+    # a variable pinned by exactly one constraint per fact is structurally
+    # square/loose to DOF even when the facts disagree.
+    for flat_name in classification.confirmed_conflicts:
+        overconstrained.append(
+            OverconstrainedBlock(variables=[flat_name], constraints=[])
         )
 
     return Stage3AnalysisReport(
