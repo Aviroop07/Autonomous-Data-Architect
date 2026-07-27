@@ -1,8 +1,7 @@
 """Unit tests for cross-shard constraint models (src/pipeline/stage3/models/cross_shard.py).
 
 Covers: Constraint, DistributionConstraint (family-specific parameter
-validation), DerivedColumnConstraint, and all three extraction output
-wrappers.
+validation), DerivedColumnConstraint.
 """
 
 from __future__ import annotations
@@ -20,9 +19,6 @@ from src.pipeline.stage3.models.cross_shard import (
     Constraint,
     DerivedColumnConstraint,
     DistributionConstraint,
-    LogicExtractionOutput,
-    StatisticalExtractionOutput,
-    StructuralExtractionOutput,
 )
 from src.pipeline.stage3.models.on_nodes import (
     ONAggregate,
@@ -343,43 +339,3 @@ class TestDerivedColumnConstraint:
             referenced_tables=["ORDER"],
         )
         assert dc._validate() == []
-
-
-# =========================================================================
-# Extraction output wrappers
-# =========================================================================
-
-
-class TestStatisticalExtractionOutput:
-    def test_empty(self):
-        out = StatisticalExtractionOutput()
-        assert out.distributions == []
-        assert out.moment_targets == []
-        assert out.correlations == []
-
-    def test_with_distribution(self):
-        out = StatisticalExtractionOutput(
-            distributions=[
-                DistributionConstraint(
-                    fact_references=[1],
-                    on=ONBaseTable(name="T"),
-                    column="x",
-                    family="GAUSSIAN",
-                    parameters={"mean": 50, "std_dev": 10},
-                )
-            ]
-        )
-        assert len(out.distributions) == 1
-        assert out.distributions[0].family == "GAUSSIAN"
-
-
-class TestStructuralExtractionOutput:
-    def test_empty(self):
-        out = StructuralExtractionOutput()
-        assert out.constraints == []
-
-
-class TestLogicExtractionOutput:
-    def test_empty(self):
-        out = LogicExtractionOutput()
-        assert out.constraints == []

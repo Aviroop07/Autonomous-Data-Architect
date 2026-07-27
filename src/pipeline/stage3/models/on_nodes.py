@@ -305,11 +305,6 @@ def _validate_on_node(node: ONNode) -> List[str]:
         return [f"Unknown ON node type: {type(node).__name__}"]
 
 
-def validate_on_tree(root: ONNode) -> List[str]:
-    """Public entry point for recursive ON validation."""
-    return _validate_on_node(root)
-
-
 # ---------------------------------------------------------------------------
 # Table extraction (for sharder co-location)
 # ---------------------------------------------------------------------------

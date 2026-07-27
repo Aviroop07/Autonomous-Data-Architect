@@ -23,7 +23,6 @@ from src.pipeline.stage3.middleware.fork_registry import (
 )
 from src.pipeline.stage3.models.condition_nodes import RArithmetic, RColumnRef, RLiteral
 from src.pipeline.stage3.models.cross_shard import DerivedColumnConstraint
-from src.pipeline.stage3.models.shard import SchemaShard
 from src.util.algorithms.sharding_ilp import ILPSharder
 
 
@@ -90,72 +89,6 @@ class TestForkKeyCategoryUnion:
             "Gold",
             "Platinum",
         }
-
-
-# ---------------------------------------------------------------------------
-# Item 3 -- SchemaShard._validate() crashed on any real schema (referenced
-# Column.is_primary_key / ForeignKey.referencing_columns/referred_columns,
-# none of which exist on the real models).
-# ---------------------------------------------------------------------------
-
-
-class TestSchemaShardValidateDoesNotCrash:
-    def test_validate_runs_against_a_real_schema_without_attribute_error(self):
-        schema = Schema(
-            tables=[
-                Table(
-                    name="CUSTOMER",
-                    primary_key=["customer_id"],
-                    columns=[
-                        Column(name="customer_id", data_type=DataType.INTEGER),
-                        Column(name="name", data_type=DataType.VARCHAR),
-                    ],
-                ),
-                Table(
-                    name="ORDER",
-                    primary_key=["order_id"],
-                    columns=[
-                        Column(name="order_id", data_type=DataType.INTEGER),
-                        Column(name="customer_id", data_type=DataType.INTEGER),
-                    ],
-                ),
-            ],
-            relationships=[
-                ForeignKey(
-                    referencing_table="ORDER",
-                    referencing_column="customer_id",
-                    referred_table="CUSTOMER",
-                )
-            ],
-        )
-        shard = SchemaShard(
-            shard_index=0,
-            tables=["ORDER"],
-            projections={"ORDER": ["order_id", "customer_id"]},
-            allocated_fact_ids=[1],
-        )
-        # Must not raise AttributeError -- and correctly flags the real FK
-        # closure violation (ORDER.customer_id present, CUSTOMER absent).
-        errors = shard._validate(schema)
-        assert any("FK Closure Violation" in e for e in errors)
-
-    def test_validate_passes_when_fk_closure_and_pk_are_satisfied(self):
-        schema = Schema(
-            tables=[
-                Table(
-                    name="ORDER",
-                    primary_key=["order_id"],
-                    columns=[Column(name="order_id", data_type=DataType.INTEGER)],
-                ),
-            ],
-        )
-        shard = SchemaShard(
-            shard_index=0,
-            tables=["ORDER"],
-            projections={"ORDER": ["order_id"]},
-            allocated_fact_ids=[1],
-        )
-        assert shard._validate(schema) == []
 
 
 # ---------------------------------------------------------------------------

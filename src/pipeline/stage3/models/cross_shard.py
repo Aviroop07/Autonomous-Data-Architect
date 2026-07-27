@@ -9,6 +9,8 @@ Architecture:
     Constraint              -- the universal constraint representation
     DistributionConstraint  -- specialized for distribution pins
     DerivedColumnConstraint -- specialized for computed columns
+    CorrelatedConstraint    -- specialized for joint/correlation facts
+    StateSequenceConstraint -- specialized for state-machine/lifecycle facts
 
     ExtractionOutput wrappers per agent family:
         StatisticalExtractionOutput
@@ -264,16 +266,197 @@ class DerivedColumnConstraint(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Extraction output wrappers (per agent family)
+# CorrelatedConstraint (specialized) -- Tier B: mirrors constraint_model's
+# Correlated node closely enough for the bridge to construct it DIRECTLY
+# (no lossy approximation through a generic predicate tree, unlike the
+# pre-Tier-B fallback of cramming a correlation fact into an RComparison).
+# ---------------------------------------------------------------------------
+
+_CORRELATION_FAMILIES = frozenset(
+    {"GAUSSIAN", "STUDENT_T", "CLAYTON", "GUMBEL", "FRANK"}
+)
+
+
+class PairwiseCorrelationSpec(BaseModel):
+    """One partially-specified entry of a CorrelatedConstraint's implied
+    correlation matrix. Omitting a pair leaves it a free variable for
+    Stage 4 -- pairwise entries are never required to be exhaustive."""
+
+    left: str = Field(description="One of CorrelatedConstraint.columns.")
+    right: str = Field(description="Another of CorrelatedConstraint.columns.")
+    value: float = Field(description="Correlation value in [-1, 1].")
+
+    def _validate(self) -> List[str]:
+        errors: List[str] = []
+        if not (-1.0 <= self.value <= 1.0):
+            errors.append(
+                f"PairwiseCorrelationSpec.value must be in [-1, 1], got {self.value}."
+            )
+        if self.left == self.right:
+            errors.append(
+                "PairwiseCorrelationSpec: left and right must be different columns."
+            )
+        return errors
+
+
+class CorrelatedConstraint(BaseModel):
+    """Joint dependence across an arbitrary-arity column list. `on` provides
+    the schema context making every named column accessible -- a single
+    table if all columns live there, or an ONJoin reaching every table
+    involved. `pairwise` may be partial (a fact stating only a qualitative
+    direction with no number should omit that pair entirely, never invent
+    an approximate value)."""
+
+    fact_references: List[int] = Field(
+        min_length=1, description="Stage 1 fact IDs that state this joint dependence."
+    )
+    on: ONNode = Field(
+        description="Table/join context making every column in `columns` accessible."
+    )
+    columns: List[str] = Field(
+        min_length=2, description="The joint column set (unqualified names)."
+    )
+    family: Literal["GAUSSIAN", "STUDENT_T", "CLAYTON", "GUMBEL", "FRANK"] = Field(
+        default="GAUSSIAN",
+        description="Copula family. Default to GAUSSIAN when the fact only states a "
+        "qualitative direction with no distributional shape implied.",
+    )
+    pairwise: List[PairwiseCorrelationSpec] = Field(
+        default_factory=list, description="Partial pairwise correlations."
+    )
+    shared_parameters: dict[str, float] = Field(
+        default_factory=dict,
+        description="Family-wide shared parameters, e.g. STUDENT_T's degrees-of-freedom.",
+    )
+
+    @field_validator("fact_references")
+    @classmethod
+    def _no_duplicates(cls, v: List[int]) -> List[int]:
+        if len(v) != len(set(v)):
+            raise ValueError("fact_references contains duplicates.")
+        return v
+
+    def _validate(self) -> List[str]:
+        errors: List[str] = []
+        if not self.fact_references:
+            errors.append("CorrelatedConstraint.fact_references cannot be empty.")
+        # columns' >= 2-entries rule is enforced by Field(min_length=2) at
+        # construction time, matching constraint_model's own Correlated --
+        # no redundant runtime check needed here.
+        if len(self.columns) != len(set(self.columns)):
+            errors.append("CorrelatedConstraint.columns contains duplicates.")
+        if self.family not in _CORRELATION_FAMILIES:
+            errors.append(
+                f"CorrelatedConstraint.family must be one of {sorted(_CORRELATION_FAMILIES)}, "
+                f"got '{self.family}'."
+            )
+        col_set = set(self.columns)
+        for i, pw in enumerate(self.pairwise):
+            errors.extend(
+                f"CorrelatedConstraint.pairwise[{i}]: {e}" for e in pw._validate()
+            )
+            if pw.left not in col_set:
+                errors.append(
+                    f"CorrelatedConstraint.pairwise[{i}].left '{pw.left}' not in columns."
+                )
+            if pw.right not in col_set:
+                errors.append(
+                    f"CorrelatedConstraint.pairwise[{i}].right '{pw.right}' not in columns."
+                )
+        return errors
+
+
+# ---------------------------------------------------------------------------
+# StateSequenceConstraint (specialized) -- Tier B: mirrors constraint_model's
+# StateSequence node closely enough for direct bridging.
 # ---------------------------------------------------------------------------
 
 
-class StatisticalExtractionOutput(BaseModel):
-    """Output of the Statistical extraction agent.
+class StateTransitionSpec(BaseModel):
+    """One directed edge in a StateSequenceConstraint's transition graph."""
 
-    Separates distribution pins (specialized) from moment-target
-    constraints and correlation constraints (generic Constraint).
-    """
+    from_state: str = Field(description="The sequence_column value transitioned from.")
+    to_state: str = Field(description="The sequence_column value transitioned to.")
+
+    def _validate(self) -> List[str]:
+        errors: List[str] = []
+        if self.from_state == self.to_state:
+            errors.append(
+                "StateTransitionSpec: from_state and to_state must differ "
+                "(a self-loop is not a transition)."
+            )
+        return errors
+
+
+class StateSequenceConstraint(BaseModel):
+    """State-machine fact over a single categorical column's value, e.g. an
+    order's status must follow ready -> packed -> shipped -> delivered.
+    `on` is single-table (the sequence column lives on one table) -- this is
+    a transition-graph invariant on that column's CURRENT value, not a
+    window/ordering claim over multiple rows (no event-log table is
+    assumed to exist)."""
+
+    fact_references: List[int] = Field(
+        min_length=1, description="Stage 1 fact IDs that state this sequencing rule."
+    )
+    on: ONBaseTable = Field(description="The table the sequence column lives on.")
+    sequence_column: str = Field(description="The categorical column tracked as state.")
+    allowed_transitions: List[StateTransitionSpec] = Field(default_factory=list)
+    forbidden_transitions: List[StateTransitionSpec] = Field(default_factory=list)
+    strict: bool = Field(
+        default=False,
+        description="If True, this fact asserts the sequence is acyclic -- a cycle in "
+        "the merged allowed-transitions graph across all facts sharing this "
+        "table/sequence_column becomes a conflict. Cycles are allowed "
+        "by default (e.g. a legitimate returns/reprocessing loop).",
+    )
+
+    @field_validator("fact_references")
+    @classmethod
+    def _no_duplicates(cls, v: List[int]) -> List[int]:
+        if len(v) != len(set(v)):
+            raise ValueError("fact_references contains duplicates.")
+        return v
+
+    def _validate(self) -> List[str]:
+        errors: List[str] = []
+        if not self.fact_references:
+            errors.append("StateSequenceConstraint.fact_references cannot be empty.")
+        if not self.sequence_column.strip():
+            errors.append("StateSequenceConstraint.sequence_column cannot be empty.")
+        for i, t in enumerate(self.allowed_transitions):
+            errors.extend(
+                f"StateSequenceConstraint.allowed_transitions[{i}]: {e}"
+                for e in t._validate()
+            )
+        for i, t in enumerate(self.forbidden_transitions):
+            errors.extend(
+                f"StateSequenceConstraint.forbidden_transitions[{i}]: {e}"
+                for e in t._validate()
+            )
+        allowed_set = {(t.from_state, t.to_state) for t in self.allowed_transitions}
+        forbidden_set = {(t.from_state, t.to_state) for t in self.forbidden_transitions}
+        conflict = allowed_set & forbidden_set
+        if conflict:
+            errors.append(
+                f"StateSequenceConstraint: transition(s) {sorted(conflict)} are asserted "
+                "both allowed and forbidden within this same fact."
+            )
+        return errors
+
+
+# ---------------------------------------------------------------------------
+# Unified extraction output (single constraint_generator agent)
+# ---------------------------------------------------------------------------
+
+
+class UnifiedExtractionOutput(BaseModel):
+    """Output of the single, unified constraint_generator agent (replaces
+    the 3 separate statistical/structural/logic extraction outputs above --
+    kept for reference/backward compatibility, no longer produced by any
+    live agent). One generator now extracts every constraint category in
+    one call; the `category` a constraint belongs to is simply which list
+    it landed in here, mirroring Stage3Output's own 7-way split."""
 
     distributions: List[DistributionConstraint] = Field(
         default_factory=list,
@@ -283,38 +466,23 @@ class StatisticalExtractionOutput(BaseModel):
         default_factory=list,
         description="Moment-target constraints (mean/median pins).",
     )
-    correlations: List[Constraint] = Field(
+    correlations: List[CorrelatedConstraint] = Field(
         default_factory=list,
-        description="Column-correlation constraints.",
+        description="Joint/correlation constraints (Tier B: typed, direct-bridgeable).",
     )
-
-
-class StructuralExtractionOutput(BaseModel):
-    """Output of the Structural+Aggregate extraction agent.
-
-    All outputs are generic Constraint objects -- the ON clause
-    distinguishes cardinalities, fanouts, aggregations, etc.
-    """
-
-    constraints: List[Constraint] = Field(
+    structural_constraints: List[Constraint] = Field(
         default_factory=list,
         description="Structural constraints (cardinality, fanout, uniqueness, aggregation).",
     )
-
-
-class LogicExtractionOutput(BaseModel):
-    """Output of the Logic extraction agent.
-
-    Generic Constraint objects for format/cross-column/temporal rules,
-    plus DerivedColumnConstraint separately (specialized: arithmetic
-    derivations like `total = price * quantity`, fed to cycle detection).
-    """
-
-    constraints: List[Constraint] = Field(
+    logic_constraints: List[Constraint] = Field(
         default_factory=list,
         description="Logic constraints (format, cross-column, temporal).",
     )
-    derived: List[DerivedColumnConstraint] = Field(
+    derived_columns: List[DerivedColumnConstraint] = Field(
         default_factory=list,
         description="Arithmetic column derivations (e.g. total = price * quantity).",
+    )
+    state_sequences: List[StateSequenceConstraint] = Field(
+        default_factory=list,
+        description="State-machine/lifecycle constraints (Tier B: typed, direct-bridgeable).",
     )

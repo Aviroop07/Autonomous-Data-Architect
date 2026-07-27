@@ -11,11 +11,12 @@ here.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Literal, Tuple
+from typing import Tuple
 
 from pydantic import BaseModel, Field
 
 from src.util.algorithms.dof_graph import OverconstrainedBlock
+from src.util.constraint_model.conflicts.models import Conflict
 
 
 class CycleIssue(BaseModel):
@@ -45,14 +46,12 @@ class ReconciliationVerdict(str, Enum):
 
 
 class MisextractionFix(BaseModel):
-    """One correction the reconciliation agent identified -- which family's
-    extraction was wrong, which fact it should re-derive from, and a
-    natural-language hint describing the mistake, to be injected into that
-    family's next extraction-loop round. A single conflict can require
-    fixes across more than one family (e.g. a structural cardinality bound
-    disagreeing with a statistical distribution's support)."""
+    """One correction the reconciliation agent identified -- which fact it
+    should re-derive from, and a natural-language hint describing the
+    mistake, to be injected into the (single, unified) generator's next
+    extraction-loop round for that shard. A single conflict can require
+    fixes to more than one fact."""
 
-    family: Literal["statistical", "structural", "logic"]
     fact_id: int
     guidance: str = Field(
         description="What the prior extraction got wrong and how to fix it, "
@@ -63,12 +62,12 @@ class MisextractionFix(BaseModel):
 
 class ConflictReconciliation(BaseModel):
     """The conflict-reconciliation agent's structured output for one
-    detected conflict (a confirmed_conflict flat name, an overconstrained
-    block, or a derived-column cycle)."""
+    detected conflict within a reconciled group (a Conflict.kind-tagged
+    engine finding, an overconstrained block, or a derived-column cycle)."""
 
     conflict_ref: str = Field(
-        description="Identifies which conflict this addresses -- the flat "
-        "variable name, block identifier, or cycle description it was given."
+        description="Identifies which conflict this addresses -- echoed back "
+        "exactly from the conflict item it was given."
     )
     verdict: ReconciliationVerdict
     reasoning: str = Field(
@@ -78,6 +77,21 @@ class ConflictReconciliation(BaseModel):
     fixes: list[MisextractionFix] = Field(
         default_factory=list,
         description="Populated only when verdict == MISEXTRACTION.",
+    )
+
+
+class GroupReconciliation(BaseModel):
+    """The conflict-reconciliation agent's structured output for one WHOLE
+    GROUP of conflicts reconciled together (grouped because they share
+    schema locality -- see orchestration/stage3/entry.py's
+    _group_by_schema_locality). One verdict per conflict_ref it was given
+    -- a single call can require different verdicts for different members
+    of the same group."""
+
+    verdicts: list[ConflictReconciliation] = Field(
+        default_factory=list,
+        description="Exactly one entry per conflict_ref given in the request, "
+        "in any order.",
     )
 
 
@@ -112,33 +126,16 @@ class VariableProbe(BaseModel):
     )
 
 
-class MomentTargetProbe(BaseModel):
-    """A MomentTarget fact whose derivation-chain walk bailed (design doc
-    section 4.4) -- a stated population statistic Stage 3 could not
-    resolve to underlying pinned parameters. Unlike VariableProbe, this
-    carries the original stated target, since resolving it (if ever
-    attempted) needs that value."""
-
-    table_name: str
-    column_name: str
-    statistic: str
-    target_value: float
-    fact_references: list[int] = Field(default_factory=list)
-
-
 class Stage3AnalysisReport(BaseModel):
     """The complete output of running the DOF graph over a
     ConstraintManifest. `square_variables` is informational (confirms what
     the derivation walk successfully pinned, even though no fact stated it
-    directly). `loose_variable_probes` and `unresolved_moment_target_probes`
-    are what Stage 3 hands to Stage 4. `overconstrained_blocks` is a
-    feasibility failure Stage 3 must flag, not pass along."""
+    directly). `loose_variable_probes` is what Stage 3 hands to Stage 4.
+    `overconstrained_blocks` is a feasibility failure Stage 3 must flag,
+    not pass along."""
 
     square_variables: list[str] = Field(default_factory=list)
     loose_variable_probes: list[VariableProbe] = Field(default_factory=list)
-    unresolved_moment_target_probes: list[MomentTargetProbe] = Field(
-        default_factory=list
-    )
     overconstrained_blocks: list[OverconstrainedBlock] = Field(default_factory=list)
     derived_cycle_conflicts: list[CycleIssue] = Field(
         default_factory=list,
@@ -151,7 +148,26 @@ class Stage3AnalysisReport(BaseModel):
         description="Conflicts the reconciliation agent judged FALSE_POSITIVE "
         "-- kept visible for audit, not silently dropped.",
     )
+    conflicts: list[Conflict] = Field(
+        default_factory=list,
+        description="Unresolved conflicts from the deterministic conflicts/ engine "
+        "(distribution/moment/correlation/population-reconciliation/state-sequence "
+        "mismatches, plus structural over-determination) after the reconciliation "
+        "loop's MISEXTRACTION fixes and FALSE_POSITIVE dismissals -- what remains is "
+        "either GENUINE_CONTRADICTION or exhausted its retry budget.",
+    )
+    unsupported: list[str] = Field(
+        default_factory=list,
+        description="Cases the deterministic conflicts/ engine or the cross_shard "
+        "bridge could not evaluate either way (e.g. a non-chordal correlation "
+        "pattern, or a predicate shape with no constraint_model equivalent yet) -- "
+        "not conflicts, but not silently clean either.",
+    )
 
     @property
     def is_feasible(self) -> bool:
-        return not self.overconstrained_blocks and not self.derived_cycle_conflicts
+        return (
+            not self.overconstrained_blocks
+            and not self.derived_cycle_conflicts
+            and not self.conflicts
+        )

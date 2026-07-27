@@ -29,7 +29,6 @@ from src.pipeline.stage3.models.condition_nodes import (
     RPredicate,
     RExprUnion,
     SubqueryRef,
-    validate_condition_tree,
 )
 
 
@@ -430,51 +429,6 @@ class TestRNotExists:
 # =========================================================================
 # Recursive validation
 # =========================================================================
-
-
-class TestValidateConditionTree:
-    def test_simple_comparison_passes(self):
-        node = RComparison(
-            op="=",
-            left=RColumnRef(name="x"),
-            right=RLiteral(value=1),
-        )
-        assert validate_condition_tree(node) == []
-
-    def test_nested_and_passes(self):
-        node = RAnd(
-            operands=[
-                RComparison(op=">", left=RColumnRef(name="a"), right=RLiteral(value=0)),
-                ROr(
-                    operands=[
-                        RComparison(
-                            op="=", left=RColumnRef(name="b"), right=RLiteral(value=1)
-                        ),
-                        RComparison(
-                            op="=", left=RColumnRef(name="b"), right=RLiteral(value=2)
-                        ),
-                    ]
-                ),
-            ]
-        )
-        assert validate_condition_tree(node) == []
-
-    def test_deeply_nested_finds_error(self):
-        bad_ref = RColumnRef(name="")
-        node = RAnd(
-            operands=[
-                RComparison(op="=", left=RColumnRef(name="x"), right=RLiteral(value=1)),
-                RNot(
-                    operand=RComparison(
-                        op="=",
-                        left=bad_ref,
-                        right=RLiteral(value=2),
-                    )
-                ),
-            ]
-        )
-        errors = validate_condition_tree(node)
-        assert any("cannot be empty" in e for e in errors)
 
 
 # =========================================================================

@@ -1,12 +1,10 @@
-"""Statistical audit agent for Stage 3.
+"""Unified constraint-audit agent for Stage 3.
 
 Second, independently-prompted LLM re-reading the original NL facts
-against statistical_extractor's structured output -- catches semantic
-errors canonicalize() structurally can't (a dropped condition, wrong-
-table attribution, a hallucinated bound, missed conditionality). Follows
-Stage 1's verifier / Stage 2's er_auditor LoopAgent convention: reads the
-extractor's output from ctx.node_outputs directly (not through the
-generic det_errors channel).
+against constraint_generator's structured output -- catches semantic
+errors deterministic checking structurally can't (a dropped condition,
+wrong-table attribution, a hallucinated bound, missed conditionality).
+Replaces the 3 separate statistical/structural/logic auditors.
 """
 
 from __future__ import annotations
@@ -16,7 +14,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from src.pipeline.stage3.agents.extraction_outputs import AuditReport, StatisticalOutput
+from src.pipeline.stage3.agents.extraction_outputs import AuditReport, UnifiedOutput
 from src.util.core.agent import AgentType, get_agent_
 from src.util.core.invoke import get_response
 from src.util.orchestration.loop_types import (
@@ -31,8 +29,8 @@ logger = logging.getLogger(__name__)
 PROMPT_PATH = Path(__file__).parent / "prompt.txt"
 
 
-class StatisticalAuditorLoopAgent(LoopAgent):
-    """LoopAgent for the statistical audit node."""
+class ConstraintAuditorLoopAgent(LoopAgent):
+    """LoopAgent for the unified audit node."""
 
     def __init__(self, model: Optional[str] = None) -> None:
         self._model = model
@@ -45,7 +43,7 @@ class StatisticalAuditorLoopAgent(LoopAgent):
                 system_prompt=system_prompt,
                 output_structure=AuditReport,
                 model=self._model,
-                name="statistical_auditor",
+                name="constraint_auditor",
             )
         return self._agent
 
@@ -62,10 +60,12 @@ class StatisticalAuditorLoopAgent(LoopAgent):
         context_data: Dict[str, Any] = {}
         try:
             context_data = json.loads(ctx.initial_context)
-        except json.JSONDecodeError, TypeError, AttributeError:
+        except json.JSONDecodeError:
             logger.warning(
-                "[StatisticalAuditor] Failed to parse initial_context as JSON."
+                "[ConstraintAuditor] Failed to parse initial_context as JSON."
             )
+        except TypeError, AttributeError:
+            logger.warning("[ConstraintAuditor] initial_context was not a JSON string.")
 
         fact_ids = context_data.get("fact_ids", [])
         facts_map = context_data.get("facts_map", {})
@@ -75,15 +75,15 @@ class StatisticalAuditorLoopAgent(LoopAgent):
             if str(fid) in facts_map
         )
 
-        extractor_output = ctx.node_outputs.get("statistical_extractor")
-        if isinstance(extractor_output, StatisticalOutput):
+        extractor_output = ctx.node_outputs.get("generator")
+        if isinstance(extractor_output, UnifiedOutput):
             extracted_text = extractor_output.model_dump_json(indent=2)
         else:
             extracted_text = "(no extraction yet)"
 
         return (
             f"## ORIGINAL NL FACTS\n{facts_text}\n\n"
-            f"## EXTRACTED STATISTICAL CONSTRAINTS\n{extracted_text}"
+            f"## EXTRACTED CONSTRAINTS (all categories)\n{extracted_text}"
         )
 
     def emit_history(

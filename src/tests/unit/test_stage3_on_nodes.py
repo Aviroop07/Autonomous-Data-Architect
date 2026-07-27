@@ -17,7 +17,6 @@ from src.pipeline.stage3.models.on_nodes import (
     ONJoin,
     ONSubquery,
     extract_tables,
-    validate_on_tree,
 )
 
 
@@ -261,47 +260,6 @@ class TestONSubquery:
 # =========================================================================
 # validate_on_tree (recursive)
 # =========================================================================
-
-
-class TestValidateOnTree:
-    def test_single_table_passes(self):
-        assert validate_on_tree(ONBaseTable(name="ORDER")) == []
-
-    def test_nested_join_valid(self):
-        left = ONBaseTable(name="A")
-        right = ONBaseTable(name="B")
-        agg = ONAggregate(
-            source=ONBaseTable(name="C"),
-            fn="COUNT",
-            column="*",
-            alias="cnt",
-        )
-        j = ONJoin(
-            left=left,
-            right=ONJoin(
-                left=agg,
-                right=right,
-                on=[JoinCondition(left="cnt", right="B.id")],
-            ),
-            on=[JoinCondition(left="A.id", right="cnt")],
-        )
-        errors = validate_on_tree(j)
-        assert errors == []
-
-    def test_deeply_nested_error_found(self):
-        deep_bad = ONBaseTable(name="bad")
-        inner = ONJoin(
-            left=ONBaseTable(name="A"),
-            right=deep_bad,
-            on=[JoinCondition(left="A.x", right="bad.x")],
-        )
-        outer = ONJoin(
-            left=inner,
-            right=ONBaseTable(name="B"),
-            on=[JoinCondition(left="A.x", right="B.x")],
-        )
-        errors = validate_on_tree(outer)
-        assert any("ONJoin.right" in e and "UPPER_SNAKE_CASE" in e for e in errors)
 
 
 # =========================================================================

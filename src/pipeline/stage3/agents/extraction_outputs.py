@@ -12,11 +12,11 @@ from typing import List
 
 from src.pipeline.stage3.models.cross_shard import (
     Constraint,
+    CorrelatedConstraint,
     DerivedColumnConstraint,
     DistributionConstraint,
-    LogicExtractionOutput,
-    StatisticalExtractionOutput,
-    StructuralExtractionOutput,
+    StateSequenceConstraint,
+    UnifiedExtractionOutput,
 )
 from src.pipeline.stage3.models.on_nodes import extract_tables
 from src.util.orchestration.loop_types import LoopOutputModel
@@ -57,16 +57,27 @@ def _validate_derived(dc: DerivedColumnConstraint, idx: int) -> List[str]:
     return errors
 
 
-class StatisticalOutput(LoopOutputModel, StatisticalExtractionOutput):
-    """LoopOutputModel wrapper for statistical extraction output.
+def _validate_correlated(c: CorrelatedConstraint, idx: int) -> List[str]:
+    prefix = f"Correlation[{idx}]"
+    errors: List[str] = [f"{prefix}: {e}" for e in c._validate()]
+    if not extract_tables(c.on):
+        errors.append(f"{prefix} ON node has no table reference.")
+    return errors
 
-    get_errors() is what the AgentLoop infrastructure actually calls to
-    drive retries (it always overwrites state.det_errors from this method's
-    return value -- an agent's own canonicalize()-computed _det_errors
-    attribute, set in invoke(), is otherwise silently discarded). Reading
-    it back here is what makes the real FK-PK canonicalization check
-    (extractor agent.py's _validate_output) actually reach the retry loop
-    instead of being dead code."""
+
+def _validate_state_sequence(c: StateSequenceConstraint, idx: int) -> List[str]:
+    prefix = f"StateSequence[{idx}]"
+    errors: List[str] = [f"{prefix}: {e}" for e in c._validate()]
+    if not extract_tables(c.on):
+        errors.append(f"{prefix} ON node has no table reference.")
+    return errors
+
+
+class UnifiedOutput(LoopOutputModel, UnifiedExtractionOutput):
+    """LoopOutputModel wrapper for the single unified constraint_generator
+    agent's output. get_errors() is what the AgentLoop retry machinery
+    actually reads -- see StatisticalOutput's docstring for why this
+    matters (an agent's own _det_errors attribute is otherwise dead code)."""
 
     def get_errors(self) -> List[str]:
         errors: List[str] = list(getattr(self, "_det_errors", []))
@@ -75,29 +86,15 @@ class StatisticalOutput(LoopOutputModel, StatisticalExtractionOutput):
         for i, c in enumerate(self.moment_targets):
             errors.extend(_validate_constraint(c, f"MomentTarget[{i}]"))
         for i, c in enumerate(self.correlations):
-            errors.extend(_validate_constraint(c, f"Correlation[{i}]"))
-        return errors
-
-
-class StructuralOutput(LoopOutputModel, StructuralExtractionOutput):
-    """LoopOutputModel wrapper for structural extraction output."""
-
-    def get_errors(self) -> List[str]:
-        errors: List[str] = list(getattr(self, "_det_errors", []))
-        for i, c in enumerate(self.constraints):
+            errors.extend(_validate_correlated(c, i))
+        for i, c in enumerate(self.structural_constraints):
             errors.extend(_validate_constraint(c, f"Structural[{i}]"))
-        return errors
-
-
-class LogicOutput(LoopOutputModel, LogicExtractionOutput):
-    """LoopOutputModel wrapper for logic extraction output."""
-
-    def get_errors(self) -> List[str]:
-        errors: List[str] = list(getattr(self, "_det_errors", []))
-        for i, c in enumerate(self.constraints):
+        for i, c in enumerate(self.logic_constraints):
             errors.extend(_validate_constraint(c, f"Logic[{i}]"))
-        for i, dc in enumerate(self.derived):
+        for i, dc in enumerate(self.derived_columns):
             errors.extend(_validate_derived(dc, i))
+        for i, c in enumerate(self.state_sequences):
+            errors.extend(_validate_state_sequence(c, i))
         return errors
 
 

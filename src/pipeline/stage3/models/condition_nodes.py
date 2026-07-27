@@ -411,11 +411,6 @@ def _validate_predicate(node: RPredicate) -> List[str]:
     return [f"Unknown predicate type: {type(node).__name__}"]
 
 
-def validate_condition_tree(root: RPredicate) -> List[str]:
-    """Public entry point for recursive condition validation."""
-    return _validate_predicate(root)
-
-
 # ---------------------------------------------------------------------------
 # Column extraction -- used by constraint_graph.py to determine how many
 # distinct columns a condition references (e.g. to tell a single-column
