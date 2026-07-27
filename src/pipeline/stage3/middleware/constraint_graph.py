@@ -26,16 +26,8 @@ from src.pipeline.stage3.middleware.fork_registry import (
     ForkKey,
     ForkKeyRegistry,
     Unresolved,
-    parse_if_condition,
 )
 from src.pipeline.stage3.models import cross_shard
-from src.pipeline.stage3.models.condition_nodes import (
-    RColumnRef,
-    RComparison,
-    RLiteral,
-    RPredicate,
-    extract_columns,
-)
 from src.pipeline.stage3.models.grain import (
     CanonicalizationFailure,
     Grain,
@@ -48,13 +40,19 @@ from src.pipeline.stage3.models.probe import (
     VariableProbe,
 )
 from src.util.algorithms.dof_graph import (
-    Constraint,
     Constraint as DOFConstraint,
     DOFClassification,
     DOFGraph,
     OverconstrainedBlock,
-    Variable,
     Variable as DOFVariable,
+)
+from src.util.constraint_model.condition.expressions import RColumnRef, RLiteral
+from src.util.constraint_model.condition.predicates import (
+    RComparison,
+    extract_columns,
+)
+from src.util.constraint_model.condition.predicates import (
+    RPredicateUnion as RPredicate,
 )
 
 logger = logging.getLogger(__name__)

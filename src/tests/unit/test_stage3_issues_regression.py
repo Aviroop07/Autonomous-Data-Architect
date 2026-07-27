@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import pytest
 
-from src.pipeline.stage2.models.data_types import DataType
-from src.pipeline.stage2.models.schema import Column, ForeignKey, Schema, Table
 from src.pipeline.stage3.middleware.cycles import detect_derived_cycles
 from src.pipeline.stage3.middleware.fact_allocation import find_mentioned_tables
 from src.pipeline.stage3.middleware.fork_registry import (
@@ -21,7 +19,11 @@ from src.pipeline.stage3.middleware.fork_registry import (
     Operator,
     Unresolved,
 )
-from src.pipeline.stage3.models.condition_nodes import RArithmetic, RColumnRef, RLiteral
+from src.util.constraint_model.condition.expressions import (
+    RArithmetic,
+    RColumnRef,
+    RLiteral,
+)
 from src.pipeline.stage3.models.cross_shard import DerivedColumnConstraint
 from src.util.algorithms.sharding_ilp import ILPSharder
 

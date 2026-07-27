@@ -16,7 +16,8 @@ from src.pipeline.stage3.agents.extraction_outputs import UnifiedOutput
 from src.pipeline.stage3.middleware.deterministic_checker import (
     DeterministicCheckerLoopAgent,
 )
-from src.pipeline.stage3.models.condition_nodes import RColumnRef, RComparison, RLiteral
+from src.util.constraint_model.condition.expressions import RColumnRef, RLiteral
+from src.util.constraint_model.condition.predicates import RComparison
 from src.pipeline.stage3.models.cross_shard import (
     Constraint,
     CorrelatedConstraint,

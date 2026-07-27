@@ -1,5 +1,4 @@
-import pytest
-from src.pipeline.stage3.middleware.fork_registry import ForkKey, BranchCondition, ForkKeyRegistry, parse_if_condition
+from src.pipeline.stage3.middleware.fork_registry import ForkKey, ForkKeyRegistry, parse_if_condition
 
 def test_parse_if_condition():
     cond = parse_if_condition("CUSTOMER.loyalty_tier = 'Platinum'")

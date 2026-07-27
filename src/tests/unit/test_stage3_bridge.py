@@ -7,14 +7,11 @@ from pydantic import ValidationError
 
 from src.pipeline.stage2.models.data_types import DataType
 from src.pipeline.stage2.models.schema import Column, Schema, Table
-from src.pipeline.stage3.models.condition_nodes import (
+from src.util.constraint_model.condition.expressions import RColumnRef, RLiteral
+from src.util.constraint_model.condition.predicates import (
     RBetween,
-    RColumnRef,
     RComparison,
-    RExists,
     RIfThen,
-    RLiteral,
-    SubqueryRef,
 )
 from src.pipeline.stage3.models.cross_shard import (
     Constraint,
@@ -29,6 +26,7 @@ from src.pipeline.stage3.models.on_nodes import (
     ONBaseTable,
     ONFanout,
     ONJoin,
+    ONSubquery,
 )
 from src.pipeline.stage3.models.on_nodes import JoinCondition as CSJoinCondition
 from src.util.constraint_model.bridge.from_cross_shard import bridge_constraints
@@ -156,36 +154,25 @@ class TestBridgeGenericConstraint:
         assert unsupported == []
         assert isinstance(bridged[0].relation, Fanout)
 
-    def test_rexists_predicate_reported_unsupported_not_silently_dropped(self):
-        c = Constraint(
-            fact_references=[5],
-            on=ONBaseTable(name="ORDER"),
-            condition=RExists(
-                subquery=SubqueryRef(
-                    from_table="CUSTOMER",
-                    where_left="ORDER.customer_id",
-                    where_right="CUSTOMER.id",
-                )
-            ),
-            category="logic",
-        )
-        bridged, unsupported = bridge_constraints([], [], [], [], [c], _schema())
-        assert bridged == []
-        assert len(unsupported) == 1
-        assert "RExists" in unsupported[0]
+    def test_exists_predicates_are_unconstructible_not_merely_rejected(self):
+        """These used to be two tests asserting that RExists and RComparison
+        op='~' reached the bridge and were REPORTED as unsupported. Both node
+        types are now simply absent from the predicate taxonomy the extraction
+        models use, so the constraint can no longer be built at all -- a
+        strictly stronger guarantee than catching it one layer later, and one
+        that also removes them from the JSON schema the LLM is given."""
+        import src.util.constraint_model.condition.predicates as predicates
 
-    def test_tilde_operator_reported_unsupported(self):
-        c = Constraint(
-            fact_references=[6],
-            on=ONBaseTable(name="ORDER"),
-            condition=RComparison(
-                op="~", left=RColumnRef(name="total"), right=RLiteral(value=1)
-            ),
-            category="logic",
-        )
-        bridged, unsupported = bridge_constraints([], [], [], [], [c], _schema())
-        assert bridged == []
-        assert len(unsupported) == 1
+        assert not hasattr(predicates, "RExists")
+        assert not hasattr(predicates, "RNotExists")
+        assert not hasattr(predicates, "SubqueryRef")
+
+        with pytest.raises(ValidationError):
+            RComparison(
+                op="~",  # type: ignore[arg-type]
+                left=RColumnRef(name="total"),
+                right=RLiteral(value=1),
+            )
 
     def test_if_then_wrapped_conditional_bridges_recursively(self):
         c = Constraint(
@@ -346,13 +333,17 @@ class TestBridgeReportsEveryUnsupportedNeverDrops:
             ),
             category="logic",
         )
+        # An unbridgeable constraint can no longer be built out of a bad
+        # CONDITION (the condition taxonomy is now shared, so every predicate
+        # bridges by construction). The remaining way to be unsupported is a
+        # bad ON tree -- an ONSubquery that reached the bridge unnormalized.
         bad = Constraint(
             fact_references=[9],
-            on=ONBaseTable(name="ORDER"),
-            condition=RComparison(
-                op="~", left=RColumnRef(name="total"), right=RLiteral(value=1)
-            ),
+            on=ONSubquery(sql="SELECT * FROM ORDER"),
             category="logic",
+            condition=RComparison(
+                op=">", left=RColumnRef(name="total"), right=RLiteral(value=0)
+            ),
         )
         bridged, unsupported = bridge_constraints(
             [], [], [], [], [good, bad], _schema()

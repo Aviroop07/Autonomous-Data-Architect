@@ -8,20 +8,18 @@ from __future__ import annotations
 
 import pytest
 
-from src.pipeline.stage3.models.condition_nodes import (
+from src.util.constraint_model.condition.expressions import (
     RArithmetic,
-    RBetween,
     RColumnRef,
-    RComparison,
     RLiteral,
 )
+from src.util.constraint_model.condition.predicates import RComparison
 from src.pipeline.stage3.models.cross_shard import (
     Constraint,
     DerivedColumnConstraint,
     DistributionConstraint,
 )
 from src.pipeline.stage3.models.on_nodes import (
-    ONAggregate,
     ONBaseTable,
     ONJoin,
     JoinCondition,

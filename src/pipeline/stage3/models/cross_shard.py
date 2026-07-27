@@ -27,8 +27,11 @@ from typing import List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator
 
-from src.pipeline.stage3.models.condition_nodes import RExprUnion, RPredicate
 from src.pipeline.stage3.models.on_nodes import ONBaseTable, ONNode
+from src.util.constraint_model.condition.expressions import RExprUnion
+from src.util.constraint_model.condition.predicates import (
+    RPredicateUnion as RPredicate,
+)
 
 
 # ---------------------------------------------------------------------------

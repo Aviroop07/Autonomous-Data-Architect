@@ -8,7 +8,6 @@ one property; edge cases are explicit test methods, not parameterized.
 from __future__ import annotations
 
 import pytest
-import sqlglot
 
 from src.pipeline.stage3.models.on_nodes import (
     JoinCondition,

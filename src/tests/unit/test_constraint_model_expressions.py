@@ -104,3 +104,85 @@ class TestTypeClassification:
         assert is_categorical_eligible(DataType.BOOLEAN)
         assert not is_categorical_eligible(DataType.INTEGER)
         assert not is_categorical_eligible(DataType.FLOAT)
+
+
+# ---------------------------------------------------------------------------
+# Node-level structural validation and union round-tripping.
+#
+# Ported from the deleted test_stage3_condition_nodes.py, which covered the
+# duplicate copy of this taxonomy that used to live at
+# pipeline/stage3/models/condition_nodes.py. These cases exercise the nodes'
+# own _validate() and the discriminated union's serialize/deserialize
+# behaviour -- neither of which the type-inference tests above touch.
+# ---------------------------------------------------------------------------
+
+
+class TestNodeStructuralValidation:
+    def test_column_ref_rejects_empty_name(self):
+        assert RColumnRef(name="")._validate() != []
+
+    def test_column_ref_rejects_whitespace_only_name(self):
+        assert RColumnRef(name="   ")._validate() != []
+
+    def test_column_ref_accepts_normal_name(self):
+        assert RColumnRef(name="total")._validate() == []
+
+    def test_aggregate_ref_rejects_empty_alias(self):
+        assert RAggregateRef(alias="")._validate() != []
+
+    def test_aggregate_ref_accepts_normal_alias(self):
+        assert RAggregateRef(alias="avg_total")._validate() == []
+
+    def test_literal_always_valid(self):
+        for v in (1, 1.5, "x", True):
+            assert RLiteral(value=v)._validate() == []
+
+    def test_arithmetic_accepts_all_four_operators(self):
+        for op in ("+", "-", "*", "/"):
+            node = RArithmetic(
+                op=op, left=RColumnRef(name="a"), right=RColumnRef(name="b")
+            )
+            assert node._validate() == []
+
+    def test_arithmetic_propagates_child_errors(self):
+        node = RArithmetic(
+            op="+", left=RColumnRef(name=""), right=RColumnRef(name="b")
+        )
+        errors = node._validate()
+        assert any("RArithmetic.left" in e for e in errors)
+
+    def test_nested_arithmetic_validates_recursively(self):
+        inner = RArithmetic(op="*", left=RColumnRef(name=""), right=RLiteral(value=2))
+        outer = RArithmetic(op="+", left=inner, right=RLiteral(value=1))
+        assert outer._validate() != []
+
+
+class TestExpressionUnionRoundTrip:
+    def test_arithmetic_tree_survives_serialize_deserialize(self):
+        from pydantic import TypeAdapter
+
+        from src.util.constraint_model.condition.expressions import RExprUnion
+
+        original = RArithmetic(
+            op="*",
+            left=RColumnRef(name="price"),
+            right=RLiteral(value=3),
+        )
+        adapter = TypeAdapter(RExprUnion)
+        restored = adapter.validate_python(original.model_dump())
+        assert isinstance(restored, RArithmetic)
+        assert isinstance(restored.left, RColumnRef)
+        assert restored.left.name == "price"
+        assert isinstance(restored.right, RLiteral)
+        assert restored.right.value == 3
+
+    def test_node_type_discriminator_selects_the_right_class(self):
+        from pydantic import TypeAdapter
+
+        from src.util.constraint_model.condition.expressions import RExprUnion
+
+        adapter = TypeAdapter(RExprUnion)
+        assert isinstance(
+            adapter.validate_python({"node_type": "aggregate_ref", "alias": "n"}),
+            RAggregateRef,
+        )

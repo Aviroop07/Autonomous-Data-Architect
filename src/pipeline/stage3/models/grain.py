@@ -17,15 +17,13 @@ import logging
 from dataclasses import dataclass
 from typing import Dict, FrozenSet, Optional, Tuple, Union
 
-from src.pipeline.stage2.models.schema import Schema, Table, Column, ForeignKey
+from src.pipeline.stage2.models.schema import Schema, Table, ForeignKey
 from src.pipeline.stage3.models.on_nodes import (
     ONBaseTable,
     ONJoin,
     ONAggregate,
     ONFanout,
     ONNode,
-    JoinCondition,
-    _validate_on_node,
 )
 
 logger = logging.getLogger(__name__)

@@ -28,7 +28,7 @@ from typing import List, Optional, Tuple
 
 import networkx as nx
 
-from src.pipeline.stage3.models.condition_nodes import (
+from src.util.constraint_model.condition.expressions import (
     RArithmetic,
     RColumnRef,
     RExprUnion,

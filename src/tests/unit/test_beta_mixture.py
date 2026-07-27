@@ -6,7 +6,6 @@ backward-compat single-config fit, and the public API surface.
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from src.util.algorithms.beta_mixture import (
     _build_adaptive_grid,
@@ -18,7 +17,6 @@ from src.util.algorithms.beta_mixture import (
     compute_posterior_same,
     compute_merge_probability_matrix,
     compute_flag_posteriors,
-    MIN_OBS_FOR_MIXTURE,
     CLIP_EPS,
 )
 
