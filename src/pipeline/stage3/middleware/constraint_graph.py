@@ -23,8 +23,10 @@ from typing import Dict, List, Optional, Tuple
 from src.pipeline.stage2.models.schema import Schema
 from src.pipeline.stage3.middleware.cycles import detect_derived_cycles
 from src.pipeline.stage3.middleware.fork_registry import (
+    BranchCondition,
     ForkKey,
     ForkKeyRegistry,
+    Operator,
     Unresolved,
 )
 from src.pipeline.stage3.models import cross_shard
@@ -277,7 +279,9 @@ def _resolve_branch(
         return None
     if not isinstance(condition, RComparison):
         return None
-    if condition.op not in ("=", "==", "in"):
+    # RComparison.op is Literal["<", "<=", "=", "!=", ">=", ">"] -- this used
+    # to also test for "==" and "in", neither of which the type permits.
+    if condition.op != "=":
         return None
     if not isinstance(condition.left, RColumnRef):
         return None
@@ -295,14 +299,7 @@ def _resolve_branch(
     for fk, _cats in registry.forks.items():
         if fk.column_name == col_name:
             branch_vals = registry.get_branches_for_condition(
-                __import__(
-                    "src.pipeline.stage3.middleware.fork_registry",
-                    fromlist=["BranchCondition"],
-                ).BranchCondition(
-                    fork_key=fk,
-                    operator="EQ",
-                    values=[val],
-                )
+                BranchCondition(fork_key=fk, operator=Operator.EQ, values=[val])
             )
             if isinstance(branch_vals, Unresolved):
                 return None
@@ -759,11 +756,9 @@ def _build_fork_registry(
 
 def parse_if_condition_from_predicate(
     pred: RPredicate,
-) -> Optional:
+) -> Optional[BranchCondition]:
     """Parse an R-predicate into a BranchCondition for fork registry lookup.
     Handles RComparison EQ/IN against literal values."""
-    from src.pipeline.stage3.middleware.fork_registry import BranchCondition, Operator
-
     if isinstance(pred, RComparison):
         if not isinstance(pred.left, RColumnRef):
             return None

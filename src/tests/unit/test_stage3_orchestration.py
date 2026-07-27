@@ -1,4 +1,4 @@
-"""Tests for the deterministic control flow in the redesigned Stage 3
+﻿"""Tests for the deterministic control flow in the redesigned Stage 3
 orchestration (src/orchestration/stage3/entry.py): single-generator-loop
 per shard, global bridge+evaluate+schema-locality-grouping, and the
 per-constraint retry-counter reconciliation loop. LLM-calling boundaries
@@ -221,7 +221,7 @@ class TestReconcileAndApplyRouting:
             ),
         )
 
-        conflicts, dismissed, unsupported, tokens = await _reconcile_and_apply(
+        conflicts, dismissed, unsupported, tokens, _dof = await _reconcile_and_apply(
             [ss], schema, facts_map, {1: 0}, None, 5, 5, 3
         )
         assert conflicts == []
@@ -272,7 +272,7 @@ class TestReconcileAndApplyRouting:
             ),
         )
 
-        conflicts, dismissed, unsupported, tokens = await _reconcile_and_apply(
+        conflicts, dismissed, unsupported, tokens, _dof = await _reconcile_and_apply(
             [ss], schema, facts_map, {1: 0}, None, 5, 2, 3
         )
         assert len(conflicts) == 1
@@ -343,7 +343,7 @@ class TestReconcileAndApplyRouting:
 
         monkeypatch.setattr(stage3_entry, "_rerun_shard", fake_rerun_shard)
 
-        conflicts, dismissed, unsupported, tokens = await _reconcile_and_apply(
+        conflicts, dismissed, unsupported, tokens, _dof = await _reconcile_and_apply(
             [ss], schema, facts_map, {1: 0}, None, 5, 5, 3
         )
         assert len(rerun_calls) == 1
@@ -406,7 +406,7 @@ class TestReconcileAndApplyRouting:
 
         monkeypatch.setattr(stage3_entry, "_rerun_shard", fake_rerun_shard)
 
-        conflicts, dismissed, unsupported, tokens = await _reconcile_and_apply(
+        conflicts, dismissed, unsupported, tokens, _dof = await _reconcile_and_apply(
             [ss], schema, facts_map, {1: 0}, None, 5, 10, 2
         )
         # After max_constraint_retries=2 reconciler calls with no resolution,

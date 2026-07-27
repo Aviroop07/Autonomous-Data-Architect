@@ -678,12 +678,23 @@ async def _reconcile_and_apply(
     max_retries: int,
     max_rounds: int,
     max_constraint_retries: int,
-) -> Tuple[List[Conflict], List[DismissedConflict], List[str], int]:
+) -> Tuple[
+    List[Conflict], List[DismissedConflict], List[str], int, Stage3AnalysisReport
+]:
     """The whole Phase 2/3 loop: merge -> bridge -> evaluate -> group ->
     reconcile -> apply fixes -> repeat. Mutates shard_states[*].output in
-    place via MISEXTRACTION re-extraction. Returns (remaining unresolved
-    conflicts, dismissed conflicts, bridge/engine unsupported notes, total
-    tokens spent)."""
+    place via MISEXTRACTION re-extraction.
+
+    Returns (remaining unresolved conflicts, dismissed conflicts, bridge/engine
+    unsupported notes, total tokens spent, the final DOF report).
+
+    That last element exists so orchestrate() does not run
+    analyze_cross_shard_constraints() a second time on inputs this function has
+    already analyzed. It used to: once per reconciliation round here, then once
+    more in orchestrate(), so N+1 full DOF builds per run where the last two
+    were provably identical (the final snapshot below is computed after the
+    last possible mutation of shard_states). Only three fields of the report
+    are ever read."""
     total_tokens = 0
     retry_count: Dict[str, int] = {}
     dismissed: List[DismissedConflict] = []
@@ -906,13 +917,29 @@ async def _reconcile_and_apply(
         state_sequences=merged.state_sequences,
     )
     final_report = evaluate_constraints(bridged, analysis_schema)
+    # The DOF analysis of this same final snapshot -- returned to the caller
+    # rather than recomputed there. shard_states cannot change after this
+    # point, so orchestrate()'s copy would be identical by construction.
+    final_dof_report, _variable_fact_map = analyze_cross_shard_constraints(
+        distributions=merged.distributions,
+        structural=merged.structural,
+        logic=merged.logic,
+        derived=merged.derived,
+        schema=analysis_schema,
+    )
     dismissed_refs = {d.conflict_ref for d in dismissed}
     remaining_conflicts = [
         c for c in final_report.conflicts if _conflict_ref_for(c) not in dismissed_refs
     ]
     all_unsupported = bridge_unsupported + final_report.unsupported
 
-    return remaining_conflicts, dismissed, all_unsupported, total_tokens
+    return (
+        remaining_conflicts,
+        dismissed,
+        all_unsupported,
+        total_tokens,
+        final_dof_report,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1049,7 +1076,13 @@ async def orchestrate(
 
     fact_to_shard = {fid: ss.index for ss in shard_states for fid in ss.fact_ids}
 
-    conflicts, dismissed, unsupported, phase23_tokens = await _reconcile_and_apply(
+    (
+        conflicts,
+        dismissed,
+        unsupported,
+        phase23_tokens,
+        old_report,
+    ) = await _reconcile_and_apply(
         shard_states,
         schema,
         facts_map,
@@ -1075,14 +1108,9 @@ async def orchestrate(
     # square/loose/moment-target probes + cycles still come from the old,
     # cross_shard-native DOF pathway -- see module docstring for why this
     # stays alongside the new engine rather than being replaced by it.
+    # `old_report` is _reconcile_and_apply's own final snapshot, not a fresh
+    # analysis: shard_states is not mutated after it returns.
     merged = _merge_all(shard_states)
-    old_report, _variable_fact_map = analyze_cross_shard_constraints(
-        distributions=merged.distributions,
-        structural=merged.structural,
-        logic=merged.logic,
-        derived=merged.derived,
-        schema=schema,
-    )
     dismissed_cycle_refs = {d.conflict_ref for d in dismissed}
     remaining_cycles = [
         c
