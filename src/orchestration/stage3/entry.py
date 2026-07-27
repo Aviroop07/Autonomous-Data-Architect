@@ -73,6 +73,7 @@ from src.pipeline.stage3.models.probe import Stage3AnalysisReport
 from src.orchestration.stage3.context import _serialize_context
 from src.orchestration.stage3.extraction import (
     _build_generator_loop_config,
+    rounds_to_max_iter,
     _extract_generator_output,
 )
 from src.orchestration.stage3.reconciliation import _reconcile_and_apply
@@ -174,14 +175,22 @@ async def orchestrate(
         for i, (shard, allocation) in enumerate(zip(shards, allocations))
     ]
     # Reruns/reconciliation keep the prior hardcoded default (5) when the
-    # caller doesn't override -- unaffected by this session's Phase 1
-    # rescoping. Phase 1 gets its OWN, separately-scaled raw max_iter:
-    # a fixed constant (3) per shard when not overridden, never derived
-    # from or multiplied by shard count directly -- the num_shards*3
-    # "total budget" is simply what emerges from every shard starting at
-    # the same fixed constant, redistributable via run_parallel_loops().
+    # caller doesn't override. Phase 1 gets its own default round count,
+    # per shard, never derived from or multiplied by shard count directly --
+    # the total budget is simply what emerges from every shard starting at the
+    # same fixed constant, redistributable via run_parallel_loops().
+    #
+    # Expressed in ROUNDS and converted once, by rounds_to_max_iter(). This
+    # used to read `max_retries * 4 if ... else 3`, where the raw 3 was a
+    # per-node budget over a three-node graph: exactly one pass, so the
+    # det_checker->generator and auditor->generator edges could never fire and
+    # every validation error and audit finding was computed and then thrown
+    # away. Three rounds means one initial pass plus two genuine retries.
+    _DEFAULT_PHASE1_ROUNDS = 3
     resolved_rerun_max_retries = max_retries if max_retries is not None else 5
-    phase1_max_iter = max_retries * 4 if max_retries is not None else 3
+    phase1_max_iter = rounds_to_max_iter(
+        max_retries if max_retries is not None else _DEFAULT_PHASE1_ROUNDS
+    )
     phase1_specs = [
         ParallelLoopSpec(
             config=_build_generator_loop_config(phase1_max_iter, model),

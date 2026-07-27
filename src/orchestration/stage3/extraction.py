@@ -37,6 +37,26 @@ from typing import Dict, List
 logger = logging.getLogger(__name__)
 
 
+# AgentLoop's retry budget is consumed once per NODE EXECUTION, not once per
+# pass through the graph (see util/orchestration/loop.py's `while
+# budget.try_consume()`). The generator graph has three nodes, so one full
+# audited round -- generator, then det_checker, then auditor -- costs three
+# units. Converting rounds to raw iterations anywhere other than here is how
+# Phase 1 ended up with max_iter=3, which afforded exactly one pass and made
+# the det_checker->generator and auditor->generator retry edges unreachable:
+# validation errors and audit findings were computed, logged, then discarded.
+#
+# A test asserts this equals the real node count so it cannot drift if a node
+# is added to the graph.
+GENERATOR_GRAPH_NODE_COUNT = 3
+
+
+def rounds_to_max_iter(rounds: int) -> int:
+    """Convert "N full audited rounds" into the raw per-node iteration budget
+    AgentLoop actually counts. `rounds=1` means one pass and no retry."""
+    return max(1, rounds) * GENERATOR_GRAPH_NODE_COUNT
+
+
 def _build_generator_loop_config(max_iter: int, model: Optional[str]) -> LoopConfig:
     """Builds one shard's generator -> deterministic_checker -> auditor
     LoopConfig.
@@ -128,8 +148,8 @@ async def _run_generator_loop(
     scripts, and for shard reruns (_rerun_shard). Live Phase 1 extraction
     goes through run_parallel_loops() instead, with its own auto-scaled
     raw max_iter (see orchestrate()'s Phase 1 construction) rather than
-    this function's "N full audited rounds" (max_retries * 4) policy."""
-    config = _build_generator_loop_config(max_retries * 4, model)
+    this function's "N full audited rounds" policy."""
+    config = _build_generator_loop_config(rounds_to_max_iter(max_retries), model)
     result = await AgentLoop(config).run(context_str)
     return _extract_generator_output(result)
 

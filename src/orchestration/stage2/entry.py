@@ -48,10 +48,32 @@ def _compute_uncovered_facts(
 
 
 def apply_adjudicator_patches(cm: ConceptualModel, patches: List) -> ConceptualModel:
+    """Apply the adjudicator's resolutions to a copy of the conceptual model.
+
+    Every patch is checked against ResolutionAction._validate() before it is
+    applied, and an invalid one is skipped with a warning rather than being let
+    through. That validator already existed but was never called anywhere in
+    orchestration, so an action missing an optional-by-typing but
+    required-in-practice field went straight into the model: the common case
+    was MERGE_ENTITIES without `new_name`, which assigned None onto
+    `entity.name` and surfaced much later as an AttributeError inside the
+    relational mapper's to_snake_case, with nothing left to point at the
+    adjudicator. Omitting an optional field is routine LLM behaviour, and this
+    agent is single-shot with no retry loop, so it has to degrade rather than
+    fail.
+    """
     import copy
 
     new_cm = copy.deepcopy(cm)
     for p in patches:
+        errors = p._validate()
+        if errors:
+            logger.warning(
+                "  [Stage 2] Skipping malformed adjudicator patch %s: %s",
+                getattr(p.action_type, "value", p.action_type),
+                "; ".join(errors),
+            )
+            continue
         if p.action_type == ActionType.MERGE_ENTITIES:
             ea = next((e for e in new_cm.entities if e.name == p.entity_a), None)
             eb = next((e for e in new_cm.entities if e.name == p.entity_b), None)

@@ -38,6 +38,18 @@ class AgentLoop:
     Fully offline-testable: inject stub LoopAgent instances via agent_factory.
     """
 
+    # A node invocation that raises (provider error, malformed response the
+    # parser could not coerce, a TypeError escaping model construction) is
+    # treated as a FAILED ITERATION rather than a fatal error: the loop already
+    # exists to retry, and an exception is just a harsher validation failure.
+    # Without this, one transient provider hiccup discarded every token the loop
+    # had already spent.
+    #
+    # The consecutive cap distinguishes "flaky" from "down". Retrying the same
+    # node against a provider that is hard-down would otherwise burn the whole
+    # retry budget to reach the same place, only slower.
+    _MAX_CONSECUTIVE_INVOKE_FAILURES = 3
+
     def __init__(
         self,
         config: LoopConfig,
@@ -78,6 +90,7 @@ class AgentLoop:
         final_node: str = current_node
 
         iteration = 0
+        consecutive_invoke_failures = 0
         while budget.try_consume():
             iteration += 1
             state.iteration = iteration
@@ -101,7 +114,46 @@ class AgentLoop:
 
             # 2. Invoke.
             prior_output = state.node_outputs.get(current_node)
-            output, tokens = await agent.invoke(query)
+            try:
+                output, tokens = await agent.invoke(query)
+            except Exception as exc:
+                consecutive_invoke_failures += 1
+                logger.warning(
+                    "[AgentLoop] node '%s' raised on iteration %d (%d consecutive): "
+                    "%s: %s -- treating as a failed iteration and retrying.",
+                    current_node,
+                    iteration,
+                    consecutive_invoke_failures,
+                    type(exc).__name__,
+                    exc,
+                )
+                if consecutive_invoke_failures >= self._MAX_CONSECUTIVE_INVOKE_FAILURES:
+                    if final_output is None:
+                        # Nothing was ever produced, so there is no partial
+                        # result to salvage. Re-raise, because the caller's
+                        # failure contract depends on it: run_parallel_loops
+                        # maps an exception to None for that loop, and None is
+                        # how every downstream consumer detects a dead shard.
+                        # Swallowing it here would instead hand them a
+                        # LoopResult whose final_output is None -- a shape they
+                        # do not check for.
+                        logger.error(
+                            "[AgentLoop] node '%s' failed %d times in a row and never "
+                            "produced output; giving up on this loop.",
+                            current_node,
+                            consecutive_invoke_failures,
+                        )
+                        raise
+                    logger.error(
+                        "[AgentLoop] node '%s' failed %d times in a row; stopping and "
+                        "keeping the last good output, from '%s'.",
+                        current_node,
+                        consecutive_invoke_failures,
+                        final_node,
+                    )
+                    break
+                continue
+            consecutive_invoke_failures = 0
             state.total_tokens += tokens
             state.tokens_by_node[current_node] = (
                 state.tokens_by_node.get(current_node, 0) + tokens

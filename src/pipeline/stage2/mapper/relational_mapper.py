@@ -1,4 +1,5 @@
-from typing import Dict, List, Set
+import logging
+from typing import Dict, List, Optional, Set
 from src.pipeline.stage2.models.schema import (
     Column,
     CompositeUnique,
@@ -10,6 +11,37 @@ from src.pipeline.stage2.models.schema import (
 )
 from src.pipeline.stage2.mapper.conceptual_model import ConceptualModel, Relationship
 from src.pipeline.stage2.models.data_types import DataType
+
+logger = logging.getLogger(__name__)
+
+
+def _resolve_pk_column(
+    columns: List[Column], pk_name: str, *, table_name: str, purpose: str
+) -> Optional[Column]:
+    """Find a primary-key column by name, or return None with a warning.
+
+    Five call sites used a bare `next((c for c in ... if c.name == pk_c))` with
+    no default, each relying on the invariant that every name in a table's
+    primary_key also appears in its columns. That invariant is real at column
+    creation time but is broken later by the weak-entity pass and by
+    adjudicator-driven identifier rewrites, and when it broke the failure was a
+    bare StopIteration from deep inside the mapper with no indication of which
+    table or key was at fault.
+
+    Returning None rather than synthesising a column is deliberate: a foreign
+    key pointing at a primary key that does not exist would produce a schema
+    that fails its own validation, so the caller skips that key instead.
+    """
+    column = next((c for c in columns if c.name == pk_name), None)
+    if column is None:
+        logger.warning(
+            "  [Mapper] Table '%s' declares primary-key column '%s' which is not "
+            "among its columns; skipping %s that depends on it.",
+            table_name,
+            pk_name,
+            purpose,
+        )
+    return column
 
 
 def looks_singular_noun(name: str) -> bool:
@@ -219,7 +251,11 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                 mva_pk_cols = [surrogate]
 
             for pk_c in pk_cols:
-                parent_col = next((c for c in columns if c.name == pk_c))
+                parent_col = _resolve_pk_column(
+                    columns, pk_c, table_name=t_name, purpose="a multi-valued-attribute table"
+                )
+                if parent_col is None:
+                    continue
                 mva_cols.append(
                     Column(
                         name=pk_c,
@@ -254,7 +290,14 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
             if owner_t and child_t:
                 for pk_c in owner_t.primary_key:
                     if not any(c.name == pk_c for c in child_t.columns):
-                        owner_col = next((c for c in owner_t.columns if c.name == pk_c))
+                        owner_col = _resolve_pk_column(
+                            owner_t.columns,
+                            pk_c,
+                            table_name=owner_t.name,
+                            purpose="a weak-entity identifying key",
+                        )
+                        if owner_col is None:
+                            continue
                         child_t.columns.append(
                             Column(
                                 name=pk_c,
@@ -316,7 +359,11 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
 
                 for pk_c in p_t.primary_key:
                     fk_col_name = f"{role_prefix}{pk_c}"
-                    parent_col = next((c for c in p_t.columns if c.name == pk_c))
+                    parent_col = _resolve_pk_column(
+                        p_t.columns, pk_c, table_name=p_t.name, purpose="a junction-table FK"
+                    )
+                    if parent_col is None:
+                        continue
 
                     if not any(c.name == fk_col_name for c in columns):
                         columns.append(
@@ -382,7 +429,14 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                 fk_is_nullable = child_p.cardinality_min == 0
                 for pk_c in parent_t.primary_key:
                     fk_col_name = f"{role_prefix}{pk_c}"
-                    parent_col = next((c for c in parent_t.columns if c.name == pk_c))
+                    parent_col = _resolve_pk_column(
+                        parent_t.columns,
+                        pk_c,
+                        table_name=parent_t.name,
+                        purpose="a foreign key",
+                    )
+                    if parent_col is None:
+                        continue
                     if not any(c.name == fk_col_name for c in child_t.columns):
                         child_t.columns.append(
                             Column(
@@ -444,7 +498,14 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                         )
                         fk_col_name = f"{role_prefix}{pk_c}"
 
-                    parent_col = next((c for c in parent_t.columns if c.name == pk_c))
+                    parent_col = _resolve_pk_column(
+                        parent_t.columns,
+                        pk_c,
+                        table_name=parent_t.name,
+                        purpose="a foreign key",
+                    )
+                    if parent_col is None:
+                        continue
                     if not any(c.name == fk_col_name for c in child_t.columns):
                         child_t.columns.append(
                             Column(

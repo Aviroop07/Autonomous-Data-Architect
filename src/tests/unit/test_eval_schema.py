@@ -152,3 +152,96 @@ def test_f1_acc_is_one_only_when_f1_is_one(evaluator):
     f1, acc = evaluator.calculate_f1(pred, gt, lambda p, g: p == g)
     assert f1 < 1.0
     assert acc == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# max_bipartite_matching -- determinism and optimality
+#
+# calculate_f1 used to scan greedily for the FIRST match while iterating Python
+# sets. That was order-dependent, and because str hashing is randomised per
+# process the reported F1 changed between runs on identical input: measured at
+# 0.50 on 9 of 20 PYTHONHASHSEED values and 1.00 on the other 11.
+# --------------------------------------------------------------------------- #
+
+
+# `interest_rate` matches both ground-truth names; `rate` matches only one of
+# them. Greedy strands `rate` whenever `interest_rate` is visited first. These
+# are real names from dataset/handcrafted with the real matcher's verdicts.
+_BLOCKING = {
+    ("interest_rate", "interest_rate"),
+    ("interest_rate", "loan_amount"),
+    ("rate", "interest_rate"),
+}
+
+
+def _blocking_match(p, g):
+    return (p, g) in _BLOCKING
+
+
+def test_matching_is_independent_of_input_order():
+    import itertools
+
+    from src.evaluation.schema_level.schema_eval import max_bipartite_matching
+
+    sizes = set()
+    for pred in itertools.permutations(["interest_rate", "rate"]):
+        for gt in itertools.permutations(["interest_rate", "loan_amount"]):
+            sizes.add(len(max_bipartite_matching(pred, gt, _blocking_match)))
+    assert sizes == {2}, f"order-dependent: got {sizes}"
+
+
+def test_matching_finds_the_maximum_not_merely_a_maximal_matching():
+    """Greedy returns 1 here whenever it visits `interest_rate` first; the
+    maximum matching is 2."""
+    from src.evaluation.schema_level.schema_eval import max_bipartite_matching
+
+    m = max_bipartite_matching(
+        ["interest_rate", "rate"], ["interest_rate", "loan_amount"], _blocking_match
+    )
+    assert len(m) == 2
+
+
+def test_f1_is_order_independent_through_calculate_f1(evaluator):
+    f1_a, _ = evaluator.calculate_f1(
+        {"interest_rate", "rate"}, {"interest_rate", "loan_amount"}, _blocking_match
+    )
+    f1_b, _ = evaluator.calculate_f1(
+        {"rate", "interest_rate"}, {"loan_amount", "interest_rate"}, _blocking_match
+    )
+    assert f1_a == f1_b == pytest.approx(1.0)
+
+
+def test_matching_handles_thousands_of_names_without_recursion_error():
+    """The textbook recursive Kuhn's would blow the stack well before this.
+    A chain where each pred matches its own gt and the next one is the worst
+    case for augmenting-path depth."""
+    from src.evaluation.schema_level.schema_eval import max_bipartite_matching
+
+    n = 3000
+    names = [f"c{i:05d}" for i in range(n)]
+    allowed = {(names[i], names[i]) for i in range(n)}
+    allowed |= {(names[i], names[i + 1]) for i in range(n - 1)}
+    m = max_bipartite_matching(names, names, lambda p, g: (p, g) in allowed)
+    assert len(m) == n
+
+
+def test_matching_degenerate_ends():
+    from src.evaluation.schema_level.schema_eval import max_bipartite_matching
+
+    eq = lambda p, g: p == g  # noqa: E731
+    assert max_bipartite_matching([], [], eq) == {}
+    assert max_bipartite_matching([], ["a"], eq) == {}
+    assert max_bipartite_matching(["a"], [], eq) == {}
+    assert max_bipartite_matching(["a"], ["a"], eq) == {"a": "a"}
+
+
+def test_no_pred_name_is_matched_to_two_gt_names():
+    """A matching, not a covering: one prediction cannot satisfy two
+    ground-truth columns even when it is similar to both."""
+    from src.evaluation.schema_level.schema_eval import max_bipartite_matching
+
+    m = max_bipartite_matching(
+        ["interest_rate"], ["interest_rate", "loan_amount"], _blocking_match
+    )
+    assert len(m) == 1
+    assert len(set(m.values())) == 1
