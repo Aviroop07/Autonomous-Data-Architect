@@ -1,7 +1,10 @@
+import logging
 from enum import Enum
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import List, Optional
 from src.util.orchestration.loop_types import LoopOutputModel
+
+logger = logging.getLogger(__name__)
 
 
 class Severity(str, Enum):
@@ -45,18 +48,56 @@ class IntegrityReport(LoopOutputModel):
         description="Suggested web searches to gather missing domain context or resolve ambiguities.",
     )
 
+    @model_validator(mode="after")
+    def _is_safe_must_agree_with_the_issues(self) -> "IntegrityReport":
+        """Recompute is_safe from the issue lists instead of trusting the field.
+
+        is_safe drives the retry edge out of the verifier, and get_errors()
+        surfaces only HIGH and CRITICAL issues as feedback text. Those two facts
+        have to agree, or the loop misbehaves in one of two ways:
+
+          is_safe=False with no HIGH/CRITICAL issue -> the extractor is re-run
+            with an EMPTY error list, told to fix something it cannot see, and
+            the loop can burn its whole budget that way.
+          is_safe=True alongside a HIGH issue -> a real defect is reported and
+            then routed straight past.
+
+        The prompt states the invariant, but a prompt cannot enforce one. This
+        makes it structural: the field becomes derived rather than asserted, so
+        the loop's routing and the feedback it carries can never disagree.
+        """
+        should_be_safe = not self._blocking_issues()
+        if self.is_safe != should_be_safe:
+            logger.warning(
+                "[Verifier] is_safe=%s contradicts the reported issues "
+                "(%d blocking); correcting to %s.",
+                self.is_safe,
+                len(self._blocking_issues()),
+                should_be_safe,
+            )
+            self.is_safe = should_be_safe
+        return self
+
+    def _blocking_issues(self) -> list[Issue]:
+        """Issues severe enough to justify spending another extraction round.
+        This is the single definition of "blocking" -- get_errors() formats
+        exactly these, and is_safe is exactly their absence."""
+        return [
+            issue
+            for issue in (
+                self.missing_information
+                + self.introduced_information
+                + self.changed_constraints
+                + self.unresolved_ambiguities
+            )
+            if issue.severity in (Severity.HIGH, Severity.CRITICAL)
+        ]
+
     def get_errors(self) -> list[str]:
-        all_issues = (
-            self.missing_information
-            + self.introduced_information
-            + self.changed_constraints
-            + self.unresolved_ambiguities
-        )
         errors = []
-        for issue in all_issues:
-            if issue.severity in (Severity.HIGH, Severity.CRITICAL):
-                f_id = f" (Fact {issue.fact_id})" if issue.fact_id else ""
-                errors.append(f"[{issue.severity.upper()}] {issue.description}{f_id}")
+        for issue in self._blocking_issues():
+            f_id = f" (Fact {issue.fact_id})" if issue.fact_id else ""
+            errors.append(f"[{issue.severity.upper()}] {issue.description}{f_id}")
         return errors
 
     def __str__(self) -> str:

@@ -63,7 +63,10 @@ class FactList(LoopOutputModel):
 class TaggedFact(BaseModel):
     id: int = Field(description="Original fact identifier.")
     tags: List[str] = Field(
-        description="List of applied semantic tags (e.g., RELATIONAL, LOGICAL)."
+        description=(
+            "Applied semantic tags. Each entry must be one of: "
+            "STRUCTURAL, LOGICAL, STATISTICAL, METADATA."
+        )
     )
 
 

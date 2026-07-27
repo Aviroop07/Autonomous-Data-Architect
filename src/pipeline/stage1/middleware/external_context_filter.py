@@ -67,7 +67,13 @@ def filter_external_facts(
         # back to deterministic classification only when it left the field empty.
         kind = fact.external_kind or classify_external_fact(fact)
         fact.external_kind = kind
-        fact.novelty_reason = (
+        # Same single-source-of-truth rule as external_kind directly above: keep
+        # what the enricher wrote and fall back only when it left the field
+        # empty. This used to overwrite unconditionally, so the model's own
+        # justification for why a fact was non-redundant was discarded before
+        # any consumer saw it, and every accepted fact of a given kind carried
+        # the identical canned sentence.
+        fact.novelty_reason = fact.novelty_reason or (
             _novelty_reason(kind)
             if kind
             else "Accepted by context auditor and passed deterministic reference checks."
