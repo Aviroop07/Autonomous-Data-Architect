@@ -5,9 +5,9 @@ Layout:
   src/tests/integration/  LIVE - call the real OpenAI API (marked `integration`)
   src/tests/fixtures/      reusable sample-data builders (importable, not tests)
 
-Integration tests are auto-skipped unless OPENAI_API_KEY is set, so a plain
-`pytest` run stays offline and green. Run live tests explicitly with:
-    pytest -m integration
+Integration tests require an EXPLICIT opt-in (`pytest --live`), so a plain
+`pytest` run always stays offline and green:
+    pytest --live -m integration
 """
 
 from __future__ import annotations
@@ -20,19 +20,63 @@ from src.tests.fixtures import sample_data
 
 
 # --------------------------------------------------------------------------- #
-# Skip live integration tests when no API key is available
+# Live integration tests are opt-IN, never opt-out
 # --------------------------------------------------------------------------- #
+#
+# This used to gate purely on `os.environ.get("OPENAI_API_KEY")`: if a key was
+# present, the live tests ran. That is the wrong default and it silently
+# misfired -- on a developer machine that exports OPENAI_API_KEY (the normal
+# case here), a bare `pytest` ran 15 tests against the real provider API and
+# the real DuckDuckGo endpoint, spending money and hanging on the network,
+# while the docstring above promised "a plain pytest run stays offline".
+#
+# Having a key is not consent to spend it. The gate is now an explicit `--live`
+# flag. A marker expression is deliberately NOT used as the opt-in signal --
+# `-m "not integration"` contains the substring "integration", so keying off
+# `-m` would mean the very expression meant to EXCLUDE these tests could be
+# read as selecting them.
+
+_PROVIDER_KEY_ENV_VARS = (
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "GROQ_API_KEY",
+    "CEREBRAS_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "VLLM_BASE_URL",
+)
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--live",
+        action="store_true",
+        default=False,
+        help=(
+            "Run tests marked `integration` against real provider APIs. These "
+            "cost money and hit the network; without this flag they are skipped."
+        ),
+    )
 
 
 def pytest_collection_modifyitems(config, items):
-    if os.environ.get("OPENAI_API_KEY"):
+    if not config.getoption("--live"):
+        skip = pytest.mark.skip(
+            reason="live test - pass --live to opt in (real API calls, costs money)"
+        )
+    elif not any(os.environ.get(v) for v in _PROVIDER_KEY_ENV_VARS):
+        skip = pytest.mark.skip(
+            reason=(
+                "--live given but no provider key set (one of: "
+                + ", ".join(_PROVIDER_KEY_ENV_VARS)
+                + ")"
+            )
+        )
+    else:
         return
-    skip_live = pytest.mark.skip(
-        reason="OPENAI_API_KEY not set - skipping live integration test"
-    )
     for item in items:
         if "integration" in item.keywords:
-            item.add_marker(skip_live)
+            item.add_marker(skip)
 
 
 # --------------------------------------------------------------------------- #
