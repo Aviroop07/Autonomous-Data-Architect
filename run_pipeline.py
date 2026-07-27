@@ -1,4 +1,14 @@
 import asyncio
+import warnings
+import logging
+
+# Suppress pydantic warnings
+warnings.filterwarnings("ignore")
+
+# Configure global logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(name)s] %(message)s')
+logger = logging.getLogger("run_pipeline")
+
 from src.orchestration.stage1.entry import orchestrate as stage1_orchestrate
 from src.orchestration.stage2.entry import orchestrate as stage2_orchestrate
 from src.util.config.ablation import AblationConfig
@@ -17,32 +27,32 @@ A procedure requires multiple pieces of Equipment. Equipment has an asset tag, t
 
 
 async def run():
-    print("==================================================")
-    print("--- STARTING STAGE 1 (Fact Extraction) ---")
-    print("==================================================")
+    logger.info("==================================================")
+    logger.info("--- STARTING STAGE 1 (Fact Extraction) ---")
+    logger.info("==================================================")
 
     # We use ablation_config to enable everything normally
     s1_out, s1_tokens = await stage1_orchestrate(nl_description=COMPLEX_NL)
 
-    print(f"\n[Stage 1 Tokens]: {s1_tokens}")
-    print(f"[Extracted Facts]: {len(s1_out.final_facts)}")
+    logger.info(f"\n[Stage 1 Tokens]: {s1_tokens}")
+    logger.info(f"[Extracted Facts]: {len(s1_out.final_facts)}")
     for f in s1_out.final_facts:
         seg = (
             f' | seg=[{f.start_char}:{f.end_char}] "{f.segment_text[:40]}"'
             if f.segment_text
             else " | (standalone)"
         )
-        print(f"  [{f.id}] {f.fact} (Tags: {[t.value for t in f.tags]}){seg}")
+        logger.info(f"  [{f.id}] {f.fact} (Tags: {[t.value for t in f.tags]}){seg}")
 
-    print("\n==================================================")
-    print(f"--- FACT CLUSTERS (graph chunker): {len(s1_out.plan.chunks)} chunks ---")
-    print("==================================================")
+    logger.info("\n==================================================")
+    logger.info(f"--- FACT CLUSTERS (graph chunker): {len(s1_out.plan.chunks)} chunks ---")
+    logger.info("==================================================")
     for i, chunk in enumerate(s1_out.plan.chunks, 1):
-        print(f"  CHUNK {i} ({len(chunk)} facts): ids={sorted(cf.id for cf in chunk)}")
+        logger.info(f"  CHUNK {i} ({len(chunk)} facts): ids={sorted(cf.id for cf in chunk)}")
 
-    print("\n==================================================")
-    print("--- STARTING STAGE 2 (Schema Generation) ---")
-    print("==================================================")
+    logger.info("\n==================================================")
+    logger.info("--- STARTING STAGE 2 (Schema Generation) ---")
+    logger.info("==================================================")
 
     s2_out, s2_tokens, registry = await stage2_orchestrate(
         plan=s1_out.plan,
@@ -53,44 +63,45 @@ async def run():
         ablation_config=AblationConfig.full(),
     )
 
-    print("\n==================================================")
-    print(f"--- ER SHARDS (per-chunk schemas): {len(s2_out.segments)} shards ---")
-    print("==================================================")
+    logger.info("\n==================================================")
+    logger.info(f"--- ER SHARDS (per-chunk schemas): {len(s2_out.segments)} shards ---")
+    logger.info("==================================================")
     for i, shard in enumerate(s2_out.segments, 1):
         tbls = ", ".join(t.name for t in shard.tables)
-        print(f"  SHARD {i}: {len(shard.tables)} tables -> {tbls}")
+        logger.info(f"  SHARD {i}: {len(shard.tables)} tables -> {tbls}")
 
-    print(f"\n[Stage 2 Tokens]: {s2_tokens}")
+    logger.info(f"\n[Stage 2 Tokens]: {s2_tokens}")
 
-    print("\n==================================================")
-    print("--- FINAL RELATIONAL SCHEMA ---")
-    print("==================================================")
+    logger.info("\n==================================================")
+    logger.info("--- FINAL RELATIONAL SCHEMA ---")
+    logger.info("==================================================")
     final_schema = s2_out.final_global_schema
-    print(
+    logger.info(
         final_schema.model_dump_json(indent=2)
         if final_schema
         else "(no schema produced)"
     )
 
-    print("\n==================================================")
-    print("--- TABLE FACT REGISTRY (Provenance) ---")
-    print("==================================================")
+    logger.info("\n==================================================")
+    logger.info("--- TABLE FACT REGISTRY (Provenance) ---")
+    logger.info("==================================================")
     for table_name, fact_ids in registry.table_to_facts.items():
-        print(f"  {table_name}: {fact_ids}")
+        logger.info(f"  {table_name}: {fact_ids}")
 
-    print("\n==================================================")
-    print("--- UNCOVERED FACTS ---")
-    print("==================================================")
-    print(s2_out.uncovered_fact_ids)
+    logger.info("\n==================================================")
+    logger.info("--- UNCOVERED FACTS ---")
+    logger.info("==================================================")
+    logger.info(s2_out.uncovered_fact_ids)
 
-    print("\n==================================================")
-    print("--- COMPLIANCE CERTIFIER REPORT ---")
-    print("==================================================")
+    logger.info("\n==================================================")
+    logger.info("--- COMPLIANCE CERTIFIER REPORT ---")
+    logger.info("==================================================")
     cert_patches = s2_out.cert_report.patches if s2_out.cert_report else []
-    print(f"Patches applied: {len(cert_patches)}")
+    logger.info(f"Patches applied: {len(cert_patches)}")
     for p in cert_patches:
         reason = getattr(p, "reason", None) or getattr(p, "action", type(p).__name__)
-        print(f"  - {reason}")
+        action = getattr(p, "action", type(p).__name__)
+        logger.info(f"  - [{action}] {reason}")
 
 
 if __name__ == "__main__":

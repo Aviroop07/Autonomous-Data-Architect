@@ -1,22 +1,28 @@
-import asyncio
-from typing import Optional, Tuple, List
+import logging
+from pathlib import Path
+from typing import Optional, Tuple, List, Dict
+
+import networkx as nx
+
+from src.util.observability.artifact_dump import dump_artifact
 from src.orchestration.stage2.models import Output
 from src.pipeline.stage2.models.schema import Schema
 from src.pipeline.stage2.models.chunk import ChunkedPlan
 from src.pipeline.stage1.models.rephrased_nl import AtomicFact
 from src.pipeline.stage1.models.atomic_fact import FactTag
 from src.orchestration.stage2.utils import (
-    run_conceptual_extractor_loop,
+    run_er_extractor_loop,
 )
-from src.util.schema_ops.graph_chunker import run_graph_chunker
+from src.util.orchestration.parallel_loop import run_parallel
 
 from src.pipeline.stage2.agents.compliance_certifier.agent import certify_compliance
 from src.pipeline.stage2.mapper.conceptual_model import ConceptualModel
 from src.pipeline.stage2.mapper.relational_mapper import map_conceptual_to_relational
 from src.pipeline.stage2.models.registry import TableFactRegistry
-from src.util.schema_ops.schema_patch import CritiqueReport
-from src.util.schema_ops.patching_engine import apply_patches
 from src.util.config.ablation import AblationConfig
+from src.pipeline.stage2.models.conflicts import ActionType, ConflictFlag
+
+logger = logging.getLogger(__name__)
 
 _REQUIRED_FACT_TAGS = {FactTag.STRUCTURAL, FactTag.LOGICAL, FactTag.STATISTICAL}
 
@@ -34,11 +40,112 @@ def _compute_uncovered_facts(
         covered.update(registry.get_facts_for_tables([table.name]))
     uncovered = sorted(required_ids - covered)
     if uncovered:
-        print(
+        logger.warning(
             f"  [Stage 2] WARNING: {len(uncovered)} required facts not represented "
             f"in final schema: {uncovered}"
         )
     return uncovered
+
+
+def apply_adjudicator_patches(cm: ConceptualModel, patches: List) -> ConceptualModel:
+    import copy
+
+    new_cm = copy.deepcopy(cm)
+    for p in patches:
+        if p.action_type == ActionType.MERGE_ENTITIES:
+            ea = next((e for e in new_cm.entities if e.name == p.entity_a), None)
+            eb = next((e for e in new_cm.entities if e.name == p.entity_b), None)
+            if ea and eb:
+                ea.name = p.new_name
+                existing = {a.name for a in ea.attributes}
+                for a in eb.attributes:
+                    if a.name not in existing:
+                        ea.attributes.append(a)
+                        existing.add(a.name)
+                ea.source_fact_ids.extend(eb.source_fact_ids)
+                ea.source_fact_ids = list(set(ea.source_fact_ids))
+                new_cm.entities.remove(eb)
+                for r in new_cm.relationships:
+                    for part in r.participants:
+                        if part.entity in [p.entity_a, p.entity_b]:
+                            part.entity = p.new_name
+            else:
+                logger.warning(
+                    f"MERGE_ENTITIES patch: could not find entities '{p.entity_a}' or '{p.entity_b}' in model"
+                )
+        elif p.action_type == ActionType.RENAME_ATTRIBUTE:
+            ea = next((e for e in new_cm.entities if e.name == p.entity_a), None)
+            if ea:
+                found = False
+                for a in ea.attributes:
+                    if a.name == p.attribute_old:
+                        a.name = p.new_name
+                        found = True
+                if not found:
+                    logger.warning(
+                        f"RENAME_ATTRIBUTE patch: attribute '{p.attribute_old}' not found on entity '{p.entity_a}'"
+                    )
+            else:
+                logger.warning(
+                    f"RENAME_ATTRIBUTE patch: entity '{p.entity_a}' not found in model"
+                )
+        elif p.action_type == ActionType.RESOLVE_CARDINALITY:
+            ra = next(
+                (r for r in new_cm.relationships if r.name == p.relationship_name), None
+            )
+            if ra:
+                ra.kind = p.new_cardinality
+            else:
+                logger.warning(
+                    f"RESOLVE_CARDINALITY patch: relationship '{p.relationship_name}' not found in model"
+                )
+        elif p.action_type == ActionType.RESOLVE_CROSS_CATEGORY:
+            ea = next((e for e in new_cm.entities if e.name == p.entity_a), None)
+            ra = next(
+                (r for r in new_cm.relationships if r.name == p.relationship_name), None
+            )
+            if ea and ra:
+                new_cm.relationships.remove(ra)
+                logger.info(
+                    f"RESOLVE_CROSS_CATEGORY: removed relationship '{p.relationship_name}' (merged into entity '{p.entity_a}')"
+                )
+            elif ea and not ra:
+                logger.warning(
+                    f"RESOLVE_CROSS_CATEGORY: relationship '{p.relationship_name}' not found for entity '{p.entity_a}'"
+                )
+            else:
+                logger.warning(
+                    f"RESOLVE_CROSS_CATEGORY: entity '{p.entity_a}' not found for relationship '{p.relationship_name}'"
+                )
+        elif p.action_type == ActionType.RESOLVE_IDENTIFIER:
+            ea = next((e for e in new_cm.entities if e.name == p.entity_a), None)
+            if ea:
+                ea.identifier_attributes = p.new_identifier_attributes
+                logger.info(
+                    f"RESOLVE_IDENTIFIER: entity '{p.entity_a}' identifiers set to {p.new_identifier_attributes}"
+                )
+            else:
+                logger.warning(
+                    f"RESOLVE_IDENTIFIER patch: entity '{p.entity_a}' not found in model"
+                )
+    return new_cm
+
+
+def _build_conflict_graph(
+    flags: List[ConflictFlag],
+) -> Tuple[nx.Graph, Dict[str, List[ConflictFlag]]]:
+    G = nx.Graph()
+    flag_map: Dict[str, List[ConflictFlag]] = {}
+    for flag in flags:
+        for e_name in flag.entities:
+            G.add_node(e_name)
+            if e_name not in flag_map:
+                flag_map[e_name] = []
+            flag_map[e_name].append(flag)
+        for i in range(len(flag.entities)):
+            for j in range(i + 1, len(flag.entities)):
+                G.add_edge(flag.entities[i], flag.entities[j])
+    return G, flag_map
 
 
 async def orchestrate(
@@ -51,50 +158,162 @@ async def orchestrate(
     ablation_config: Optional[AblationConfig] = None,
     enable_audit: bool = True,
     nl_query: str = "",
+    artifact_dir: Optional[Path] = None,
 ) -> Tuple[Output, int, TableFactRegistry]:
     total_tokens = 0
     registry = TableFactRegistry()
 
     if ablation_config is not None and not ablation_config.enable_sharding:
-        print("[Stage 2] Sharding disabled — treating all facts as a single chunk.")
+        logger.info(
+            "[Stage 2] Sharding disabled. Treating all facts as a single chunk."
+        )
         plan = ChunkedPlan(core_modeling_facts=facts, chunks=[facts])
 
-    print(
+    logger.info(
         f"[Stage 2] Generating {len(plan.chunks)} conceptual model shards in parallel..."
     )
     tasks = [
-        run_conceptual_extractor_loop(
+        run_er_extractor_loop(
             facts=cluster, nl_query=nl_query, max_retries=retry_count, model=model
         )
         for cluster in plan.chunks
     ]
-    results = await asyncio.gather(*tasks)
+    results = await run_parallel(
+        tasks, labels=[f"chunk-{i}" for i in range(len(tasks))]
+    )
 
     conceptual_models: List[ConceptualModel] = []
-    initial_fix_histories = []
 
-    for i, (cm, fix_hist, t_gen) in enumerate(results):
+    for i, result in enumerate(results):
+        if result is None:
+            logger.warning(
+                f"[Stage 2] shard {i + 1} ER-extraction failed entirely (isolated -- "
+                f"siblings unaffected) -- treated as an empty conceptual model rather "
+                f"than crashing the whole run."
+            )
+            result = (
+                ConceptualModel(
+                    entities=[], relationships=[], functional_dependencies=[]
+                ),
+                [],
+                0,
+            )
+        cm, fix_hist, t_gen = result
         total_tokens += t_gen
         conceptual_models.append(cm)
-        initial_fix_histories.append(fix_hist)
+        logger.info(
+            f"[Stage 2] Shard {i + 1} completed. Entities: {len(cm.entities)}, Rels: {len(cm.relationships)}"
+        )
 
-    print(
-        "[Stage 2] Merging conceptual shards via Gale-Shapley deterministic merger..."
-    )
-    from src.pipeline.stage2.middleware.conceptual_merger import merge_shards
+    dump_artifact(artifact_dir, "01_shard_conceptual_models", conceptual_models)
+
+    logger.info("[Stage 2] Global Merging via Multi-Verse Correlation Clustering...")
+    from src.pipeline.stage2.middleware.conceptual_merger import merge_all_shards
 
     if not conceptual_models:
         raise ValueError("No conceptual models generated.")
 
-    combined_cm = conceptual_models[0]
-    for cm in conceptual_models[1:]:
-        combined_cm = await merge_shards(
-            combined_cm, cm, domain, analytical_goal, facts, model=model
+    combined_cm, flags = merge_all_shards(conceptual_models, facts)
+    logger.info(
+        f"[Stage 2] Multi-Verse Merging completed. Total entities: {len(combined_cm.entities)}"
+    )
+    dump_artifact(artifact_dir, "02_merged_conceptual_model", combined_cm)
+
+    if flags:
+        logger.info(
+            f"[Stage 2] Mathematical Engine raised {len(flags)} tension flags. Building Conflict Graph..."
         )
 
-    print("[Stage 2] Deterministic mapping of conceptual model to relational schema...")
-    global_schema = map_conceptual_to_relational(combined_cm)
+        G, flag_map = _build_conflict_graph(flags)
 
+        from src.pipeline.stage2.agents.adjudicator.agent import resolve_conflicts
+
+        adjudicator_tasks = []
+        components = list(nx.connected_components(G))
+
+        fact_dict = {f.id: f.fact for f in facts}
+
+        for comp in components:
+            comp_ents = list(comp)
+            comp_flag_set: List[str] = []
+            comp_facts: set = set()
+            subgraph_str = ""
+
+            for e_name in comp_ents:
+                for f in flag_map.get(e_name, []):
+                    comp_flag_set.append(str(f))
+
+                ent = next((e for e in combined_cm.entities if e.name == e_name), None)
+                if ent:
+                    subgraph_str += (
+                        f"ENTITY {ent.name}: {[a.name for a in ent.attributes]}\n"
+                    )
+                    for fid in ent.source_fact_ids:
+                        if fid in fact_dict:
+                            comp_facts.add(fact_dict[fid])
+
+            adjudicator_tasks.append(
+                resolve_conflicts(
+                    subgraph=subgraph_str,
+                    facts="\n".join(comp_facts),
+                    flags="\n".join(comp_flag_set),
+                    model=model,
+                )
+            )
+
+        logger.info(
+            f"[Stage 2] Dispatching {len(adjudicator_tasks)} parallel Adjudicator queries..."
+        )
+        adj_results = await run_parallel(
+            adjudicator_tasks,
+            labels=[f"component-{i}" for i in range(len(adjudicator_tasks))],
+        )
+
+        all_patches = []
+        for res_pair in adj_results:
+            if res_pair is None:
+                logger.warning(
+                    "[Stage 2] an Adjudicator component query failed entirely "
+                    "(isolated -- siblings unaffected) -- its conflicts stay "
+                    "unresolved this pass."
+                )
+                continue
+            res, tokens = res_pair
+            total_tokens += tokens
+            all_patches.extend(res.resolutions)
+
+        logger.info(
+            f"[Stage 2] Adjudicator returned {len(all_patches)} resolution patches. Applying..."
+        )
+        combined_cm = apply_adjudicator_patches(combined_cm, all_patches)
+
+        # Post-merge relationship deduplication
+        seen_rel_keys: set = set()
+        deduped_rels = []
+        for r in combined_cm.relationships:
+            p_keys = tuple(sorted([p.entity for p in r.participants]))
+            key = (r.name, p_keys)
+            if key not in seen_rel_keys:
+                seen_rel_keys.add(key)
+                deduped_rels.append(r)
+        if len(deduped_rels) != len(combined_cm.relationships):
+            logger.info(
+                f"[Stage 2] Post-adjudication dedup: removed {len(combined_cm.relationships) - len(deduped_rels)} duplicate relationships"
+            )
+            combined_cm.relationships = deduped_rels
+
+    # Dumped unconditionally, right before the call that can raise (e.g. a false-
+    # positive FK cycle) -- this is the artifact that would have let us diagnose
+    # the 2026-07-08 spurious reversed-FK bug without a live re-run.
+    dump_artifact(artifact_dir, "03_final_conceptual_model_before_mapping", combined_cm)
+
+    logger.info(
+        "[Stage 2] Deterministic mapping of conceptual model to relational schema..."
+    )
+    global_schema = map_conceptual_to_relational(combined_cm)
+    dump_artifact(artifact_dir, "04_global_schema", global_schema)
+
+    # ... (Rest of existing FK structural fallback code)
     from src.pipeline.stage2.models.schema import to_snake_case
     import re
 
@@ -108,32 +327,26 @@ async def orchestrate(
             ),
             None,
         )
-
         matched_rel = None
         for r in combined_cm.relationships:
             r_snake = to_snake_case(r.name).lower()
             if r_snake == t_name_snake:
                 matched_rel = r
                 break
-
             parts = sorted(
                 list(set(to_snake_case(p.entity).lower() for p in r.participants))
             )
             parts_str = "_".join(parts)
-
             if t_name_snake == parts_str:
                 matched_rel = r
                 break
-
             if t_name_snake == f"{parts_str}_{r_snake}":
                 matched_rel = r
                 break
-
             if re.match(rf"^{parts_str}(_{r_snake})?(_\d+)?$", t_name_snake):
                 matched_rel = r
                 break
 
-        # FK-structural fallback: match junction tables by their FK targets
         if not matched_rel and global_schema.relationships:
             table_fk_targets = sorted(
                 {
@@ -142,88 +355,78 @@ async def orchestrate(
                     if fk.referencing_table == table.name
                 }
             )
-            if len(table_fk_targets) >= 2:
-                for r in combined_cm.relationships:
-                    r_parts = sorted(
-                        list(
-                            set(to_snake_case(p.entity).lower() for p in r.participants)
-                        )
-                    )
-                    if table_fk_targets == r_parts:
-                        matched_rel = r
-                        break
+            for r in combined_cm.relationships:
+                r_parts = sorted(
+                    {to_snake_case(p.entity).lower() for p in r.participants}
+                )
+                if table_fk_targets and set(r_parts).issubset(set(table_fk_targets)):
+                    matched_rel = r
+                    break
 
-        fact_ids = set()
         if matched_entity:
-            fact_ids.update(matched_entity.source_fact_ids)
-        if matched_rel:
-            fact_ids.update(matched_rel.source_fact_ids)
+            registry.register_table_facts(table.name, matched_entity.source_fact_ids)
+        elif matched_rel:
+            registry.register_table_facts(table.name, matched_rel.source_fact_ids)
+        else:
+            logger.debug(
+                f"[Stage 2] Could not directly map table '{table.name}' to CM source for provenance."
+            )
 
-        if not fact_ids:
-            for f in facts:
-                if table.name.lower() in f.fact.lower():
-                    fact_ids.add(f.id)
+    uncovered = _compute_uncovered_facts(facts, global_schema, registry)
 
-        registry.register_table_facts(table.name, list(fact_ids))
-
-    print(
-        f"  [Merge] Schema generation complete: {len(global_schema.tables)} tables, {len(global_schema.relationships or [])} FKs"
-    )
-    for r in global_schema.relationships or []:
-        print(
-            f"  [Merge] FK: {r.referencing_table}.{r.referencing_column} -> {r.referred_table}"
-        )
-
-    final_global_schema = global_schema
-    cert_report = CritiqueReport(agent_name="certifier_skipped", patches=[])
-
+    cert_report = None
     if enable_audit:
-        print("[Stage 2] Final compliance certification...")
-        try:
-            cert_report, t_cert = await certify_compliance(
-                schema=final_global_schema,
-                goal=analytical_goal,
-                enriched_nl=facts,
-                model=model,
-            )
-            total_tokens += t_cert
-        except Exception as cert_exc:
-            print(
-                f"  [Stage 2] Certifier failed ({cert_exc}); skipping certification patches."
-            )
-            cert_report = CritiqueReport(agent_name="certifier_skipped", patches=[])
+        logger.info("[Stage 2] Running Schema Certifier (Rule compliance check)...")
+        cert_report, t_cert = await certify_compliance(
+            schema=global_schema,
+            goal=analytical_goal,
+            enriched_nl=facts,
+            model=model,
+        )
+        total_tokens += t_cert
+        dump_artifact(artifact_dir, "05_cert_report", cert_report)
 
         if cert_report.patches:
-            apply_patches(final_global_schema, cert_report.patches, registry=registry)
+            logger.info(
+                f"[Stage 2] Schema Certifier found {len(cert_report.patches)} violations. Applying rigid patches..."
+            )
+            from src.util.schema_ops.patching_engine import apply_patches
 
-    uncovered = _compute_uncovered_facts(facts, final_global_schema, registry)
+            apply_patches(global_schema, cert_report.patches, registry=registry)
+            logger.info(f"[Stage 2] Applied {len(cert_report.patches)} patches.")
 
-    # Per-shard relational maps are DIAGNOSTIC output only (Output.segments); the real
-    # schema is final_global_schema. A repair failure on one shard must never discard the
-    # already-computed global result, so guard each shard mapping and skip on failure.
-    mock_segments = []
+            for table in global_schema.tables:
+                if not registry.get_facts_for_tables([table.name]):
+                    pass
+        else:
+            logger.info("[Stage 2] Schema Certifier: PERFECT compliance.")
+    else:
+        logger.info(
+            "[Stage 2] Skipping Schema Certifier (Audit disabled via ablation)."
+        )
+
+    segments_relational = []
     for cm in conceptual_models:
         try:
-            mock_segments.append(map_conceptual_to_relational(cm))
-        except Exception as seg_exc:
-            print(
-                f"  [Stage 2] Skipping diagnostic segment map (shard failed: {seg_exc})."
+            segments_relational.append(map_conceptual_to_relational(cm))
+        except ValueError as e:
+            # A shard with no entities (e.g. a chunk of purely descriptive/non-schema
+            # facts) is a legitimate degenerate case for this reporting-only field --
+            # it must not abort a Stage 2 run whose real merged schema already succeeded.
+            logger.warning(
+                f"[Stage 2] Segment mapping produced an empty/invalid schema, "
+                f"represented as empty for documentation purposes: {e}"
             )
+            segments_relational.append(Schema(tables=[], relationships=[]))
 
     return (
         Output(
-            segments=mock_segments,
+            segments=segments_relational,
             plan=plan,
-            fix_history=initial_fix_histories,
-            merged_schema=global_schema,
-            final_global_schema=final_global_schema,
-            final_fix_history=[],
-            domain_iterations=[],
-            token_usage=total_tokens,
-            cycles=final_global_schema.detect_cycles(),
+            final_global_schema=global_schema,
             uncovered_fact_ids=uncovered,
-            merge_decision_log=None,
-            cert_report=cert_report,
+            cert_report=cert_report if enable_audit else None,
+            token_usage=total_tokens,
         ),
         total_tokens,
         registry,

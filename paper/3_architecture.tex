@@ -1,0 +1,31 @@
+\section{System Architecture}
+% ============================================================
+
+\textit{[Para 1: Four-stage pipeline overview: Fact Extraction $\to$ Schema Generation $\to$
+Constraint Modeling $\to$ Code Generation.
+Each stage uses deterministic guard rails; failures trigger a bounded repair loop
+(max 5 retries per stage).
+The pipeline outputs DDL + a Python program, not tables directly, separating synthesis
+from materialization.]}
+
+\textit{[Para 2: Inter-stage interfaces. $\mathcal{F}$ = enriched fact set (JSON list of
+atomic statements with tags and external-kind annotations). $\mathcal{S}$ = relational schema
+(JSON: tables, columns, PKs, FKs, types). $\mathcal{C}$ = structured constraints (nested
+JSON: distributions, decision trees, aggregations). $\mathcal{G}$ = column-level dependency
+DAG (adjacency list). $\mathcal{P}$ = Python program (plain text).]}
+
+% Figure 2: Architecture (full-width)
+\begin{figure*}[t]
+  \centering
+  \vspace{2.5cm}
+  \textit{[Figure 2 placeholder (full-width): ScribbleDB architecture.
+  Four stage boxes arranged left-to-right with labelled inter-stage arrows
+  ($\mathcal{F}$, $\mathcal{S}$, $\mathcal{C}$+$\mathcal{G}$, $\mathcal{P}$).
+  Inside each box: LLM agent icon(s) + deterministic validator block + repair-loop arrow.
+  Final outputs annotated: DDL schema (SQL file) and Python materialization program.]}
+  \vspace{2.5cm}
+  \caption{ScribbleDB architecture. Four stages connected by typed inter-stage interfaces.
+           Each stage is guarded by a deterministic validator and a bounded repair loop.
+           Final output: relational DDL schema and executable Python program.}
+  \label{fig:architecture}
+\end{figure*}

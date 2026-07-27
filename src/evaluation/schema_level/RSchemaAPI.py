@@ -20,7 +20,7 @@ def map_rschema_to_pydantic(rschema_dict: Dict[str, Any]) -> Schema:
         # 1. Create columns
         columns = []
         for attr in table_info.get("Attributes", []):
-            columns.append(Column(name=attr.replace(" ", "_").lower()))
+            columns.append(Column(name=attr.replace(" ", "_").lower(), data_type="VARCHAR"))
 
         # 2. Determine Primary Key
         pk_list = table_info.get("Primary key", [])

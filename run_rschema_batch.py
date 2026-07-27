@@ -181,6 +181,7 @@ async def run_case(
         s2_fn = _import("src.orchestration.stage2.entry")
         with redirect_stdout(log_buf):
             result = await s2_fn(
+                plan=s1_out.plan,
                 facts=s1_out.final_facts,
                 domain=s1_out.domain,
                 analytical_goal=s1_out.analytical_goal,

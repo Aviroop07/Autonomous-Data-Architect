@@ -4,7 +4,6 @@ from src.util.core.agent import get_agent_, AgentType
 from src.util.core.invoke import get_response
 from src.pipeline.stage1.models.rephrased_nl import TaggerOutput, TaggedFact
 from src.pipeline.stage1.models.raw_fact import RawFact
-from src.pipeline.stage1.models.atomic_fact import FactTag
 
 PROMPT_PATH = Path(__file__).parent / "prompt.txt"
 

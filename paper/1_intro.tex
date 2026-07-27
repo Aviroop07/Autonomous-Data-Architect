@@ -1,0 +1,55 @@
+\section{Introduction}
+% ============================================================
+
+\textit{[Para 1 --- Why synthetic databases matter: application development, testing,
+benchmarking; data-privacy and greenfield constraints prevent access to real data.
+Emphasise the greenfield setting: no existing deployment, no schema, no seed data.]}
+
+\textit{[Para 2 --- State of the art and its limitations:
+ab-initio generators (MUDD, PDGF, Myriad) require formal declarative specs;
+regeneration-based tools (DBSynth, RSGen, Hydra, SAM) require production artefacts.
+Neither suits a non-technical domain expert with only an NL description.]}
+
+\textit{[Para 3 --- LLMs as enabler and source of new challenges.
+Strong NL-to-SQL~\cite{yu2019spider} and text-to-schema~\cite{wang2025text2schema} capability.
+Three core challenges for full DB synthesis:
+\textbf{(a)~Expressiveness} (complex cross-table constraints),
+\textbf{(b)~Hallucination} (error propagation across pipeline stages),
+\textbf{(c)~Scalability} (context window degradation; materialization throughput).]}
+
+\textit{[Para 4 --- ScribbleDB overview: how it addresses each challenge.
+Emphasise that the \emph{output} is a DDL schema and an executable Python program, not
+tables directly---separating correctness verification from data materialization.]}
+
+% mention the previous paper then mention the new things
+\medskip\noindent\textbf{Contributions.}
+\begin{itemize}[leftmargin=*]
+  \item End-to-end NL-to-database agentic pipeline; outputs relational DDL schema
+        + executable Python code for table materialization.
+  \item \textit{[New]} Deterministic code generation for single-dependency columns
+        in the DAG via inverse functions on join/aggregate tables,
+        reducing LLM calls and guaranteeing correctness-by-construction.
+  \item \textit{[New, partial]} Multivariate distribution support for cross-column
+        correlations beyond univariate priors.
+  \item Shard-and-merge schema generation with Gale--Shapley entity alignment.
+  \item Ancestral sampling for logical constraint satisfaction; FA = 1.0 empirically.
+  \item Comprehensive evaluation: $\sim$6$\times$ table accuracy, $\sim$4$\times$ lower
+        latency vs.\ SchemaAgent~\cite{wang2025text2schema} across three benchmark suites.
+\end{itemize}
+
+% Figure 1: Motivating example (full-width)
+\begin{figure*}[t]
+  \centering
+  \vspace{2cm}
+  \textit{[Figure 1 placeholder (full-width): Three panels.
+  \textbf{Left}: NL description of the Credit Risk (Loan Origination) database.
+  \textbf{Middle}: generated DDL schema excerpt (Applicants, Loans tables with PKs, FKs).
+  \textbf{Right}: excerpt of rows from the materialized Loans table with the tiered
+  interest-rate constraint annotated.
+  Illustrates the end-to-end transformation.]}
+  \vspace{2cm}
+  \caption{ScribbleDB converts an NL description (left) into a relational DDL schema (middle)
+           and an executable Python program whose output satisfies the stated constraints (right).
+           Running example: Credit Risk (Loan Origination) database.}
+  \label{fig:motivating}
+\end{figure*}

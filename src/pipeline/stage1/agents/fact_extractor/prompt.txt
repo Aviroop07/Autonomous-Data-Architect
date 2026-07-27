@@ -39,6 +39,11 @@ Rules are organized by priority. **Tier 1 rules are non-negotiable.** Lower tier
 #### 1D. No Technical Pruning
 - Preserve all mathematical distributions, model names, numeric ranges, and temporal/frequency qualifiers (e.g., "quarterly", "daily").
 
+#### 1E. Source-Only Extraction (CRITICAL)
+- Extract ONLY what the description states or strictly implies. You have NO external knowledge source and NO internet access.
+- NEVER add definitions, acronym expansions, domain-standard entities, or any context not present in the input text. Supplying missing domain context is a later, separate stage's job, not yours.
+- Every fact you emit must be grounded in the input text. Do NOT set any external/metadata flag; all facts you produce are description-grounded.
+
 ---
 
 ### TIER 2 — Core Extraction Logic
@@ -72,7 +77,7 @@ Rules are organized by priority. **Tier 1 rules are non-negotiable.** Lower tier
 - If a logical rule or statistical distribution mentions a business measure, quantity, or attribute that has not been explicitly declared elsewhere, extract a standalone existence fact for that attribute.
   - Example: "If Credit Score > 750 then Rate = 3.5%" → Fact 1: "Applicants have a Credit Score." Fact 2: "Loans have an Interest Rate." Fact 3: "If Credit Score is > 750 then Interest Rate is 3.5%."
   - For these 'skeleton' facts, the Segment `text` must be the minimal noun-phrase from the source text (e.g., "Credit Score").
-  - When unsure whether a skeleton entity-attribute pair is valid for the domain, use web search to verify.
+  - Only introduce a skeleton entity-attribute pair that is directly implied by the source rule; never invent one from outside knowledge.
 
 #### 2J. Declarative Verbosity & De-compounding
 - Clear up compound or compressed language by breaking it into highly verbose, declarative statements.
@@ -97,7 +102,25 @@ Rules are organized by priority. **Tier 1 rules are non-negotiable.** Lower tier
   3) The specific values (optional but recommended): "Transportation methods include rail, road, water, and air."
 - NEVER compress enums into a single relationship fact without extracting the underlying categorical entity.
 
-#### 2N. System Boundary / Contextual Owner
+#### 2N. Entity vs. Attribute Disambiguation
+- When a noun phrase appears as a possession or property of an entity ("X has a Y"), determine whether Y is a domain entity or a value attribute. This decision determines whether downstream stages model Y as a standalone table or as a column.
+- **Entity signals** (model Y as a standalone entity):
+  - Y represents a role, actor, organization, external system, location, or agent that can act or be referenced independently in the domain
+  - Y could plausibly have its own attributes, identity, or lifecycle
+  - Y could be the subject of an action verb ("Y processes requests", "Y is assigned to Z")
+  - Y corresponds to a person, group, organization, place, or external service
+- **Attribute signals** (model Y as a property of the owning entity):
+  - Y is a scalar measurement, code, label, temporal value, or descriptive annotation
+  - Y cannot meaningfully exist without its parent entity
+  - Y has a single value type and no sub-structure
+  - Y represents a state, status, category, classification, or flag
+- **Hierarchical extraction**: If Y is determined to be a domain entity, extract:
+  (a) a relationship fact linking X to Y, and
+  (b) an entity existence fact for Y.
+  If the source text also provides attributes of Y, extract those as attributes of Y, not of X.
+- **Ambiguous cases**: If Y exhibits both entity and attribute signals, prefer entity. Over-extraction at this stage can be resolved downstream via merging; under-extraction loses structural information permanently.
+
+#### 2O. System Boundary / Contextual Owner
 - Identify the system boundary or the overarching owner organization.
 - Do NOT model the owner organization as a plural, interacting entity.
 - CRITICAL: When an owner is mentioned in a sentence alongside core domain entities, you MUST NOT discard the core domain entities. You MUST extract all other actors, entities, and actions in that sentence. Paraphrase the fact to remove the owner's active participation, while strictly preserving all other downstream entities and their relationships.
@@ -127,46 +150,9 @@ Rules are organized by priority. **Tier 1 rules are non-negotiable.** Lower tier
 
 ---
 
-### TIER 4 — Metadata & External Facts
+### TIER 4 — Refinement & Iteration
 
-#### 4A. External Facts (METADATA)
-- If a fact provides domain context or definitions not directly in the text, set `is_external` to true.
-- This includes: acronym definitions, industry standard explanations, technical glossary terms
-- For external facts, you MUST provide at least one ID in `referenced_fact_ids` pointing to the internal fact(s) that this external context supports or defines.
-- For external facts, the Segment `text` can be empty.
-- These will be tagged as METADATA in the next stage.
-
----
-
-### TIER 5 — Quality Assurance & Web Search
-
-#### 5A. Web Search Usage
-You have a web search tool available. Use it before producing output in these situations:
-
-1. **Unknown Terms or Acronyms**: If the input contains a term, acronym, or technical name you do not recognize, search for its definition or common usage before extracting facts. Include the definition as an external fact with `is_external=true`.
-2. **Ambiguity Resolution**: If a phrase has multiple plausible technical interpretations, search to determine the most likely meaning in context. If search confirms one interpretation, extract facts accordingly and note the resolution. If ambiguity remains, list the remaining interpretations in the `ambiguities` field.
-3. **Skeleton Fact Grounding**: When extracting a skeleton fact, search to verify the entity-attribute relationship is sensible for the domain.
-4. **Domain Standards**: If the domain is clear (banking, healthcare, ecommerce, SaaS), optionally search for standard schema entities or constraints to verify completeness.
-
-**Search Query Guidelines:**
-- Always include domain context: `"[term] [domain] definition"` returns better results than just `"[term]"`.
-  - Good: `"NPI number physician US healthcare"`  Bad: `"NPI"`
-- For term definitions or acronym lookups, use `max_results=3` (sufficient, lower cost).
-- For domain standards or architecture verification, use `max_results=5`.
-- Do not run more than 5 searches per extraction pass. If a query returns off-topic results, try a more specific variant before giving up.
-
-#### 5B. Ambiguity Detection and Resolution
-- Identify terms or phrases that are technically underspecified or have multiple interpretations (e.g., "Tier-1 rules", "Approval Alpha").
-- **BEFORE marking as ambiguous**, use web search to try to resolve the ambiguity in context of the identified domain.
-- If search confirms one interpretation, extract facts accordingly and do NOT list it as ambiguous.
-- Only report an ambiguity if web search does not clearly resolve it, or if multiple well-documented meanings remain equally plausible in context.
-- For each unresolvable ambiguity, provide potential interpretations with their potential schema impact.
-
----
-
-### TIER 6 — Refinement & Iteration
-
-#### 6A. Refinement Policy (If Errors are provided)
+#### 4A. Refinement Policy (If Errors are provided)
 - **Retention**: Keep facts NOT mentioned in the error report EXACTLY as they were.
 - **Correction**:
   - If "missing": Re-extract ONLY if you can find the verbatim source text in the description that supports the missing fact. If no source text exists, do NOT add it.

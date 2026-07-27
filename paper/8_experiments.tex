@@ -1,0 +1,264 @@
+\section{Experimental Evaluation}
+\label{sec:eval}
+% ============================================================
+
+\subsection{Experimental Setup}
+
+\noindent\textbf{Datasets.}
+\textit{[Placeholder:
+(a)~RSchema~\cite{wang2025text2schema}: 381 NL-to-schema test cases (schema only, no data).
+(b)~Handcrafted~\cite{aviroop2026scribbledb}: 135 test cases (NL, schema, distributional
+and logical constraints) generated via Claude 4.5 Sonnet, spanning Credit Risk,
+Quantitative Finance, Clinical Trials; 3--50 tables; 10K--1M rows per fact table.
+2:3:5 ratio across small ($<$10), medium (11--25), large (26+) schemas.
+(c)~Benchmarks: IMDB~\cite{imdb2024}, TPC-H~\cite{tpch2022}, TPC-DS~\cite{tpcds2024},
+MIMIC-IV~\cite{johnson2024mimic} official documentation converted to NL descriptions
+that deliberately omit benchmark names, specific schema details, and explicit parameters.]}
+
+\noindent\textbf{LLM \& Baseline.}
+\textit{[Placeholder: GPT-4o for all LLM components of ScribbleDB.
+Baseline for schema quality: SchemaAgent~\cite{wang2025text2schema}.
+No prior baseline for data modeling quality (ScribbleDB is first to target full synthesis).]}
+
+\noindent\textbf{Metrics.}
+\textit{[Placeholder: Schema: Table/Attr/PK/DT F1 and Accuracy.
+Statistical fidelity: MRE$\downarrow$, NLL$\uparrow$, KS$\downarrow$.
+Logical fidelity: FA$\uparrow$.
+Efficiency: schema gen tokens/time, per-row gen time, avg.\ retry loops.
+New metric: \emph{Deterministic Path Ratio} (\S\ref{subsec:det-eval}) --- fraction of DAG
+nodes routed to deterministic vs.\ LLM code generation.]}
+
+\subsection{Schema Quality}
+\label{subsec:schema-quality}
+
+\textit{[Placeholder: ScribbleDB achieves near-perfect Table F1 (95--100) across all three
+dataset groups. SchemaAgent degrades sharply on complex schemas
+(Table F1 drops to 48--52 on Handcrafted/Benchmark).
+Key insight: sharding enables parallel agents to focus on smaller schema portions; combined
+with context enrichment, it recovers schema elements that SchemaAgent misses when the NL is
+ambiguous or incomplete.]}
+
+\begin{table}[t]
+  \caption{Schema quality comparison.
+           Best result per metric/dataset in \textbf{bold}.}
+  \label{tab:schema-quality}
+  \centering
+  \small
+  \begin{tabular}{llcccccc}
+    \toprule
+    Dataset & System & TF1 & TAcc & AF1 & AAcc & PKAcc & DTAcc \\
+    \midrule
+    \multirow{2}{*}{RSchema}
+      & SchemaAgent & \multicolumn{6}{c}{\textit{[values]}} \\
+      & ScribbleDB  & \multicolumn{6}{c}{\textit{[values]}} \\
+    \midrule
+    \multirow{2}{*}{Handcrafted}
+      & SchemaAgent & \multicolumn{6}{c}{\textit{[values]}} \\
+      & ScribbleDB  & \multicolumn{6}{c}{\textit{[values]}} \\
+    \midrule
+    \multirow{2}{*}{Benchmark}
+      & SchemaAgent & \multicolumn{6}{c}{\textit{[values]}} \\
+      & ScribbleDB  & \multicolumn{6}{c}{\textit{[values]}} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Data Modeling Quality}
+\label{subsec:data-quality}
+
+\textit{[Placeholder: Statistical realism (KS~$<$~0.3, MRE~$<$~0.2, NLL~$>$~0.7) and
+logical fidelity (FA~$=$~1.0) across Handcrafted and Benchmark datasets.
+Metrics are schema-recall-penalised to account for structural mismatches.
+Note: multivariate evaluation metrics will be added in this table once \S\ref{subsec:multivariate}
+is finalised---a new column (e.g., copula KS or rank correlation error) is reserved.]}
+
+\begin{table}[t]
+  \caption{Data modeling quality. Metrics penalised by schema recall fraction.
+           \textit{[TBD: multivariate column to be added once §7.3 is finalised.]}}
+  \label{tab:data-quality}
+  \centering
+  \small
+  \begin{tabular}{lcccc}
+    \toprule
+    Dataset & MRE$\downarrow$ & NLL$\uparrow$ & KS$\downarrow$ & FA$\uparrow$ \\
+    \midrule
+    Handcrafted & \multicolumn{4}{c}{\textit{[values]}} \\
+    TPC-H       & \multicolumn{4}{c}{\textit{[values]}} \\
+    TPC-DS      & \multicolumn{4}{c}{\textit{[values]}} \\
+    IMDB        & \multicolumn{4}{c}{\textit{[values]}} \\
+    MIMIC-IV    & \multicolumn{4}{c}{\textit{[values]}} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% Figure 7: Distribution fidelity plots
+\begin{figure}[t]
+  \centering
+  \vspace{1.5cm}
+  \textit{[Figure 7 placeholder: Three panels (one column each).
+  Each: generated histogram (blue) overlaid with ground-truth density curve (orange).
+  Panel 1: normally distributed column (e.g., income).
+  Panel 2: Zipfian column (e.g., transaction count).
+  Panel 3: bounded column (e.g., credit score 300--850).
+  All from Handcrafted dataset.]}
+  \vspace{1.5cm}
+  \caption{Distribution fidelity: generated vs.\ ground-truth density for three representative
+           columns in the Handcrafted dataset.}
+  \label{fig:distributions}
+\end{figure}
+
+\subsection{Scalability Analysis}
+\label{subsec:scalability}
+
+\textit{[Placeholder: Schema-generation latency scales sub-linearly with table count for
+ScribbleDB (parallel sharding) vs.\ linearly for SchemaAgent (sequential).
+3--4$\times$ speedup on complex schemas.
+Row-generation time scales linearly with target row count at 10--30\,ms/row,
+independent of schema complexity (deterministic and LLM code paths both amortise
+to per-row costs).]}
+
+% Figure 8: Scalability plots (full-width for two panels)
+\begin{figure*}[t]
+  \centering
+  \vspace{1.5cm}
+  \textit{[Figure 8 placeholder (full-width, two panels).
+  \textbf{Left}: schema generation latency (s) vs.\ number of tables.
+  Two lines: ScribbleDB (with 1$\sigma$ shading over test cases) and SchemaAgent.
+  \textbf{Right}: per-row generation time (ms) vs.\ target row count $n$
+  for Handcrafted dataset; separate lines for deterministic-only nodes and LLM nodes.]}
+  \vspace{1.5cm}
+  \caption{Scalability. Left: ScribbleDB's parallel sharding yields 3--4$\times$ lower
+           latency than SchemaAgent on large schemas.
+           Right: per-row generation time is constant across row counts.}
+  \label{fig:scalability}
+\end{figure*}
+
+\subsection{Ablation Studies}
+\label{subsec:ablation}
+
+\textit{[Placeholder: Quantify contribution of each architectural component on the
+Handcrafted dataset.
+New ablation row: ``w/o Det.\ CodeGen'' replaces all deterministic code-generation
+paths with LLM calls---expected to show higher token cost, higher latency, and
+potentially lower FA if the LLM occasionally fails to satisfy constraints exactly.]}
+
+\begin{table}[t]
+  \caption{Ablation on Handcrafted dataset. Best result per column in \textbf{bold}.}
+  \label{tab:ablation}
+  \centering
+  \small
+  \begin{tabular}{lccccccc}
+    \toprule
+    Configuration & TF1 & TAcc & AF1 & MRE & NLL & KS & FA \\
+    \midrule
+    Full ScribbleDB    & \multicolumn{7}{c}{\textit{[values]}} \\
+    w/o Enrichment     & \multicolumn{7}{c}{\textit{[values]}} \\
+    w/o Sharding       & \multicolumn{7}{c}{\textit{[values]}} \\
+    w/o Anc.\ Sampling & \multicolumn{7}{c}{\textit{[values]}} \\
+    w/o Det.\ CodeGen  & \multicolumn{7}{c}{\textit{[values --- new row]}} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Cost and Efficiency}
+\label{subsec:cost}
+
+\begin{table}[t]
+  \caption{Cost and efficiency (avg.\ per test case).}
+  \label{tab:efficiency}
+  \centering
+  \small
+  \begin{tabular}{llcccc}
+    \toprule
+    Dataset & System & Tokens & Sch.\ Time & Row Time & Retries \\
+    \midrule
+    \multirow{2}{*}{RSchema}
+      & SchemaAgent & \multicolumn{4}{c}{\textit{[values]}} \\
+      & ScribbleDB  & \multicolumn{4}{c}{\textit{[values]}} \\
+    \midrule
+    \multirow{2}{*}{Handcrafted}
+      & SchemaAgent & \multicolumn{4}{c}{\textit{[values]}} \\
+      & ScribbleDB  & \multicolumn{4}{c}{\textit{[values]}} \\
+    \midrule
+    \multirow{2}{*}{Benchmark}
+      & SchemaAgent & \multicolumn{4}{c}{\textit{[values]}} \\
+      & ScribbleDB  & \multicolumn{4}{c}{\textit{[values]}} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Deterministic Code Generation Analysis}
+\label{subsec:det-eval}
+
+\textit{[Placeholder: Characterise the new deterministic code-generation contribution.
+Metrics to report: (a)~\emph{Deterministic Path Ratio (DPR)}: fraction of DAG column
+nodes routed to Alg.~\ref{alg:det-code} vs.\ LLM (Alg.~\ref{alg:llm-sampling}).
+Expect DPR $\approx$ 40--60\% on Handcrafted dataset (hypothesis: many FK and simple
+aggregate columns are single-dependency).
+(b)~LLM call reduction: absolute and relative number of LLM calls saved vs.\ an
+all-LLM baseline.
+(c)~Correctness delta: compare FA for deterministic-path columns vs.\ LLM-path columns---
+deterministic path expected to achieve FA = 1.0 by construction.]}
+
+% Figure 9: Deterministic Path Ratio breakdown
+\begin{figure}[t]
+  \centering
+  \vspace{1.5cm}
+  \textit{[Figure 9 placeholder: Stacked bar chart.
+  X-axis: schema-size bins (small, medium, large).
+  Y-axis: fraction of DAG column nodes.
+  Two stacks: deterministic-path nodes (blue) and LLM-path nodes (orange).
+  Show that larger schemas have higher DPR (more single-dependency FK columns).]}
+  \vspace{1.5cm}
+  \caption{Deterministic Path Ratio by schema size.
+           The fraction of columns handled deterministically grows with schema size,
+           amplifying the LLM call reduction on large schemas.}
+  \label{fig:dpr}
+\end{figure}
+
+\subsection{Case Study: Credit Risk Database}
+\label{subsec:case-study}
+
+\textit{[Placeholder: End-to-end walkthrough.
+NL description (\S\ref{sec:stage1}) $\to$ 9 atomic facts tagged STRUCTURAL/LOGICAL/STATISTICAL
+(Stage 1) $\to$ DDL schema: Applicants (ApplicantID PK, CreditScore, Income, DTI),
+Loans (LoanID PK, ApplicantID FK, LoanAmount, InterestRate) (Stage 2)
+$\to$ dependency DAG: \texttt{interest\_rate} $\leftarrow$ \texttt{credit\_score},
+\texttt{loan\_amount} (Stage 3)
+$\to$ generated Python code: \texttt{interest\_rate} routed to LLM ancestral-sampling
+(two drivers); \texttt{loan\_amount} FK column routed to deterministic JOIN inverse (Stage 4)
+$\to$ sample of materialized rows verifying tiered-lookup constraint.]}
+
+\begin{lstlisting}[caption={[Placeholder] Python code excerpt generated by ScribbleDB
+  for the Credit Risk database. The \texttt{sample\_interest\_rate} function implements
+  the LLM-synthesised inverse for the tiered-lookup constraint.},
+  label={lst:codegen}]
+# [Placeholder: Python code excerpt]
+# Expected content:
+#   def sample_interest_rate(credit_score, loan_amount):
+#       """Inverse function synthesised by LLM agent (Alg. 11).
+#       Implements tiered lookup: credit_score > 750 and amount < 50000 -> rate = 0.035
+#       ... additional tiers ...
+#       """
+#       ...
+#
+#   def sample_loan_amount(applicant_ids):
+#       """Deterministic FK-assignment inverse (Alg. 10, JOIN case)."""
+#       return np.random.choice(applicant_ids, size=N_LOANS, replace=True)
+\end{lstlisting}
+
+\begin{table}[t]
+  \caption{Sample generated rows: Credit Risk, Loans table.
+           \texttt{IntRate} satisfies the tiered-lookup constraint by construction.}
+  \label{tab:case-study}
+  \centering
+  \small
+  \begin{tabular}{ccccc}
+    \toprule
+    LoanID & AppID & CreditScore & LoanAmt & IntRate \\
+    \midrule
+    \multicolumn{5}{c}{\textit{[placeholder rows with IntRate satisfying tiered-lookup]}} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+

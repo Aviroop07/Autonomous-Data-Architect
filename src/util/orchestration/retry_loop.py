@@ -3,6 +3,9 @@ from typing import TypeVar, Generic, Callable, Optional, List, Set
 from enum import Enum
 
 from pydantic import BaseModel
+import logging
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar('T')
 
@@ -135,6 +138,7 @@ class RetryLoop(Generic[T]):
 
         while self.iteration_count < self.config.max_retries:
             self.iteration_count += 1
+            logger.info(f"[RetryLoop] Starting iteration {self.iteration_count}/{self.config.max_retries}")
 
             agent = self.agent_getter()
             enriched_query = self._build_query(task, context)
@@ -167,11 +171,15 @@ class RetryLoop(Generic[T]):
             is_valid = validation_result.is_valid and len(deterministic_errors) == 0
 
             if is_valid:
+                logger.info(f"[RetryLoop] ✅ Validation SUCCESS on iteration {self.iteration_count}!")
                 self._last_is_valid = True
                 break
+            else:
+                logger.warning(f"[RetryLoop] ❌ Iteration {self.iteration_count} failed with {len(iteration_errors)} error(s).")
 
         active_errors = self._get_latest_blocking_errors()
         if not self._last_is_valid and active_errors:
+            logger.error(f"[RetryLoop] 🚨 Exhausted retries with {len(active_errors)} unresolved errors.")
             raise RetryExhaustedError(active_errors, self._last_output, total_tokens)
 
         return self._last_output, total_tokens, self.error_history

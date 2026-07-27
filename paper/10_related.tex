@@ -1,0 +1,48 @@
+\section{Related Work}
+% ============================================================
+
+\subsection{Database Generation}
+\textit{[Para: Ab-initio generators (MUDD~\cite{stephens2004mudd}, PSDG~\cite{hoag2007psdg},
+PDGF~\cite{rabl2010pdgf}, Myriad~\cite{alexandrov2012myriad}) operate from declarative
+specifications; powerful but require expert modeling effort.
+Regeneration-based approaches (DBSynth~\cite{rabl2015dbsynth}, RSGen~\cite{shen2013rsgen},
+Hydra~\cite{sanghi2018hydra}, SAM~\cite{yang2022sam}, DScaler~\cite{zhang2016dscaler},
+TouchStone~\cite{wang2023scalable}) exploit statistical metadata or workload traces from an
+existing deployment; inapplicable in greenfield settings.
+Neither class accepts NL input or handles joint distributional and logical constraints.]}
+
+\subsection{LLM-based Schema and SQL Generation}
+\textit{[Para: NL-to-SQL benchmarks (Spider~\cite{yu2019spider}) and the NL-to-SQL
+survey~\cite{luo2025nl2sql} demonstrate strong LLM capability on structured-output tasks.
+SchemaAgent / Text2Schema~\cite{wang2025text2schema} is the closest prior work:
+it converts NL to a relational schema but stops short of data materialization, distributional
+constraints, and logical fidelity.
+ScribbleDB is the first system to cover the full synthesis pipeline.]}
+
+\subsection{Agentic Systems for Structured Output}
+\textit{[Para: Multi-agent orchestration, self-repair loops, and tool-augmented LLMs have been
+applied to code generation, document understanding, and data engineering.
+ScribbleDB adopts these patterns but adds deterministic guard rails and a correctness-by-construction
+materialization scheme, distinguishing it from generation-only agentic approaches.]}
+
+% Table 1: System positioning matrix
+\begin{table}[t]
+  \caption{Positioning ScribbleDB against representative prior systems.
+           \yes~= full support, \partsup~= partial, \no~= not supported.}
+  \label{tab:positioning}
+  \centering
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{lccccc}
+    \toprule
+    System & NL & Schema & Dist. & Logic & Materialize \\
+    & Input & Gen. & Constr. & Constr. & \\
+    \midrule
+    MUDD / PDGF / Myriad  & \no  & \yes & \yes & \no   & \yes \\
+    DBSynth / RSGen / SAM & \no  & \no  & \yes & \no   & \yes \\
+    SchemaAgent           & \yes & \yes & \no  & \no   & \no  \\
+    \textbf{ScribbleDB}   & \yes & \yes & \yes & \yes  & \yes \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+

@@ -1,5 +1,5 @@
 from typing import List
-from src.util.orchestration.retry_loop import ErrorRecord, ErrorType, Severity
+from src.util.orchestration.retry_loop import ErrorRecord, ErrorType
 from src.pipeline.stage1.models.raw_fact import RawFact
 
 def format_errors_for_stage1(
@@ -59,7 +59,7 @@ def format_errors_for_stage1(
             elif error_type == ErrorType.MISSING:
                 lines.append(f"- [{severity_marker}] CHECK FAILED: Required fact is missing from extraction")
                 lines.append(f"  Error: {e.description}")
-                lines.append(f"  Fix: Check the source text and add this missing fact if it exists in the original")
+                lines.append("  Fix: Check the source text and add this missing fact if it exists in the original")
 
             elif error_type == ErrorType.INTRODUCED:
                 fact = next((f for f in all_facts if f.id == e.fact_id), None)
@@ -68,7 +68,7 @@ def format_errors_for_stage1(
                     lines.append(f"  Error: {e.description}")
                     lines.append(f"  Fact ID: {fact.id}")
                     lines.append(f"  Fact text: {fact.fact[:80]}...")
-                    lines.append(f"  Fix: Remove this fact or find its exact source in the original text")
+                    lines.append("  Fix: Remove this fact or find its exact source in the original text")
                 else:
                     lines.append(f"- [{severity_marker}] {e.description}")
 
@@ -79,7 +79,7 @@ def format_errors_for_stage1(
                     lines.append(f"  Error: {e.description}")
                     lines.append(f"  Fact ID: {fact.id}")
                     lines.append(f"  Fact text: {fact.fact[:80]}...")
-                    lines.append(f"  Fix: Ensure constraints match exactly what was stated in the source")
+                    lines.append("  Fix: Ensure constraints match exactly what was stated in the source")
                 else:
                     lines.append(f"- [{severity_marker}] {e.description}")
 
@@ -97,14 +97,7 @@ def _format_deterministic_error(
 ) -> None:
     signature = error.signature()
     if signature.startswith("origin_missing") or signature.startswith("origin_failed"):
-        if fact:
-            lines.append(f"- [{severity_marker}] SOURCE SEGMENT REPAIR ONLY")
-            lines.append(f"  Error: {error.description}")
-            lines.append(f"  Fact ID: {fact.id}")
-            lines.append(f"  Fact text: {fact.fact[:120]}...")
-            lines.append("  Fix: Ensure the fact is properly assigned to an exact verbatim source segment.")
-        else:
-            lines.append(f"- [{severity_marker}] {error.description}")
+        # Not reachable, origin errors handled by validator node and ctx.det_errors
         return
 
     if signature.startswith("missing_relationship"):
@@ -114,23 +107,7 @@ def _format_deterministic_error(
         lines.append("  Do not rely on *_id attributes alone for relationships.")
         return
 
-    if signature.startswith("invalid_reference"):
-        lines.append(f"- [{severity_marker}] INVALID FACT REFERENCE")
-        lines.append(f"  Error: {error.description}")
-        lines.append("  Fix: Remove the invalid referenced_fact_id or replace it with an existing original fact ID.")
-        return
 
-    if signature.startswith("external_missing_refs"):
-        lines.append(f"- [{severity_marker}] EXTERNAL FACT MISSING REFERENCES")
-        lines.append(f"  Error: {error.description}")
-        lines.append("  Fix: Add valid referenced_fact_ids pointing to original facts, or remove the unsupported external fact.")
-        return
-
-    if signature.startswith("cycle") or signature.startswith("self_reference"):
-        lines.append(f"- [{severity_marker}] REFERENCE GRAPH ERROR")
-        lines.append(f"  Error: {error.description}")
-        lines.append("  Fix: Remove the reference edge causing the cycle/self-reference.")
-        return
 
     lines.append(f"- [{severity_marker}] {error.description}")
 
@@ -142,8 +119,7 @@ def _repair_rules_for_errors(errors: List[ErrorRecord]) -> List[str]:
         if "missing relationship fact" in lowered:
             _append_once(rules, "Do not rely on *_id attributes alone; add a standalone relationship fact when the source text supports the relationship.")
             _append_once(rules, "For routing/bridge entities, emit each relationship separately, e.g. VM instances are assigned to compute nodes and associated with tenants.")
-        if "origin verification failed" in lowered or "missing origin" in lowered:
-            _append_once(rules, "For origin errors, keep the fact meaning stable and replace only origin with an exact verbatim substring from the source text.")
+
         if "allowed values" in lowered:
             _append_once(rules, "Allowed-value facts must preserve the attribute and every listed value exactly; do not split enum values into separate equality facts.")
     return rules

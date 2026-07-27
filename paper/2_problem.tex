@@ -1,0 +1,32 @@
+% ============================================================
+\section{Problem Formulation}
+% ============================================================
+
+\noindent\textbf{Definition 1 (Database Synthesis Problem).}
+\textit{[Formal definition box. Input: an NL description $\mathcal{D}$ of a target database
+domain plus a target row count $n$ per fact table.
+Output: (i) a relational schema $\mathcal{S}$ (table definitions, primary keys, foreign keys,
+data types), and (ii) a Python program $\mathcal{P}$ such that executing $\mathcal{P}$
+produces a set of populated CSV/SQL tables satisfying $\mathcal{S}$ and all constraints
+implied by $\mathcal{D}$.
+Assumption: $\mathcal{D}$ is internally consistent (no contradiction detection).]}
+
+\medskip
+\noindent\textbf{Correctness Criteria.}
+\textit{[Para: (a) Schema validity: PK uniqueness, FK referential integrity, data-type
+correctness.
+(b) Statistical fidelity: generated column distributions match those implied by $\mathcal{D}$
+(measured by KS, MRE, NLL).
+(c) Logical fidelity: all decision-tree and aggregation constraints satisfied
+(measured by FA).
+(d) Completeness: recall of schema elements described in $\mathcal{D}$.]}
+
+\medskip
+\noindent\textbf{Running Example.}
+\textit{[Para: Introduce the \emph{Credit Risk (Loan Origination)} database as the running
+example throughout the paper.
+Summarise the NL description: applicants with credit scores (300--850), annual income, DTI
+ratio; approved loans with an interest rate derived from a tiered lookup of credit score and
+loan amount (e.g., credit score $>$ 750 \& amount $<$ \$50K $\Rightarrow$ rate $= 3.5\%$);
+overall interest rate follows a Gaussian distribution.
+This example is used in all stage-level figures and the case study in \S\ref{sec:eval}.]}

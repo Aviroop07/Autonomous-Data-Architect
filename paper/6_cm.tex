@@ -1,0 +1,101 @@
+\section{Constraint Modeling}
+\label{sec:stage3}
+% ============================================================
+
+\subsection{Structured Constraint Representation}
+\textit{[Para: All constraints are stored in a nested structured format (JSON):
+(a) univariate distributions (type, parameters, target column);
+(b) decision-tree logical constraints (if--then rules over column values, including
+cross-table aggregations such as SUM, MAX);
+(c) multivariate distribution groups (\S\ref{subsec:multivariate}).
+This representation enables downstream deterministic validation and code generation.]}
+
+\subsection{Constraint Extraction and Feasibility Verification}
+\textit{[Para: The global schema graph is sharded into connected components.
+A constraint-modeling agent extracts structured constraints per component in parallel.
+A mathematics agent then verifies distribution feasibility (e.g., checking that parameter
+values are in the valid domain for the specified distribution family).
+Decision-tree feasibility is checked deterministically (Algorithm~\ref{alg:dt-feasibility}).]}
+
+% Algorithm 7: Deterministic Decision-Tree Feasibility Check (sub-step)
+\begin{algorithm}[t]
+\caption{Deterministic Decision-Tree Feasibility Check}
+\label{alg:dt-feasibility}
+\begin{algorithmic}[1]
+  \Require Set of decision-tree constraints $T \subseteq \mathcal{C}$
+  \Ensure Feasibility verdict per constraint; infeasibility report if any
+  \State \textit{[Placeholder: per constraint---enumerate leaf conditions,
+         check contradictory conjunctions (e.g., $x > 750$ AND $x < 300$),
+         verify outcome type compatibility, check referenced columns exist in $\mathcal{S}$;
+         flag infeasible constraints for LLM repair]}
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Multivariate Distribution Support}
+\label{subsec:multivariate}
+\textit{[Para --- PLACEHOLDER (not fully fleshed out):
+Extension beyond univariate constraints to capture cross-column correlations.
+Planned approach: [TBD --- likely copula-based joint sampling (Gaussian or vine copulas)
+or a conditional chain representation where later columns in the DAG topological order
+are sampled conditionally on earlier ones].
+Describe: (i) the structured representation for multivariate groups in $\mathcal{C}$;
+(ii) how multivariate group nodes are inserted into the dependency graph $\mathcal{G}$;
+(iii) how the code generator handles a multivariate group node.
+This section will expand substantially once the approach is finalised.]}
+
+\subsection{Dependency Graph Construction}
+\textit{[Para: From FK links and structured constraints, a column-level DAG $\mathcal{G}$
+is built in \emph{reverse-causal} order: constrained outcome columns
+(e.g., \texttt{interest\_rate}) are positioned as roots; their independent drivers
+(e.g., \texttt{credit\_score}, \texttt{loan\_amount}) are leaves.
+Multivariate group nodes are inserted as composite nodes (TBD).
+Cycle detection is performed via topological sort; if a cycle is detected, a patch agent
+updates $\mathcal{C}$ to break the cycle and the graph is rebuilt.]}
+
+% Algorithm 8: Deterministic DAG Construction (sub-step)
+\begin{algorithm}[t]
+\caption{Deterministic Dependency DAG Construction}
+\label{alg:dag}
+\begin{algorithmic}[1]
+  \Require Schema $\mathcal{S}$, structured constraints $\mathcal{C}$
+  \Ensure Column-level DAG $\mathcal{G}$
+  \State \textit{[Placeholder: one node per column; FK edges reverse-causal;
+         constraint edges outcome $\leftarrow$ driver; multivariate group nodes (TBD);
+         topological sort; cycle $\to$ patch agent updates $\mathcal{C}$, rebuild]}
+\end{algorithmic}
+\end{algorithm}
+
+% Figure 5: Dependency DAG
+\begin{figure}[t]
+  \centering
+  \vspace{1.5cm}
+  \textit{[Figure 5 placeholder: Column-level DAG for Credit Risk.
+  Solid nodes: \texttt{credit\_score} (leaf), \texttt{loan\_amount} (leaf),
+  \texttt{interest\_rate} (root).
+  Solid directed edges: \texttt{credit\_score} $\to$ \texttt{interest\_rate},
+  \texttt{loan\_amount} $\to$ \texttt{interest\_rate}.
+  FK edges shown as dashed.
+  Dashed composite node group for a multivariate dependency (placeholder).
+  Node colouring: deterministic-path nodes (blue), LLM-path nodes (orange).]}
+  \vspace{1.5cm}
+  \caption{Dependency DAG for the Credit Risk running example.
+           \texttt{interest\_rate} is the reverse-causal root; its drivers are leaves.
+           Node colour indicates the code-generation path taken in Stage 4.}
+  \label{fig:dag}
+\end{figure}
+
+% Algorithm 9: Stage 3 summary (calls Algs 7 & 8)
+\begin{algorithm}[t]
+\caption{Stage 3: Constraint Modeling}
+\label{alg:stage3}
+\begin{algorithmic}[1]
+  \Require Schema $\mathcal{S}$, fact set $\mathcal{F}$
+  \Ensure Structured constraints $\mathcal{C}$, dependency DAG $\mathcal{G}$
+  \State \textit{[Placeholder: shard $\mathcal{S}$ into connected components
+         $\to$ parallel constraint-modeling agents $\to$ math agent distribution feasibility
+         $\to$ DTFeasibilityCheck (Alg.~\ref{alg:dt-feasibility})
+         $\to$ BuildDAG (Alg.~\ref{alg:dag})
+         $\to$ return $\mathcal{C}, \mathcal{G}$]}
+\end{algorithmic}
+\end{algorithm}
+

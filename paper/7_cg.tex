@@ -1,0 +1,116 @@
+\section{Code Generation}
+\label{sec:stage4}
+% ============================================================
+
+\subsection{Deterministic Inverse-Function Code for Single-Dependency Columns}
+\label{subsec:det-codegen}
+\textit{[Para: Key new contribution. For each column node $c \in \mathcal{G}$ with
+\emph{exactly one} incoming dependency edge, Python code is synthesised
+\emph{deterministically}---no LLM call is made.
+The strategy is: (i)~synthesise an intermediate join or aggregate table satisfying the
+aggregate constraint (the ``forward'' computation); (ii)~decompose back to base column
+values using an inverse function whose form is fully determined by the aggregation type.
+This guarantees correctness-by-construction for the covered columns and eliminates LLM API
+cost for these nodes.
+Covered aggregation types and their inverses: SUM $\to$ uniform partition,
+MAX $\to$ argmax selection, AVG $\to$ constrained sampling around mean,
+JOIN (FK assignment) $\to$ deterministic FK-key draw.]}
+
+% Algorithm 10: Deterministic Inverse-Function Code (sub-step)
+\begin{algorithm}[t]
+\caption{Deterministic Inverse-Function Code Synthesis}
+\label{alg:det-code}
+\begin{algorithmic}[1]
+  \Require Single-dependency column $c$, aggregation type $\tau$, constraint $\phi$
+  \Ensure Python code snippet $p_c$
+  \State \textit{[Placeholder: synthesise intermediate aggregate/join table;
+         dispatch on $\tau$: SUM $\to$ uniform partition, MAX $\to$ argmax selection,
+         AVG $\to$ constrained sampling, JOIN $\to$ FK-key draw;
+         unsupported $\tau$ falls through to LLM path (§\ref{subsec:llm-sampling})]}
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{LLM Ancestral Sampling for Intertwined Constraints}
+\label{subsec:llm-sampling}
+\textit{[Para: When a column node has multiple incoming dependency edges---i.e., its value
+is governed by constraints involving several other columns simultaneously---no clean
+closed-form inverse exists.
+In this case, a code-generator LLM agent is invoked.
+The agent receives the local sub-DAG centred on $c$, the relevant constraints from
+$\mathcal{C}$, and the pre-determined generation order from $\mathcal{G}$.
+It synthesises an \emph{inverse function} generatively: given already-sampled values for
+the driver columns, it emits Python code that samples $c$ such that the constraints
+are satisfied.
+By following the reverse-causal order of $\mathcal{G}$, this scheme guarantees
+constraints are satisfied \emph{by construction}, with no post-hoc repair.]}
+
+% Algorithm 11: LLM Ancestral Sampling (sub-step)
+\begin{algorithm}[t]
+\caption{LLM Ancestral Sampling for Intertwined Constraints}
+\label{alg:llm-sampling}
+\begin{algorithmic}[1]
+  \Require Intertwined column $c$, its local sub-DAG, constraints $\mathcal{C}_c \subseteq \mathcal{C}$
+  \Ensure Python code snippet $p_c$
+  \State \textit{[Placeholder: build prompt (sub-DAG + $\mathcal{C}_c$ + generation order + template)
+         $\to$ LLM synthesises inverse function $\to$ deterministic sanity check
+         (type compatibility, no undefined variables) $\to$ repair loop max 5 retries]}
+\end{algorithmic}
+\end{algorithm}
+
+% Figure 6: Code generation routing decision
+\begin{figure}[t]
+  \centering
+  \vspace{1.5cm}
+  \textit{[Figure 6 placeholder: Decision flowchart.
+  Input: column node $c$ from $\mathcal{G}$.
+  Diamond: ``single incoming dependency?''
+  Yes $\to$ Alg.~\ref{alg:det-code} (deterministic inverse, labelled with aggregation type).
+  No $\to$ Alg.~\ref{alg:llm-sampling} (LLM ancestral sampling).
+  Illustrated on Credit Risk DAG: \texttt{interest\_rate} routed to LLM (two drivers);
+  \texttt{loan\_amount} FK reference routed to deterministic JOIN inverse.]}
+  \vspace{1.5cm}
+  \caption{Code generation routing per column node in $\mathcal{G}$.
+           Single-dependency columns take the deterministic inverse path (no LLM call);
+           intertwined columns are handled by the LLM ancestral-sampling agent.}
+  \label{fig:codegen-routing}
+\end{figure}
+
+\subsection{Code Merge and Smoke Testing}
+\textit{[Para: Shard-level Python snippets are merged into a single program using a fixed
+code template with five sections: imports, seed definitions, helper functions, intermediate-table
+synthesis, base-table materialisation.
+When two snippets contain conflicting initialisations of the same column (e.g., one uses a
+distribution spec, another uses random initialisation), a deterministic tie-breaking rule
+resolves the conflict (distribution-spec $\succ$ random; structured $\succ$ unstructured).
+The merged program is smoke-tested by running it at 10\% of the target row count.
+Any runtime failure triggers an agent repair loop before full-scale materialisation.
+The final output is $\mathcal{P}$.]}
+
+% Algorithm 12: Deterministic Code Merge (sub-step)
+\begin{algorithm}[t]
+\caption{Deterministic Code Merge}
+\label{alg:code-merge}
+\begin{algorithmic}[1]
+  \Require Shard-level code snippets $\{p_1,\ldots,p_k\}$, code template $\mathcal{T}$
+  \Ensure Consolidated Python program $\mathcal{P}$
+  \State \textit{[Placeholder: align snippets to template sections
+         (imports / seeds / helpers / intermediate / base);
+         resolve column initialisation conflicts via tie-breaking rules;
+         smoke test at 10\% scale; repair loop max 5 retries on failure]}
+\end{algorithmic}
+\end{algorithm}
+
+% Algorithm 13: Stage 4 summary (calls Algs 10, 11, 12)
+\begin{algorithm}[t]
+\caption{Stage 4: Code Generation}
+\label{alg:stage4}
+\begin{algorithmic}[1]
+  \Require Schema $\mathcal{S}$, constraints $\mathcal{C}$, DAG $\mathcal{G}$
+  \Ensure Python program $\mathcal{P}$
+  \State \textit{[Placeholder: traverse $\mathcal{G}$ in reverse-topological order;
+         single in-edge $\to$ DetInverseCode (Alg.~\ref{alg:det-code}),
+         multiple in-edges $\to$ LLMAncestralSampling (Alg.~\ref{alg:llm-sampling});
+         CodeMerge (Alg.~\ref{alg:code-merge}) $\to$ return $\mathcal{P}$]}
+\end{algorithmic}
+\end{algorithm}
+

@@ -90,7 +90,14 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
 
             c_name = to_snake_case(attr.name).lower()
             if not any(c.name == c_name for c in columns):
-                columns.append(Column(name=c_name, data_type=attr.type))
+                columns.append(
+                    Column(
+                        name=c_name,
+                        data_type=attr.type,
+                        is_nullable=attr.is_nullable,
+                        source_fact_ids=attr.source_fact_ids,
+                    )
+                )
 
         # 3. PK Selection
         if entity.identifier_attributes:
@@ -134,12 +141,24 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                 pk_col = f"{to_snake_case(entity.name).lower()}_id"
                 pk_cols = [pk_col]
                 if not any(c.name == pk_col for c in columns):
-                    columns.append(Column(name=pk_col, data_type=DataType.INTEGER))
+                    columns.append(
+                        Column(
+                            name=pk_col,
+                            data_type=DataType.INTEGER,
+                            source_fact_ids=entity.source_fact_ids,
+                        )
+                    )
 
         # Ensure every chosen PK member has a column.
         for pk_name in pk_cols:
             if not any(c.name == pk_name for c in columns):
-                columns.append(Column(name=pk_name, data_type=DataType.INTEGER))
+                columns.append(
+                    Column(
+                        name=pk_name,
+                        data_type=DataType.INTEGER,
+                        source_fact_ids=entity.source_fact_ids,
+                    )
+                )
 
         # A primary key must be key-eligible (INTEGER/VARCHAR/UUID). If the chosen natural
         # key (from identifier_attributes or an FD) has a non-eligible member -- e.g. a DATE
@@ -155,10 +174,21 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
         if not pk_ok:
             surrogate = f"{to_snake_case(entity.name).lower()}_id"
             if not any(c.name == surrogate for c in columns):
-                columns.append(Column(name=surrogate, data_type=DataType.INTEGER))
+                columns.append(
+                    Column(
+                        name=surrogate,
+                        data_type=DataType.INTEGER,
+                        source_fact_ids=entity.source_fact_ids,
+                    )
+                )
             pk_cols = [surrogate]
 
-        table = Table(name=t_name, primary_key=pk_cols, columns=columns)
+        table = Table(
+            name=t_name,
+            primary_key=pk_cols,
+            columns=columns,
+            source_fact_ids=entity.source_fact_ids,
+        )
         tables.append(table)
         entity_tables[entity.name.lower()] = table
 
@@ -170,24 +200,50 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                 Column(
                     name=mva_col_name,
                     data_type=mva.type,
+                    source_fact_ids=mva.source_fact_ids,
                 )
             ]
-            mva_pk_cols = [mva_col_name]
+
+            key_eligible = {DataType.INTEGER, DataType.VARCHAR, DataType.UUID}
+            if mva.type in key_eligible:
+                mva_pk_cols = [mva_col_name]
+            else:
+                surrogate = f"{mva_col_name}_id"
+                mva_cols.append(
+                    Column(
+                        name=surrogate,
+                        data_type=DataType.INTEGER,
+                        source_fact_ids=mva.source_fact_ids,
+                    )
+                )
+                mva_pk_cols = [surrogate]
 
             for pk_c in pk_cols:
                 parent_col = next((c for c in columns if c.name == pk_c))
-                mva_cols.append(Column(name=pk_c, data_type=parent_col.data_type))
+                mva_cols.append(
+                    Column(
+                        name=pk_c,
+                        data_type=parent_col.data_type,
+                        source_fact_ids=mva.source_fact_ids,
+                    )
+                )
                 mva_pk_cols.append(pk_c)
                 relationships_to_add.append(
                     ForeignKey(
                         referencing_table=mva_t_name,
                         referencing_column=pk_c,
                         referred_table=t_name,
+                        source_fact_ids=mva.source_fact_ids,
                     )
                 )
 
             tables.append(
-                Table(name=mva_t_name, primary_key=mva_pk_cols, columns=mva_cols)
+                Table(
+                    name=mva_t_name,
+                    primary_key=mva_pk_cols,
+                    columns=mva_cols,
+                    source_fact_ids=mva.source_fact_ids,
+                )
             )
 
     # Weak entity pass
@@ -200,7 +256,11 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                     if not any(c.name == pk_c for c in child_t.columns):
                         owner_col = next((c for c in owner_t.columns if c.name == pk_c))
                         child_t.columns.append(
-                            Column(name=pk_c, data_type=owner_col.data_type)
+                            Column(
+                                name=pk_c,
+                                data_type=owner_col.data_type,
+                                source_fact_ids=entity.source_fact_ids,
+                            )
                         )
                     if pk_c not in child_t.primary_key:
                         child_t.primary_key.append(pk_c)
@@ -209,6 +269,7 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                             referencing_table=child_t.name,
                             referencing_column=pk_c,
                             referred_table=owner_t.name,
+                            source_fact_ids=entity.source_fact_ids,
                         )
                     )
 
@@ -239,7 +300,13 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                     continue
                 c_name = to_snake_case(attr.name).lower()
                 if not any(c.name == c_name for c in columns):
-                    columns.append(Column(name=c_name, data_type=attr.type))
+                    columns.append(
+                        Column(
+                            name=c_name,
+                            data_type=attr.type,
+                            source_fact_ids=attr.source_fact_ids,
+                        )
+                    )
 
             for p in rel.participants:
                 p_t = entity_tables.get(p.entity.lower())
@@ -253,7 +320,11 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
 
                     if not any(c.name == fk_col_name for c in columns):
                         columns.append(
-                            Column(name=fk_col_name, data_type=parent_col.data_type)
+                            Column(
+                                name=fk_col_name,
+                                data_type=parent_col.data_type,
+                                source_fact_ids=rel.source_fact_ids,
+                            )
                         )
 
                     if fk_col_name not in pk_cols:
@@ -264,10 +335,18 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                             referencing_table=t_name,
                             referencing_column=fk_col_name,
                             referred_table=p_t.name,
+                            source_fact_ids=rel.source_fact_ids,
                         )
                     )
 
-            tables.append(Table(name=t_name, primary_key=pk_cols, columns=columns))
+            tables.append(
+                Table(
+                    name=t_name,
+                    primary_key=pk_cols,
+                    columns=columns,
+                    source_fact_ids=rel.source_fact_ids,
+                )
+            )
 
         elif rel.kind == "1:N" and len(rel.participants) == 2:
             p1, p2 = rel.participants
@@ -293,12 +372,25 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                         else ""
                     )
 
+                # child_p.cardinality_min == 0 means an instance of the child
+                # entity need not participate in this relationship at all
+                # (e.g. a PATIENT need not have INSURANCE) -- the synthesized
+                # FK is nullable in exactly that case, never inferred from
+                # naming. Unspecified (None) defaults to required (False),
+                # the existing safe default for a schema with no cardinality
+                # info at all.
+                fk_is_nullable = child_p.cardinality_min == 0
                 for pk_c in parent_t.primary_key:
                     fk_col_name = f"{role_prefix}{pk_c}"
                     parent_col = next((c for c in parent_t.columns if c.name == pk_c))
                     if not any(c.name == fk_col_name for c in child_t.columns):
                         child_t.columns.append(
-                            Column(name=fk_col_name, data_type=parent_col.data_type)
+                            Column(
+                                name=fk_col_name,
+                                data_type=parent_col.data_type,
+                                is_nullable=fk_is_nullable,
+                                source_fact_ids=rel.source_fact_ids,
+                            )
                         )
 
                     relationships_to_add.append(
@@ -306,6 +398,7 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                             referencing_table=child_t.name,
                             referencing_column=fk_col_name,
                             referred_table=parent_t.name,
+                            source_fact_ids=rel.source_fact_ids,
                         )
                     )
 
@@ -326,6 +419,14 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
 
             if child_t and parent_t:
                 fk_cols_added = []
+                # Same rule as the 1:N branch above -- cardinality_min == 0 on
+                # whichever participant ended up as child_p (including via the
+                # alphabetical tiebreak, when cardinality info didn't clearly
+                # pick a side) means that side's participation is optional, so
+                # its FK is nullable. Unspecified/None or 1 both default to
+                # required (False), matching the tiebreak's own "assume
+                # required unless told otherwise" stance.
+                fk_is_nullable = child_p.cardinality_min == 0
                 for pk_c in parent_t.primary_key:
                     fk_col_name = pk_c
                     if child_t.name == parent_t.name:
@@ -346,7 +447,12 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                     parent_col = next((c for c in parent_t.columns if c.name == pk_c))
                     if not any(c.name == fk_col_name for c in child_t.columns):
                         child_t.columns.append(
-                            Column(name=fk_col_name, data_type=parent_col.data_type)
+                            Column(
+                                name=fk_col_name,
+                                data_type=parent_col.data_type,
+                                is_nullable=fk_is_nullable,
+                                source_fact_ids=rel.source_fact_ids,
+                            )
                         )
 
                     fk_cols_added.append(fk_col_name)
@@ -355,6 +461,7 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                             referencing_table=child_t.name,
                             referencing_column=fk_col_name,
                             referred_table=parent_t.name,
+                            source_fact_ids=rel.source_fact_ids,
                         )
                     )
 

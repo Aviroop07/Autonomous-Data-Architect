@@ -61,8 +61,15 @@ Generate only facts in these categories. Write each fact as a PLAIN declarative 
 - Every generated external fact must reference at least one original fact ID in `referenced_fact_ids`.
 - References must point to facts that the external context directly clarifies or supports.
 
+### Structural Reference Rules (hard, deterministically checked)
+- A fact must NEVER list its own `id` in `referenced_fact_ids` (no self-reference).
+- Every `id` in `referenced_fact_ids` must be the id of an ORIGINAL (non-external) input fact -- never the id of another external fact you generated, and never an id that does not exist.
+- Do not emit two external facts with identical text (no duplicates).
+- If you receive a `## STRUCTURAL VALIDATION FEEDBACK` section, it lists facts from your previous attempt that failed these rules. For each, either re-emit the fact with a corrected `referenced_fact_ids` pointing to at least one relevant original fact, or drop it if no genuine anchor exists. Do not repeat the same violation.
+
 ### Output Requirements
 - Return only new external facts as RawFact objects with `is_external=true`.
 - Leave origin empty for external facts.
 - Use unique IDs starting after the maximum input fact ID.
-- Fewer high-quality facts are better than many generic facts. If there is no useful domain-specific enrichment, return an empty fact list.
+- **Generate at most 15 external facts per round.** Quality over quantity: a few precise, domain-specific facts are better than many generic ones. If you cannot produce useful domain-specific enrichment for any gap, return an empty fact list.
+- The enrichment loop runs multiple iterations, so you can address remaining gaps on subsequent rounds.

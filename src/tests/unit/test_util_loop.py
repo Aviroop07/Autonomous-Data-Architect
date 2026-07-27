@@ -17,6 +17,7 @@ from src.util.orchestration.loop import AgentLoop
 from src.util.orchestration.loop_types import (
     AgentRoleConfig,
     EdgeCondition,
+    ErrorRefreshConfig,
     GraphEdge,
     HistoryEntry,
     LoopAgent,
@@ -24,6 +25,7 @@ from src.util.orchestration.loop_types import (
     LoopContext,
     LoopOutputModel,
     LoopResult,
+    RetryBudget,
 )
 
 
@@ -658,3 +660,535 @@ class TestStatefulLoopAgent:
         assert len(gen_agent.fix_history) == 2
         assert "error_1" in gen_agent.fix_history
         assert "error_2" in gen_agent.fix_history
+
+
+# ---------------------------------------------------------------------------
+# RetryBudget -- external, shareable iteration budget
+# ---------------------------------------------------------------------------
+
+
+class TestRetryBudgetUnit:
+    def test_try_consume_decrements_until_exhausted(self):
+        budget = RetryBudget(remaining=2)
+        assert budget.try_consume() is True
+        assert budget.remaining == 1
+        assert budget.try_consume() is True
+        assert budget.remaining == 0
+        assert budget.try_consume() is False
+        assert budget.remaining == 0
+
+    def test_donate_transfers_at_most_available(self):
+        budget = RetryBudget(remaining=3)
+        transferred = budget.donate(10)
+        assert transferred == 3
+        assert budget.remaining == 0
+
+    def test_donate_never_goes_negative(self):
+        budget = RetryBudget(remaining=0)
+        assert budget.donate(5) == 0
+        assert budget.remaining == 0
+
+    def test_receive_increases_remaining(self):
+        budget = RetryBudget(remaining=1)
+        budget.receive(4)
+        assert budget.remaining == 5
+
+
+class TestAgentLoopWithExternalBudget:
+    def test_no_budget_arg_behaves_as_before(self):
+        """Backward-compat guard: omitting `budget` must behave exactly
+        like the pre-RetryBudget implementation."""
+        agent = make_stub_agent([SimpleOutput(value="hello")])
+        config = LoopConfig(
+            agents={"generator": AgentRoleConfig(agent_factory=lambda: agent)},
+            graph={"edges": [GraphEdge(from_node="generator", to_node="end")]},
+            start_node="generator",
+        )
+        result = asyncio.run(AgentLoop(config).run("task"))
+        assert result.iteration_count == 1
+        assert result.final_output.value == "hello"  # type: ignore[union-attr]
+
+    def test_external_budget_caps_iterations(self):
+        def always_fail(query: str) -> list[str]:
+            return ["always bad"]
+
+        gen_agent = make_stub_agent([SimpleOutput(value="bad")], node_name="generator")
+        validator = make_validator_agent(always_fail)
+        config = LoopConfig(
+            agents={
+                "generator": AgentRoleConfig(agent_factory=lambda: gen_agent),
+                "validator": AgentRoleConfig(agent_factory=lambda: validator),
+            },
+            graph={
+                "edges": [
+                    GraphEdge(from_node="generator", to_node="validator"),
+                    GraphEdge(
+                        from_node="validator",
+                        to_node="generator",
+                        condition=EdgeCondition(field="is_valid", op="eq", value=False),
+                    ),
+                    GraphEdge(from_node="validator", to_node="end"),
+                ]
+            },
+            start_node="generator",
+            max_iter=100,  # config's own cap is generous -- budget is what binds
+        )
+        budget = RetryBudget(remaining=3)
+        result = asyncio.run(AgentLoop(config).run("", budget))
+        assert result.iteration_count == 3
+        assert budget.remaining == 0
+
+    def test_pre_exhausted_budget_runs_zero_iterations(self):
+        agent = make_stub_agent([SimpleOutput(value="hello")])
+        config = LoopConfig(
+            agents={"generator": AgentRoleConfig(agent_factory=lambda: agent)},
+            graph={"edges": [GraphEdge(from_node="generator", to_node="end")]},
+            start_node="generator",
+        )
+        budget = RetryBudget(remaining=0)
+        result = asyncio.run(AgentLoop(config).run("task", budget))
+        assert result.iteration_count == 0
+        assert result.final_output is None
+
+    def test_donated_budget_extends_a_struggling_loop(self):
+        """Simulates the real cross-loop reallocation scenario: a loop
+        that would otherwise exhaust its budget unconverged succeeds once
+        a sibling donates extra iterations into the SAME shared budget
+        object mid-run (via a side effect on the validator's 1st call).
+
+        Budget=2 buys exactly one generator+validator pass (each node
+        execution consumes 1 unit) before try_consume() would return
+        False on the retry -- without a donation this loop would exit
+        unconverged after that single round. The donation happens
+        synchronously inside the validator's first call, so it is
+        already visible to the very next try_consume() check (this
+        loop's own retry), exactly like a sibling loop's completion
+        callback would apply it in run_parallel_loops()."""
+        call_count = [0]
+
+        def errors_fn(query: str) -> list[str]:
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # Simulate a sibling loop finishing early and donating,
+                # with a comfortable margin (only 2 more units strictly
+                # needed for one more generator+validator round).
+                shared_budget.receive(4)
+            return [] if call_count[0] >= 2 else ["still bad"]
+
+        gen_agent = make_stub_agent([SimpleOutput(value="v")], node_name="generator")
+        validator = make_validator_agent(errors_fn)
+        config = LoopConfig(
+            agents={
+                "generator": AgentRoleConfig(agent_factory=lambda: gen_agent),
+                "validator": AgentRoleConfig(agent_factory=lambda: validator),
+            },
+            graph={
+                "edges": [
+                    GraphEdge(from_node="generator", to_node="validator"),
+                    GraphEdge(
+                        from_node="validator",
+                        to_node="generator",
+                        condition=EdgeCondition(field="is_valid", op="eq", value=False),
+                    ),
+                    GraphEdge(from_node="validator", to_node="end"),
+                ]
+            },
+            start_node="generator",
+            max_iter=100,
+        )
+        shared_budget = RetryBudget(remaining=2)  # would exhaust after round 1 alone
+        result = asyncio.run(AgentLoop(config).run("", shared_budget))
+        assert result.final_output is not None
+        assert result.final_output.is_valid is True  # type: ignore[union-attr]
+        assert call_count[0] == 2
+
+
+# ---------------------------------------------------------------------------
+# Error accumulation + refresh (ErrorRefreshConfig)
+# ---------------------------------------------------------------------------
+
+
+class TestErrorAccumulation:
+    def test_errors_accumulate_between_generator_runs(self):
+        """Errors from the validator accumulate in the sink and are visible
+        to the generator on the next round."""
+
+        call_count = [0]
+
+        def errors_fn(query: str) -> list[str]:
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return ["error_A"]
+            if call_count[0] == 2:
+                return ["error_B"]
+            return []
+
+        gen_queries: list[str] = []
+
+        gen_agent = make_stub_agent(
+            [
+                SimpleOutput(value="v1"),
+                SimpleOutput(value="v2"),
+                SimpleOutput(value="v3"),
+            ],
+            record_queries=gen_queries,
+        )
+        val_agent = make_validator_agent(errors_fn)
+
+        config = LoopConfig(
+            agents={
+                "generator": AgentRoleConfig(
+                    agent_factory=lambda: gen_agent,
+                    det_error_sources=["validator"],
+                ),
+                "validator": AgentRoleConfig(agent_factory=lambda: val_agent),
+            },
+            graph={
+                "edges": [
+                    GraphEdge(from_node="generator", to_node="validator"),
+                    GraphEdge(
+                        from_node="validator",
+                        to_node="generator",
+                        condition=EdgeCondition(field="is_valid", op="eq", value=False),
+                    ),
+                    GraphEdge(from_node="validator", to_node="end"),
+                ]
+            },
+            start_node="generator",
+            max_iter=6,
+            error_refresh=ErrorRefreshConfig(trigger_node="generator"),
+        )
+
+        asyncio.run(AgentLoop(config).run(""))
+
+        # Second generator call should see error_A (accumulated from round 1).
+        assert len(gen_queries) >= 2
+        assert "error_A" in gen_queries[1]
+
+    def test_refresh_archives_and_resets_sink(self):
+        """After the trigger node runs, the sink is archived to
+        det_error_history and reset to empty."""
+
+        call_count = [0]
+
+        def errors_fn(query: str) -> list[str]:
+            call_count[0] += 1
+            if call_count[0] <= 2:
+                return ["error_A"]
+            return []
+
+        captured_ctx: list[LoopContext] = []
+
+        class _RecordingGen(LoopAgent):
+            async def invoke(self, query: str) -> tuple[LoopOutputModel, int]:
+                return SimpleOutput(value="v"), 10
+
+            def build_context(self, ctx: LoopContext) -> str:
+                captured_ctx.append(ctx)
+                return "task"
+
+            def emit_history(
+                self,
+                output: LoopOutputModel,
+                prior: Optional[LoopOutputModel],
+                round_num: int,
+                node: str,
+            ) -> HistoryEntry:
+                return HistoryEntry(round=round_num, node=node, changes_summary="x")
+
+        gen_agent = _RecordingGen()
+        val_agent = make_validator_agent(errors_fn)
+
+        config = LoopConfig(
+            agents={
+                "generator": AgentRoleConfig(
+                    agent_factory=lambda: gen_agent,
+                    det_error_sources=["validator"],
+                ),
+                "validator": AgentRoleConfig(agent_factory=lambda: val_agent),
+            },
+            graph={
+                "edges": [
+                    GraphEdge(from_node="generator", to_node="validator"),
+                    GraphEdge(
+                        from_node="validator",
+                        to_node="generator",
+                        condition=EdgeCondition(field="is_valid", op="eq", value=False),
+                    ),
+                    GraphEdge(from_node="validator", to_node="end"),
+                ]
+            },
+            start_node="generator",
+            max_iter=6,
+            error_refresh=ErrorRefreshConfig(trigger_node="generator"),
+        )
+
+        asyncio.run(AgentLoop(config).run(""))
+
+        # Lifecycle:
+        # Gen1(iter1): sink=[], history=[], refresh archives nothing (empty)
+        # Val1(iter2): sink=["error_A"] (call_count=1)
+        # Gen2(iter3): sink=["error_A"], history=[], captured_ctx[1]
+        #   -> refresh archives (3, ["error_A"]), sink=[]
+        # Val2(iter4): sink=["error_A"] (call_count=2)
+        # Gen3(iter5): sink=["error_A"], history=[(3,["error_A"])], captured_ctx[2]
+        #   -> refresh archives (5, ["error_A"]), sink=[]
+        # Val3(iter6): sink=[] (call_count=3, returns []), routes to end
+
+        assert len(captured_ctx) >= 3
+
+        # Gen1: empty sink, empty history (nothing to archive).
+        assert captured_ctx[0].det_errors == []
+        assert captured_ctx[0].det_error_history == []
+
+        # Gen2: sink has error_A from Val1, no history yet.
+        assert "error_A" in captured_ctx[1].det_errors
+        assert captured_ctx[1].det_error_history == []
+
+        # Gen3: sink has error_A from Val2, history has archived batch from Gen2.
+        assert "error_A" in captured_ctx[2].det_errors
+        assert len(captured_ctx[2].det_error_history) >= 1
+        archived = [e for _, _, errs in captured_ctx[2].det_error_history for e in errs]
+        assert "error_A" in archived
+
+    def test_generator_sees_history_not_current_sink_after_refresh(self):
+        """The generator at round N sees errors from rounds N-1 (in sink)
+        and rounds 1..N-2 (in history)."""
+
+        call_count = [0]
+
+        def errors_fn(query: str) -> list[str]:
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return ["error_A"]
+            if call_count[0] == 2:
+                return ["error_B"]
+            return []
+
+        captured_ctx: list[LoopContext] = []
+
+        class _RecordingGen(LoopAgent):
+            async def invoke(self, query: str) -> tuple[LoopOutputModel, int]:
+                return SimpleOutput(value="v"), 10
+
+            def build_context(self, ctx: LoopContext) -> str:
+                captured_ctx.append(ctx)
+                return "task"
+
+            def emit_history(
+                self,
+                output: LoopOutputModel,
+                prior: Optional[LoopOutputModel],
+                round_num: int,
+                node: str,
+            ) -> HistoryEntry:
+                return HistoryEntry(round=round_num, node=node, changes_summary="x")
+
+        gen_agent = _RecordingGen()
+        val_agent = make_validator_agent(errors_fn)
+
+        config = LoopConfig(
+            agents={
+                "generator": AgentRoleConfig(
+                    agent_factory=lambda: gen_agent,
+                    det_error_sources=["validator"],
+                ),
+                "validator": AgentRoleConfig(agent_factory=lambda: val_agent),
+            },
+            graph={
+                "edges": [
+                    GraphEdge(from_node="generator", to_node="validator"),
+                    GraphEdge(
+                        from_node="validator",
+                        to_node="generator",
+                        condition=EdgeCondition(field="is_valid", op="eq", value=False),
+                    ),
+                    GraphEdge(from_node="validator", to_node="end"),
+                ]
+            },
+            start_node="generator",
+            max_iter=8,
+            error_refresh=ErrorRefreshConfig(trigger_node="generator"),
+        )
+
+        asyncio.run(AgentLoop(config).run(""))
+
+        # Find the context where error_B is in the sink (after round 2
+        # validator found error_B but before next generator refresh).
+        found_b_in_sink = False
+        found_a_in_history = False
+        for ctx in captured_ctx:
+            if "error_B" in ctx.det_errors:
+                found_b_in_sink = True
+            for _, _, errs in ctx.det_error_history:
+                if "error_A" in errs:
+                    found_a_in_history = True
+
+        assert found_b_in_sink, "error_B should appear in the sink at some point"
+        assert found_a_in_history, "error_A should be archived in history"
+
+    def test_empty_sink_not_archived(self):
+        """If the sink is empty when refresh fires, nothing is archived."""
+
+        captured_ctx: list[LoopContext] = []
+
+        class _RecordingGen(LoopAgent):
+            async def invoke(self, query: str) -> tuple[LoopOutputModel, int]:
+                return SimpleOutput(value="v"), 10
+
+            def build_context(self, ctx: LoopContext) -> str:
+                captured_ctx.append(ctx)
+                return "task"
+
+            def emit_history(
+                self,
+                output: LoopOutputModel,
+                prior: Optional[LoopOutputModel],
+                round_num: int,
+                node: str,
+            ) -> HistoryEntry:
+                return HistoryEntry(round=round_num, node=node, changes_summary="x")
+
+        gen_agent = _RecordingGen()
+
+        def no_errors(query: str) -> list[str]:
+            return []
+
+        val_agent = make_validator_agent(no_errors)
+
+        config = LoopConfig(
+            agents={
+                "generator": AgentRoleConfig(
+                    agent_factory=lambda: gen_agent,
+                    det_error_sources=["validator"],
+                ),
+                "validator": AgentRoleConfig(agent_factory=lambda: val_agent),
+            },
+            graph={
+                "edges": [
+                    GraphEdge(from_node="generator", to_node="validator"),
+                    GraphEdge(from_node="validator", to_node="end"),
+                ]
+            },
+            start_node="generator",
+            max_iter=4,
+            error_refresh=ErrorRefreshConfig(trigger_node="generator"),
+        )
+
+        asyncio.run(AgentLoop(config).run(""))
+
+        # No errors ever produced, so history should be empty.
+        for ctx in captured_ctx:
+            assert ctx.det_error_history == []
+
+    def test_no_error_refresh_preserves_old_behavior(self):
+        """Without error_refresh set, det_errors uses det_error_sources
+        filtering exactly as before."""
+
+        call_count = [0]
+
+        def errors_fn(query: str) -> list[str]:
+            call_count[0] += 1
+            return ["error_A"] if call_count[0] < 2 else []
+
+        queries: list[str] = []
+        gen_agent = make_stub_agent(
+            [SimpleOutput(value="bad"), SimpleOutput(value="good")],
+            record_queries=queries,
+        )
+        val_agent = make_validator_agent(errors_fn)
+
+        config = LoopConfig(
+            agents={
+                "generator": AgentRoleConfig(
+                    agent_factory=lambda: gen_agent,
+                    det_error_sources=["validator"],
+                ),
+                "validator": AgentRoleConfig(agent_factory=lambda: val_agent),
+            },
+            graph={
+                "edges": [
+                    GraphEdge(from_node="generator", to_node="validator"),
+                    GraphEdge(
+                        from_node="validator",
+                        to_node="generator",
+                        condition=EdgeCondition(field="is_valid", op="eq", value=False),
+                    ),
+                    GraphEdge(from_node="validator", to_node="end"),
+                ]
+            },
+            start_node="generator",
+            max_iter=5,
+            # No error_refresh -- old behavior.
+        )
+
+        asyncio.run(AgentLoop(config).run(""))
+        assert len(queries) >= 2
+        assert "error_A" in queries[1]
+
+    def test_multiple_nodes_all_contribute_to_sink(self):
+        """Errors from both validator and auditor accumulate in the sink."""
+
+        call_count = [0]
+
+        class _AlternatingValidator(LoopAgent):
+            async def invoke(self, query: str) -> tuple[LoopOutputModel, int]:
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    return ValidatedOutput(
+                        value="v", is_valid=False, error_messages=["val_error"]
+                    ), 0
+                return ValidatedOutput(value="v", is_valid=True), 0
+
+            def build_context(self, ctx: LoopContext) -> str:
+                gen_out = ctx.node_outputs.get("generator")
+                return gen_out.value if isinstance(gen_out, SimpleOutput) else ""
+
+            def emit_history(self, output, prior, round_num, node):
+                return HistoryEntry(round=round_num, node=node, changes_summary="x")
+
+        captured_ctx: list[LoopContext] = []
+
+        class _RecordingGen(LoopAgent):
+            async def invoke(self, query: str) -> tuple[LoopOutputModel, int]:
+                return SimpleOutput(value="v"), 10
+
+            def build_context(self, ctx: LoopContext) -> str:
+                captured_ctx.append(ctx)
+                return "task"
+
+            def emit_history(self, output, prior, round_num, node):
+                return HistoryEntry(round=round_num, node=node, changes_summary="x")
+
+        gen_agent = _RecordingGen()
+        val_agent = _AlternatingValidator()
+
+        config = LoopConfig(
+            agents={
+                "generator": AgentRoleConfig(
+                    agent_factory=lambda: gen_agent,
+                    det_error_sources=["validator"],
+                ),
+                "validator": AgentRoleConfig(agent_factory=lambda: val_agent),
+            },
+            graph={
+                "edges": [
+                    GraphEdge(from_node="generator", to_node="validator"),
+                    GraphEdge(
+                        from_node="validator",
+                        to_node="generator",
+                        condition=EdgeCondition(field="is_valid", op="eq", value=False),
+                    ),
+                    GraphEdge(from_node="validator", to_node="end"),
+                ]
+            },
+            start_node="generator",
+            max_iter=6,
+            error_refresh=ErrorRefreshConfig(trigger_node="generator"),
+        )
+
+        asyncio.run(AgentLoop(config).run(""))
+
+        # Second generator call: sink should contain val_error.
+        assert len(captured_ctx) >= 2
+        assert "val_error" in captured_ctx[1].det_errors

@@ -1,4 +1,7 @@
 from typing import List, Optional, Tuple
+import logging
+
+logger = logging.getLogger(__name__)
 
 from src.orchestration.stage1.loop_config import (
     make_enrichment_loop_config,
@@ -11,7 +14,9 @@ from src.pipeline.stage1.middleware.external_context_filter import (
     filter_external_facts,
 )
 from src.pipeline.stage1.middleware.tag_normalization import normalize_stage1_tags
-from src.pipeline.stage1.agents.spec_completeness_auditor.agent import audit_completeness
+from src.pipeline.stage1.agents.spec_completeness_auditor.agent import (
+    audit_completeness,
+)
 from src.pipeline.stage1.models.coverage_report import SpecGap
 from src.pipeline.stage1.models.context_audit import ContextAuditAttempt
 from src.pipeline.stage1.models.integrity_report import IntegrityReport
@@ -68,8 +73,10 @@ async def _orchestrate_impl(
     ablation_config: Optional[AblationConfig] = None,
 ) -> Tuple[Output, int]:
     clear_search_cache()
+    logger.info("[Stage 1] Initializing extraction agent loop...")
     loop_config = make_stage1_loop_config(nl_description, model=model)
     result = await AgentLoop(loop_config).run(nl_description)
+    logger.info(f"[Stage 1] Extraction loop completed in {result.iteration_count} iterations. Total tokens so far: {result.total_tokens}")
 
     raw_extraction = result.node_outputs.get("extractor")
     extraction_output: RephrasedOutput = (
@@ -78,8 +85,8 @@ async def _orchestrate_impl(
         else RephrasedOutput(segments=[])
     )
     if not isinstance(raw_extraction, RephrasedOutput):
-        print(
-            f"[Stage 1] Loop exhausted after {result.iteration_count} iterations "
+        logger.warning(
+            f"[Stage 1] 🚨 Loop exhausted after {result.iteration_count} iterations "
             f"with no accepted extractor output."
         )
 
@@ -109,7 +116,10 @@ async def _orchestrate_impl(
 
     if enrichment_enabled and gate_open:
         gate_gaps = coverage_report.gaps_for_enrichment()
-        print(f"[Stage 1] Coverage gate OPEN: {len(gate_gaps)} gaps (minor gaps included for free).")
+        logger.info(
+            f"[Stage 1] Coverage gate OPEN: {len(gate_gaps)} gap(s) found (minor gaps included). "
+            f"Starting context enrichment loop..."
+        )
         external_facts, t_enrich = await _run_context_enrichment_loop(
             facts=extracted_facts,
             gaps=gate_gaps,
@@ -122,17 +132,22 @@ async def _orchestrate_impl(
         )
         external_facts = enrichment_filter_report.accepted_facts
         if enrichment_filter_report.rejected_facts:
-            print(
+            logger.info(
                 f"[Stage 1] Filtered {len(enrichment_filter_report.rejected_facts)} "
                 "mechanically invalid external facts."
             )
         all_facts: List[RawFact] = extracted_facts + external_facts
+        logger.info(f"[Stage 1] Enrichment finished. Total facts now: {len(all_facts)}")
     elif not enrichment_enabled:
-        print("[Stage 1] Context enrichment disabled (ablation).")
+        logger.info("[Stage 1] Context enrichment disabled (ablation).")
         all_facts = extracted_facts
     else:
-        print("[Stage 1] Coverage gate CLOSED: spec sufficiently complete; skipping enrichment.")
+        logger.info(
+            "[Stage 1] Coverage gate CLOSED: spec sufficiently complete; skipping enrichment."
+        )
         all_facts = extracted_facts
+
+    logger.info(f"[Stage 1] Tagging {len(all_facts)} facts...")
 
     tag_results, t_tag = await tag_facts(facts=all_facts, model=model)
     total_tokens += t_tag
@@ -149,11 +164,13 @@ async def _orchestrate_impl(
         convert_to_atomic(all_facts, tag_results, segment_lookup)
     )
 
-    from src.util.schema_ops.graph_chunker import run_graph_chunker
+    from src.pipeline.stage1.middleware.bayesian_chunker import BayesianChunker
 
-    print("[Stage 1] Clustering facts...")
-    plan = run_graph_chunker(tagged_facts)
-    # the graph chunker is deterministic and zero tokens
+    logger.info("[Stage 1] Clustering facts via Bayesian partition sampler...")
+    chunker = BayesianChunker(alpha=0.5, n_burnin=2000, n_samples=2000, thin=5)
+    plan = chunker.fit(tagged_facts)
+    logger.info(f"[Stage 1] Bayesian chunker produced {len(plan.chunks)} cluster(s).")
+    # the Bayesian chunker is deterministic given random_state
 
     output = Output(
         final_facts=tagged_facts,
@@ -176,7 +193,7 @@ async def _run_context_enrichment_loop(
     model: Optional[str],
     audit_trail: List[ContextAuditAttempt],
 ) -> Tuple[List[RawFact], int]:
-    config, enricher_agent, auditor_agent = make_enrichment_loop_config(
+    config, enricher_agent, auditor_agent, _filter_agent = make_enrichment_loop_config(
         original_facts=facts,
         gaps=gaps,
         model=model,

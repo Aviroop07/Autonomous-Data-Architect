@@ -199,6 +199,20 @@ class AgentRoleConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class ErrorRefreshConfig(BaseModel):
+    """When the accumulated error sink is flushed to history.
+
+    Between refreshes, get_errors() from every node execution extends a
+    single accumulated error list. At the refresh point (after the trigger
+    node's invoke + error extraction), the accumulated list is archived to
+    LoopContext.det_error_history and the sink resets to [].
+    """
+
+    trigger_node: str
+    condition: Optional[EdgeCondition] = None
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+
 class LoopConfig(BaseModel):
     agents: dict[str, AgentRoleConfig]
     graph: dict[str, list[GraphEdge]]  # {"edges": [...]}
@@ -206,6 +220,7 @@ class LoopConfig(BaseModel):
     max_iter: int = 5
     ema_alpha: float = 0.4
     ema_persistent_threshold: float = 0.6
+    error_refresh: Optional[ErrorRefreshConfig] = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -249,11 +264,51 @@ class LoopContext:
     det_errors: list[str]
     det_errors_by_node: dict[str, list[str]]
     ema_issues: list[Tuple[str, float]]
+    det_error_history: list[tuple[int, str, list[str]]] = field(
+        default_factory=list,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Loop result
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class RetryBudget:
+    """Mutable, shareable iteration budget for AgentLoop.run().
+
+    Supports live reallocation across concurrently-running loops (see
+    util/orchestration/parallel_loop.py's run_parallel_loops()): a loop
+    that converges before exhausting its budget can donate the remainder
+    to a sibling loop still in progress, entirely through this shared
+    object -- safe under asyncio's cooperative single-threaded
+    scheduling (no locks needed; a donation is visible to a sibling's
+    next iteration check the moment it happens, since nothing else can
+    run between the mutation and that check).
+
+    AgentLoop.run() defaults to RetryBudget(config.max_iter) when none is
+    passed in, so this is fully backward compatible -- existing callers
+    that never construct one see identical behavior to before.
+    """
+
+    remaining: int
+
+    def try_consume(self) -> bool:
+        if self.remaining <= 0:
+            return False
+        self.remaining -= 1
+        return True
+
+    def donate(self, amount: int) -> int:
+        """Reduces this budget by up to `amount`, returning how much was
+        actually transferred (never negative, never more than remaining)."""
+        transfer = max(0, min(amount, self.remaining))
+        self.remaining -= transfer
+        return transfer
+
+    def receive(self, amount: int) -> None:
+        self.remaining += amount
 
 
 class LoopResult(BaseModel):
@@ -285,6 +340,8 @@ class _LoopState:
     node_prev: dict[str, LoopOutputModel] = field(default_factory=dict)
     history: list[HistoryEntry] = field(default_factory=list)
     det_errors: dict[str, list[str]] = field(default_factory=dict)
+    error_accumulator: list[str] = field(default_factory=list)
+    error_archive: list[tuple[int, str, list[str]]] = field(default_factory=list)
     ema_weights: dict[str, float] = field(default_factory=dict)
     tokens_by_node: dict[str, int] = field(default_factory=dict)
     iteration: int = 0

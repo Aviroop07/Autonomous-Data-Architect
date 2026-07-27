@@ -38,6 +38,9 @@ src/frontend_plan.md
 experiments/
 LLM4DBdesign/
 
+# Downloaded model weights (large, not part of the artifact)
+/models/
+
 # Local testing and scratch scripts
 /test_*.py
 /check_*.py
@@ -50,3 +53,19 @@ LLM4DBdesign/
 /benerator.log
 /descr.txt
 /stage1_output.txt
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.bbl
+*.blg
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+
+# Prototype / throwaway experiments (not part of the artifact)
+/prototype/
+
+/API costing/

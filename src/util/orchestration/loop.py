@@ -15,6 +15,7 @@ provides the history summary; infrastructure overwrites unresolved_issues after.
 
 from __future__ import annotations
 
+import logging
 from typing import Callable, Optional, Tuple
 
 from src.util.orchestration.loop_types import (
@@ -24,8 +25,11 @@ from src.util.orchestration.loop_types import (
     LoopContext,
     LoopOutputModel,
     LoopResult,
+    RetryBudget,
     _LoopState,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class AgentLoop:
@@ -54,22 +58,34 @@ class AgentLoop:
     # Public API
     # ------------------------------------------------------------------
 
-    async def run(self, initial_context: str) -> LoopResult:
-        """Run the loop from start_node until a stop condition is met."""
+    async def run(
+        self, initial_context: str, budget: Optional[RetryBudget] = None
+    ) -> LoopResult:
+        """Run the loop from start_node until a stop condition is met.
+
+        `budget` is optional -- when omitted, a fresh RetryBudget(config.
+        max_iter) is used internally, identical to this method's behavior
+        before RetryBudget existed. Pass an externally-owned budget (see
+        util/orchestration/parallel_loop.py's run_parallel_loops()) to let
+        this loop participate in cross-loop retry-budget reallocation --
+        a shared, mutable object other concurrently-running loops can top
+        up or drain from, checked once per iteration via try_consume().
+        """
+        budget = budget if budget is not None else RetryBudget(self.config.max_iter)
         state = _LoopState(initial_context=initial_context)
         current_node = self.config.start_node
         final_output: Optional[LoopOutputModel] = None
         final_node: str = current_node
 
-        for iteration in range(1, self.config.max_iter + 1):
+        iteration = 0
+        while budget.try_consume():
+            iteration += 1
             state.iteration = iteration
             role = self.config.agents[current_node]
             agent = self._get_agent(current_node, role)
 
             # 1. Build context from prior outputs, history, routed det_errors.
-            det_errors_for_ctx = self._select_det_errors(
-                current_node, role, dict(state.det_errors)
-            )
+            det_errors_for_ctx = self._select_det_errors(current_node, role, state)
             ctx = LoopContext(
                 initial_context=initial_context,
                 current_node=current_node,
@@ -78,6 +94,7 @@ class AgentLoop:
                 history=list(state.history),
                 det_errors=det_errors_for_ctx,
                 det_errors_by_node=dict(state.det_errors),
+                det_error_history=list(state.error_archive),
                 ema_issues=self._get_ema_issues(state),
             )
             query = agent.build_context(ctx)
@@ -93,6 +110,23 @@ class AgentLoop:
             # 3. Infrastructure extracts errors from output and owns det_errors + history.
             errors = output.get_errors()
             state.det_errors[current_node] = errors
+
+            # Accumulate into the error sink (all nodes, all sources).
+            state.error_accumulator.extend(errors)
+
+            # Refresh: archive the sink and reset if the trigger node just ran.
+            if self._should_refresh(current_node, output, state):
+                if state.error_accumulator:
+                    state.error_archive.append(
+                        (iteration, current_node, list(state.error_accumulator))
+                    )
+                    logger.debug(
+                        "[AgentLoop] REFRESH: archived %d errors from %s (archive now %d)",
+                        len(state.error_accumulator),
+                        current_node,
+                        len(state.error_archive),
+                    )
+                state.error_accumulator = []
 
             entry = agent.emit_history(output, prior_output, iteration, current_node)
             entry = entry.model_copy(
@@ -144,7 +178,11 @@ class AgentLoop:
             iteration_count=state.iteration,
             history=state.history,
             converged=state.converged,
-            det_errors_exhausted=bool(state.det_errors.get(final_node)),
+            det_errors_exhausted=(
+                bool(state.error_accumulator)
+                if self.config.error_refresh is not None
+                else bool(state.det_errors.get(final_node))
+            ),
             node_outputs=dict(state.node_outputs),
         )
 
@@ -164,14 +202,29 @@ class AgentLoop:
         self,
         node: str,
         role: AgentRoleConfig,
-        det_errors_by_node: dict[str, list[str]],
+        state: _LoopState,
     ) -> list[str]:
+        if self.config.error_refresh is not None:
+            return list(state.error_accumulator)
+        det_errors_by_node = dict(state.det_errors)
         if role.det_error_sources is None:
             return det_errors_by_node.get(node, [])
         errors: list[str] = []
         for source in role.det_error_sources:
             errors.extend(det_errors_by_node.get(source, []))
         return errors
+
+    def _should_refresh(
+        self, node: str, output: LoopOutputModel, state: _LoopState
+    ) -> bool:
+        refresh = self.config.error_refresh
+        if refresh is None:
+            return False
+        if node != refresh.trigger_node:
+            return False
+        if refresh.condition is not None:
+            return refresh.condition.evaluate(output)
+        return True
 
     def _evaluate_edges(
         self, current_node: str, output: LoopOutputModel, state: _LoopState

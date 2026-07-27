@@ -1,6 +1,6 @@
 from enum import Enum
-from pydantic import BaseModel, Field
-from typing import List, Optional
+from pydantic import Field
+from typing import List
 from .raw_fact import RawFact
 
 class FactTag(str, Enum):

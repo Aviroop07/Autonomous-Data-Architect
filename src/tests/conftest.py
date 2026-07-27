@@ -42,7 +42,24 @@ def pytest_collection_modifyitems(config, items):
 # --------------------------------------------------------------------------- #
 
 
+_TRANSIENT_TYPES = (
+    "APIConnectionError",
+    "APITimeoutError",
+    "RateLimitError",
+    "ConnectionError",
+    "TimeoutError",
+)
+
+
+@pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
+    # Must be a hookwrapper: `yield` runs pytest's own makereport first to
+    # build the real TestReport, then we mutate its outcome IN PLACE below.
+    # Calling `pytest.skip()` directly here (the previous approach) raises
+    # `Skipped` from inside a report hook, which nothing downstream catches --
+    # it crashes the whole run (and the whole xdist session) instead of just
+    # marking this one test skipped.
+    outcome = yield
     if call.when != "call":
         return
     if "integration" not in item.keywords:
@@ -50,19 +67,22 @@ def pytest_runtest_makereport(item, call):
     if call.excinfo is None:
         return
     exc = call.excinfo.value
-    _TRANSIENT_TYPES = (
-        "APIConnectionError",
-        "APITimeoutError",
-        "RateLimitError",
-        "ConnectionError",
-        "TimeoutError",
-    )
     if type(exc).__name__ in _TRANSIENT_TYPES or (
         hasattr(exc, "__cause__")
         and type(getattr(exc, "__cause__", None)).__name__ in _TRANSIENT_TYPES
     ):
-        pytest.skip(f"Skipped: transient network error ({type(exc).__name__})")
-        call.excinfo = None
+        report = outcome.get_result()
+        report.outcome = "skipped"
+        # Pytest's terminal reporter (short_test_summary -> _folded_skips)
+        # asserts a skipped report's longrepr is a (path, lineno, reason)
+        # tuple, not a bare string -- matching the shape pytest's own
+        # skipping.py plugin uses internally for a real skip.
+        path, lineno, _ = item.location
+        report.longrepr = (
+            path,
+            lineno,
+            f"Skipped: transient network error ({type(exc).__name__})",
+        )
 
 
 # --------------------------------------------------------------------------- #

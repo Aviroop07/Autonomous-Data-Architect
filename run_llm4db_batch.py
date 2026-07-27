@@ -23,6 +23,7 @@ import argparse
 import json
 import os
 import sys
+sys.stdout.reconfigure(encoding='utf-8')
 import time
 import types
 from pathlib import Path
@@ -46,6 +47,7 @@ _PROVIDER_DEFAULT_MODEL = {
     "gemini": "gemini",  # alias -> reads GEMINI_BASE_MODEL env, falls back to gemini-3.1-flash-lite
     "openai": "gpt4",  # alias -> gpt-4o-2024-08-06
     "openrouter": os.getenv("OPENROUTER_BASE_MODEL", "openai/gpt-4o"),
+    "deepseek": "deepseek",
 }
 
 

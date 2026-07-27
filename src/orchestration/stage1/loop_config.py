@@ -8,12 +8,17 @@ from src.pipeline.stage1.agents.context_auditor.agent import ContextAuditorLoopA
 from src.pipeline.stage1.agents.context_enricher.agent import ContextEnricherLoopAgent
 from src.pipeline.stage1.agents.fact_extractor.agent import FactExtractorLoopAgent
 from src.pipeline.stage1.agents.verifier.agent import VerifierLoopAgent
+from src.pipeline.stage1.middleware.context_filter_node import ContextFilterLoopAgent
+from src.pipeline.stage1.middleware.extraction_validator_node import (
+    ExtractionValidatorLoopAgent,
+)
 from src.pipeline.stage1.models.raw_fact import RawFact
 from src.pipeline.stage1.models.coverage_report import SpecGap
 from src.util.core.search_tool import EvidenceStore
 from src.util.orchestration.loop_types import (
     AgentRoleConfig,
     EdgeCondition,
+    ErrorRefreshConfig,
     GraphEdge,
     LoopConfig,
 )
@@ -24,18 +29,30 @@ def make_stage1_loop_config(
     model: Optional[str] = None,
 ) -> LoopConfig:
     """Build the AgentLoop config for Stage 1 extraction + verification."""
+
+    extractor = FactExtractorLoopAgent(model=model)
+    extraction_validator = ExtractionValidatorLoopAgent()
+    verifier = VerifierLoopAgent(model=model)
+
     return LoopConfig(
         agents={
             "extractor": AgentRoleConfig(
-                agent_factory=lambda: FactExtractorLoopAgent(model=model),
+                agent_factory=lambda: extractor, det_error_sources=["validator"]
             ),
+            "validator": AgentRoleConfig(agent_factory=lambda: extraction_validator),
             "verifier": AgentRoleConfig(
-                agent_factory=lambda: VerifierLoopAgent(model=model),
+                agent_factory=lambda: verifier,
             ),
         },
         graph={
             "edges": [
-                GraphEdge(from_node="extractor", to_node="verifier"),
+                GraphEdge(from_node="extractor", to_node="validator"),
+                GraphEdge(
+                    from_node="validator",
+                    to_node="extractor",
+                    condition=EdgeCondition(field="is_clean", op="eq", value=False),
+                ),
+                GraphEdge(from_node="validator", to_node="verifier"),
                 GraphEdge(
                     from_node="verifier",
                     to_node="extractor",
@@ -45,7 +62,8 @@ def make_stage1_loop_config(
             ]
         },
         start_node="extractor",
-        max_iter=5,
+        max_iter=9,
+        error_refresh=ErrorRefreshConfig(trigger_node="extractor"),
     )
 
 
@@ -53,14 +71,30 @@ def make_enrichment_loop_config(
     original_facts: List[RawFact],
     gaps: List[SpecGap],
     model: Optional[str] = None,
-) -> tuple[LoopConfig, ContextEnricherLoopAgent, ContextAuditorLoopAgent]:
-    """Build the AgentLoop config for context enrichment + auditing.
+) -> tuple[
+    LoopConfig,
+    ContextEnricherLoopAgent,
+    ContextAuditorLoopAgent,
+    ContextFilterLoopAgent,
+]:
+    """Build the AgentLoop config for context enrichment + auditing + filtering.
 
-    Returns the config plus the two agent instances so callers can read
+    Returns the config plus the three agent instances so callers can read
     accumulated_accepted and audit_trail after the loop completes.
+
+    Topology (loop exits from the deterministic filter):
+
+        enricher --[needs_audit]--> auditor  (fallback)--> filter
+        auditor  ----------------------------------------> filter
+        filter   --[not should_exit]--> enricher (fallback)--> end
+
+    On a structural-only retry (last auditor already acceptable, bounced back
+    only to fix a filter-flagged reference) the enricher skips both web search
+    and the auditor: enricher -> filter directly. The filter's invalid-reference
+    errors are routed back to the enricher via det_error_sources.
     """
     evidence_store = EvidenceStore()
-    
+
     enricher = ContextEnricherLoopAgent(
         original_facts=original_facts,
         gaps=gaps,
@@ -73,26 +107,43 @@ def make_enrichment_loop_config(
         evidence_store=evidence_store,
         model=model,
     )
+    context_filter = ContextFilterLoopAgent(original_facts=original_facts)
 
     config = LoopConfig(
         agents={
-            "enricher": AgentRoleConfig(agent_factory=lambda: enricher),
+            # The filter's invalid-reference errors flow into the enricher's
+            # ctx.det_errors so it can re-anchor them next round.
+            "enricher": AgentRoleConfig(
+                agent_factory=lambda: enricher, det_error_sources=["filter"]
+            ),
             "auditor": AgentRoleConfig(agent_factory=lambda: auditor),
+            "filter": AgentRoleConfig(agent_factory=lambda: context_filter),
         },
         graph={
             "edges": [
-                GraphEdge(from_node="enricher", to_node="auditor"),
+                # Skip the auditor on structural-only retries (needs_audit False).
                 GraphEdge(
-                    from_node="auditor",
+                    from_node="enricher",
+                    to_node="auditor",
+                    condition=EdgeCondition(fn=lambda _out: enricher.needs_audit),
+                ),
+                GraphEdge(from_node="enricher", to_node="filter"),
+                GraphEdge(from_node="auditor", to_node="filter"),
+                # Loop back to the enricher unless the filter says we can exit.
+                GraphEdge(
+                    from_node="filter",
                     to_node="enricher",
                     condition=EdgeCondition(
-                        field="is_acceptable", op="eq", value=False
+                        fn=lambda out: not getattr(out, "should_exit", False)
                     ),
                 ),
-                GraphEdge(from_node="auditor", to_node="end"),
+                GraphEdge(from_node="filter", to_node="end"),
             ]
         },
         start_node="enricher",
-        max_iter=5,
+        # Node-executions, not cycles: a full audited cycle is 3 nodes, so 9
+        # allows ~3 refinement cycles (structural-only rounds cost only 2).
+        max_iter=9,
+        error_refresh=ErrorRefreshConfig(trigger_node="enricher"),
     )
-    return config, enricher, auditor
+    return config, enricher, auditor, context_filter

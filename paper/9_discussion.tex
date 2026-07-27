@@ -1,0 +1,33 @@
+\section{Discussion}
+% ============================================================
+
+\subsection{Limitations}
+\textit{[Placeholder: (1)~Assumes NL input is internally consistent; no contradiction
+detection or resolution.
+(2)~Multivariate distribution support is partial---see \S\ref{subsec:multivariate};
+copula or conditional-chain design not yet finalised.
+(3)~Deterministic inverse synthesis covers only single-dependency columns;
+many-to-many joins and compound multi-column aggregations fall back to LLM.
+(4)~Context enrichment relies on web retrieval quality; domain jargon absent from
+public knowledge bases may still be under-specified.]}
+
+\subsection{Failure Modes}
+\textit{[Placeholder: (a)~Overly ambiguous NL where enrichment cannot recover missing
+distribution parameters (e.g., no public definition of a proprietary scoring model).
+(b)~DAG cycles introduced by contradictory logical constraints that the patch agent
+cannot resolve within the retry budget.
+(c)~Distribution parameter hallucination for rare distribution families
+(e.g., generalised extreme value distributions).
+(d)~Smoke-test failures that cannot be repaired by the code-generation agent
+within 5 retries---currently causes a pipeline abort.]}
+
+\subsection{Future Directions}
+\textit{[Placeholder: (1)~Multivariate distributions: copula-based joint sampling to model
+cross-column correlations beyond univariate priors; Gaussian copulas as a first step.
+(2)~Contradiction detection and resolution in NL input before fact extraction.
+(3)~Extending deterministic code generation to multi-dependency chains
+(iterative inverse composition for chained aggregations).
+(4)~Schema evolution: incrementally updating the generated schema and program as the
+NL description changes, without full pipeline re-execution.
+(5)~Support for non-relational output (document stores, graph databases).]}
+

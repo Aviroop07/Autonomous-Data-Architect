@@ -55,6 +55,23 @@ class Column(BaseModel):
     data_type: DataType = Field(
         description="The data type of the column.",
     )
+    is_nullable: bool = Field(
+        default=False,
+        description=(
+            "Whether this column permits NULL. Defaults to False (required) -- "
+            "an ordinary attribute becomes nullable only when the source ER "
+            "model says so (Entity.attributes[].is_nullable, propagated "
+            "verbatim), and an FK column becomes nullable only when the "
+            "relationship's own optional-participation cardinality says so "
+            "(Participant.cardinality_min == 0 on whichever participant is "
+            "mapped to the FK-holding/child side -- see relational_mapper.py's "
+            "1:N and 1:1 branches). Never inferred from naming heuristics."
+        ),
+    )
+    source_fact_ids: List[int] = Field(
+        default_factory=list,
+        description="Fact IDs that this column's existence/type traces to.",
+    )
 
     def _validate(self) -> List[str]:
         errors = []
@@ -88,6 +105,10 @@ class Table(BaseModel):
     unique: Optional[List[CompositeUnique]] = Field(
         default=None, description="Optional list of composite unique constraints."
     )
+    source_fact_ids: List[int] = Field(
+        default_factory=list,
+        description="Fact IDs that this table's existence traces to (from the source entity/relationship).",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -106,6 +127,19 @@ class Table(BaseModel):
     @property
     def pk(self) -> str:
         return self.primary_key[0] if self.primary_key else ""
+
+    @property
+    def all_source_fact_ids(self) -> List[int]:
+        """Aggregates this table's own facts with every column's facts.
+
+        Convenience for Stage 3 sharding's fact-affinity signal -- avoids
+        needing a separate out-of-band registry to answer "which facts
+        touch this table" (see docs/adr on TableFactRegistry retirement).
+        """
+        facts: Set[int] = set(self.source_fact_ids)
+        for c in self.columns:
+            facts.update(c.source_fact_ids)
+        return sorted(facts)
 
     @property
     def pk_set(self) -> Set[str]:
@@ -218,12 +252,21 @@ class Table(BaseModel):
                     )
                 else:
                     # [STRICT DATA TYPE CHECK]
-                    if (
-                        pk_col.data_type
-                        and pk_col.data_type not in {DataType.INTEGER, DataType.VARCHAR, DataType.UUID}
-                    ):
+                    if pk_col.data_type and pk_col.data_type not in {
+                        DataType.INTEGER,
+                        DataType.VARCHAR,
+                        DataType.UUID,
+                    }:
                         errors.append(
                             f"Primary key '{pk_member}' in table {self.name} must be of type INTEGER, VARCHAR, or UUID (found {pk_col.data_type})."
+                        )
+                    # A primary key column identifies a row -- it can never be
+                    # NULL. Catches a patch/mapper accidentally propagating
+                    # is_nullable=True onto a PK member (e.g. via a natural-key
+                    # column that also happens to be an optional attribute).
+                    if pk_col.is_nullable:
+                        errors.append(
+                            f"Primary key '{pk_member}' in table {self.name} cannot be nullable."
                         )
 
         # NOTE: the singular-noun check is intentionally NOT a hard error -- it is a
@@ -305,6 +348,10 @@ class ForeignKey(BaseModel):
         description="The column in the referencing table that points to the referred table."
     )
     referred_table: str = Field(description="The table that is being referenced.")
+    source_fact_ids: List[int] = Field(
+        default_factory=list,
+        description="Fact IDs that this FK's existence traces to.",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -452,6 +499,10 @@ class Schema(LoopOutputModel):
                         if rel.referred_table == old_table_name:
                             rel.referred_table = new_table_name
 
+        if self.relationships:
+            for rel in self.relationships:
+                rel.referencing_column = to_snake_case(rel.referencing_column).lower()
+
         # [HARDENING] Strip single-column UNIQUE constraints on FK columns of junction
         # tables. A junction table has 2+ FK columns; individually unique FK columns
         # forbid value reuse across rows, which is always wrong for bridge entities.
@@ -474,22 +525,39 @@ class Schema(LoopOutputModel):
 
     def wire_orphan_fk_columns(self) -> None:
         """
-        Declares missing FK relationships for columns that follow the naming convention
-        {referenced_table_lower_snake}_id where the referenced table exists in the schema
-        but no FK has been declared for that column.
+        Declares missing FK relationships for columns that follow either recognized
+        naming convention:
+          (a) {referenced_table_lower_snake}_id -- surrogate-key convention, e.g.
+              department_id -> DEPARTMENT.
+          (b) an exact match to another table's single-column primary key name --
+              natural-key convention, e.g. order_number -> ORDER (pk: order_number),
+              sku -> PRODUCT (pk: sku). Skipped if more than one table shares that PK
+              name (ambiguous target, do not guess).
 
-        This repairs the gap where architects include FK columns (e.g. department_id) but
-        omit the explicit FK declaration. Only fires when the column already exists, the
-        target table exists, the column is not the table's own PK, and no FK is already
-        declared for this (table, column) pair.
+        This repairs the gap where architects include FK columns but omit the explicit
+        FK declaration -- including the case where a schema-repair patch (e.g. the
+        compliance certifier) adds a correctly-named FK column AFTER the mapper's own
+        wiring pass already ran once; callers should re-run this after any patch
+        application that can add columns, not just once during initial mapping. Only
+        fires when the column already exists, the target table exists, the column is
+        not the table's own PK, and no FK is already declared for this (table, column)
+        pair.
         """
         if not self.tables:
             return
 
         table_names = {t.name for t in self.tables}
+        pk_name_to_tables: dict[str, list[str]] = {}
+        for t in self.tables:
+            if len(t.primary_key) == 1:
+                pk_name_to_tables.setdefault(t.primary_key[0], []).append(t.name)
+
         existing_fk_pairs: set[tuple[str, str]] = {
             (r.referencing_table, r.referencing_column)
             for r in (self.relationships or [])
+        }
+        existing_directions: set[tuple[str, str]] = {
+            (r.referencing_table, r.referred_table) for r in (self.relationships or [])
         }
 
         new_fks: list[ForeignKey] = []
@@ -497,21 +565,34 @@ class Schema(LoopOutputModel):
             for col in table.columns:
                 if col.name in table.pk_set:
                     continue
-                if not col.name.endswith("_id"):
-                    continue
-                # e.g. department_id -> DEPARTMENT, faculty_member_id -> FACULTY_MEMBER
-                candidate = col.name[:-3].upper()
-                if candidate not in table_names:
-                    continue
-                if candidate == table.name:
-                    continue
                 if (table.name, col.name) in existing_fk_pairs:
                     continue
+
+                candidate = None
+                if col.name.endswith("_id"):
+                    # e.g. department_id -> DEPARTMENT, faculty_member_id -> FACULTY_MEMBER
+                    surrogate_candidate = col.name[:-3].upper()
+                    if surrogate_candidate in table_names:
+                        candidate = surrogate_candidate
+                if candidate is None:
+                    natural_key_tables = pk_name_to_tables.get(col.name, [])
+                    if len(natural_key_tables) == 1:
+                        candidate = natural_key_tables[0]
+
+                if candidate is None or candidate == table.name:
+                    continue
+
+                # Block directional contradictions: if the target table already has an FK pointing
+                # back to this table, do not auto-wire the reverse direction (prevents 1:N inversion cycles).
+                if (candidate, table.name) in existing_directions:
+                    continue
+
                 new_fks.append(
                     ForeignKey(
                         referencing_table=table.name,
                         referencing_column=col.name,
                         referred_table=candidate,
+                        source_fact_ids=col.source_fact_ids,
                     )
                 )
                 existing_fk_pairs.add((table.name, col.name))
@@ -543,9 +624,24 @@ class Schema(LoopOutputModel):
             ref_col = next(
                 (c for c in ref_table.columns if c.name == rel.referencing_column), None
             )
-            target_pk_col = next(
-                (c for c in target_table.columns if c.name == target_table.pk), None
-            )
+            # Find which column in the target table this FK is referencing.
+            target_pk_col = None
+            if len(target_table.primary_key) == 1:
+                target_pk_col = next(
+                    (c for c in target_table.columns if c.name == target_table.pk), None
+                )
+            else:
+                # If composite PK, try to match by column name
+                target_pk_col = next(
+                    (
+                        c
+                        for c in target_table.columns
+                        if c.name in target_table.pk_set
+                        and c.name == rel.referencing_column
+                    ),
+                    None,
+                )
+
             if (
                 ref_col
                 and target_pk_col

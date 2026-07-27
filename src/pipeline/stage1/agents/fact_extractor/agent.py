@@ -11,7 +11,6 @@ from src.util.orchestration.loop_types import (
 )
 from src.util.orchestration.retry_loop import ErrorRecord, ErrorType, Severity
 from src.pipeline.stage1.middleware.error_formatter import format_errors_for_stage1
-from src.pipeline.stage1.middleware.validation import deterministic_validator
 from src.pipeline.stage1.models.rephrased_nl import RephrasedOutput
 from src.pipeline.stage1.models.integrity_report import IntegrityReport
 
@@ -33,15 +32,12 @@ def build_extractor_agent(
 class FactExtractorLoopAgent(LoopAgent):
     """LoopAgent for the atomic fact extractor node.
 
-    Absorbs the old _ExtractorContextBuilder stateful logic. Runs
-    deterministic_validator on the prior output inside build_context so
-    NL-scoped validation works correctly without extra infrastructure.
+    Absorbs the old _ExtractorContextBuilder stateful logic.
     """
 
     def __init__(self, model: Optional[str] = None) -> None:
         self._model = model
         self._agent: Optional[AgentType] = None
-        self._last_det_errors: List[ErrorRecord] = []
         self._errored_ids_history: set[int] = set()
 
     def _get_agent(self) -> AgentType:
@@ -112,15 +108,6 @@ class FactExtractorLoopAgent(LoopAgent):
         if isinstance(raw_verifier, IntegrityReport):
             verifier_output = raw_verifier
 
-        # Run deterministic validation on the previous extractor output.
-        if extractor_output is not None:
-            self._last_det_errors = deterministic_validator(
-                extractor_output, nl_description
-            )
-            for e in self._last_det_errors:
-                if e.fact_id is not None:
-                    self._errored_ids_history.add(e.fact_id)
-
         # Accumulate errored IDs from verifier report.
         if verifier_output is not None:
             for issue_list in [
@@ -146,7 +133,7 @@ class FactExtractorLoopAgent(LoopAgent):
                 accepted_section = "\n".join(lines)
 
         # Reconstruct ErrorRecord list for the rich Stage 1 error formatter.
-        all_errors: List[ErrorRecord] = list(self._last_det_errors)
+        all_errors: List[ErrorRecord] = []
         if verifier_output is not None:
             for issue in verifier_output.missing_information:
                 all_errors.append(
@@ -197,6 +184,13 @@ class FactExtractorLoopAgent(LoopAgent):
                 f"## ACCEPTED FACTS (keep these unchanged)\n{accepted_section}\n"
                 "These facts have passed all previous validation checks. "
                 "Do NOT regenerate, reword, or remove them. Include them verbatim in your output."
+            )
+
+        if ctx.det_errors:
+            feedback = "\n".join(f"- {err}" for err in ctx.det_errors)
+            parts.append(
+                f"## STRUCTURAL VALIDATION FEEDBACK (correct these issues and re-propose)\n"
+                f"{feedback}"
             )
 
         if all_errors:

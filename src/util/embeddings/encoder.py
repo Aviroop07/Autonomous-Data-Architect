@@ -1,37 +1,34 @@
 import threading
-from typing import List, Optional
+from pathlib import Path
+from typing import List, Optional, Any
 import numpy as np
-from sentence_transformers import SentenceTransformer
 
-# Global singleton model for efficiency
-_model: Optional[SentenceTransformer] = None
+DEFAULT_MODEL = "BAAI/bge-base-en-v1.5"
+_MODEL_DIR_BASE = Path(__file__).resolve().parent.parent.parent.parent / "models"
+
+# Global singleton model cache
+_model: Optional[Any] = None
 _model_lock = threading.Lock()
+_model_name: Optional[str] = None
 
-def _get_model() -> SentenceTransformer:
-    """Lazy loads the SentenceTransformer model."""
-    global _model
-    if _model is None:
+def _get_model(model_name: Optional[str] = None) -> Any:
+    global _model, _model_name
+    resolved = model_name or DEFAULT_MODEL
+    if _model is None or _model_name != resolved:
         with _model_lock:
-            if _model is None:
-                # all-MiniLM-L6-v2 is an 80MB model, fast and standard for local embeddings
-                _model = SentenceTransformer("all-MiniLM-L6-v2")
+            if _model is None or _model_name != resolved:
+                from sentence_transformers import SentenceTransformer
+                local_path = _MODEL_DIR_BASE / resolved
+                if local_path.is_dir():
+                    _model = SentenceTransformer(str(local_path))
+                else:
+                    _model = SentenceTransformer(resolved)
+                _model_name = resolved
     return _model
 
-def embed_texts(texts: List[str], batch_size: int = 32) -> np.ndarray:
-    """
-    Computes dense vector embeddings for a batch of strings.
-    
-    Args:
-        texts: A list of strings to embed.
-        batch_size: The batch size for the encoder.
-        
-    Returns:
-        A NumPy array of shape (len(texts), embedding_dim) containing the embeddings.
-    """
+def embed_texts(texts: List[str], batch_size: int = 32, model_name: Optional[str] = None) -> np.ndarray:
     if not texts:
         return np.array([])
-        
-    model = _get_model()
-    # SentenceTransformer.encode automatically handles batching and utilizes PyTorch vectorization
+    model = _get_model(model_name)
     embeddings = model.encode(texts, batch_size=batch_size, show_progress_bar=False, convert_to_numpy=True)
     return embeddings

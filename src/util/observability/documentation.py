@@ -7,7 +7,6 @@ from src.pipeline.stage2.models.schema import Schema
 from src.util.schema_ops.schema_patch import (
     SchemaPatch, CritiqueReport, MergeTablesPatch
 )
-from src.pipeline.stage1.models.rephrased_nl import AtomicFact
 from src.pipeline.stage1.models.integrity_report import IntegrityReport
 from src.pipeline.stage2.models.corrections import FixHistoryStep, CorrectionStatus
 try:

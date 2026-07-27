@@ -19,6 +19,10 @@ from src.pipeline.stage1.models.coverage_report import SpecGap
 PROMPT_PATH = Path(__file__).parent / "prompt.txt"
 
 _ACRONYM_RE = re.compile(r"\b[A-Z]{2,5}\b")
+_MAX_FACTS_IN_CONTEXT = 100  # cap facts shown to enricher; loop handles the rest
+_MAX_FACT_TEXT_LEN = 200     # truncate individual fact texts
+_MAX_ORIGIN_LEN = 150        # truncate segment origin texts
+_MAX_OUTPUT_FACTS = 15       # max external facts per round
 
 
 def build_context_enricher_agent(
@@ -31,6 +35,7 @@ def build_context_enricher_agent(
         model=model,
         name="domain_specialist",
     )
+
 
 class ContextEnricherLoopAgent(LoopAgent):
     """LoopAgent for the context enricher node.
@@ -56,6 +61,10 @@ class ContextEnricherLoopAgent(LoopAgent):
         self._model = model
         self._agent: Optional[AgentType] = None
         self.accumulated_accepted: List[RawFact] = []
+        # True unless this round is a structural-only retry (last auditor already
+        # acceptable, loop bounced back solely to fix a filter-flagged reference).
+        # Gates BOTH the outgoing edge to the auditor and phase-1 web search.
+        self.needs_audit: bool = True
 
     def _get_agent(self) -> AgentType:
         if self._agent is None:
@@ -74,7 +83,7 @@ class ContextEnricherLoopAgent(LoopAgent):
 
         queries: List[str] = []
         seen = set()
-        
+
         # Add primary queries (gaps or auditor directions)
         for q in base:
             if q.lower() not in seen:
@@ -97,11 +106,15 @@ class ContextEnricherLoopAgent(LoopAgent):
 
     async def invoke(self, query: str) -> tuple[LoopOutputModel, int]:
         # Phase 1: run searches and inject results into the query context.
-        queries = self._derive_search_queries()
-        if queries:
-            evidence = await self._evidence.fetch(queries, max_results=5)
-            if evidence.formatted:
-                query = query + "\n\n" + evidence.formatted
+        # Skipped on structural-only retries -- re-anchoring reads the original
+        # facts already in context, so no new evidence is needed and the auditor
+        # (which would consume it) is bypassed this round.
+        if self.needs_audit:
+            queries = self._derive_search_queries()
+            if queries:
+                evidence = await self._evidence.fetch(queries, max_results=5)
+                if evidence.formatted:
+                    query = query + "\n\n" + evidence.formatted
 
         # Phase 2: generate external facts with the enriched context.
         parsed, tokens = await get_response(
@@ -110,6 +123,12 @@ class ContextEnricherLoopAgent(LoopAgent):
             query=query,
         )
         assert isinstance(parsed, FactList)
+        if len(parsed.facts) > _MAX_OUTPUT_FACTS:
+            print(
+                f"[Stage 1] Enricher produced {len(parsed.facts)} facts, "
+                f"capping to {_MAX_OUTPUT_FACTS} to avoid JSON truncation."
+            )
+            parsed.facts = parsed.facts[:_MAX_OUTPUT_FACTS]
         for fact in parsed.facts:
             fact.is_external = True
         return parsed, tokens
@@ -117,6 +136,15 @@ class ContextEnricherLoopAgent(LoopAgent):
     def build_context(self, ctx: LoopContext) -> str:
         audit_output = ctx.node_outputs.get("auditor")
         audit_feedback: Optional[str] = None
+
+        # A structural-only retry is one where the last auditor already accepted
+        # the context (so it emitted no new search queries) and the loop bounced
+        # back solely to fix a filter-flagged reference. On such rounds we skip
+        # both the auditor (edge) and web search (invoke). First round: no auditor
+        # yet -> needs_audit stays True.
+        self.needs_audit = not (
+            isinstance(audit_output, ContextAuditReport) and audit_output.is_acceptable
+        )
 
         if isinstance(audit_output, ContextAuditReport):
             prior_enriched = ctx.node_outputs.get("enricher")
@@ -153,11 +181,23 @@ class ContextEnricherLoopAgent(LoopAgent):
         else:
             query = "## GAPS TO CLOSE\nNone.\n\n"
 
+        def _trunc(t: str, limit: int) -> str:
+            return t[:limit] + "..." if len(t) > limit else t
+
+        facts_shown = self._facts[:_MAX_FACTS_IN_CONTEXT]
         facts_text = "\n".join(
-            f"- id: {f.id}\n  fact: {f.fact}\n  origin: {f.segment_text if hasattr(f, 'segment_text') and f.segment_text else '(none)'}"
-            for f in self._facts
+            f"- id: {f.id}\n  fact: {_trunc(f.fact, _MAX_FACT_TEXT_LEN)}\n"
+            f"  origin: {_trunc(getattr(f, 'segment_text', '') or '(none)', _MAX_ORIGIN_LEN)}"
+            for f in facts_shown
         )
-        query += f"## FACTS TO ENRICH\n{facts_text}"
+        total = len(self._facts)
+        hidden = total - len(facts_shown)
+        if hidden > 0:
+            facts_text += (
+                f"\n# ... and {hidden} more facts (truncated for length). "
+                f"The gaps above are the priority; you do not need to see every fact to close them."
+            )
+        query += f"## FACTS TO ENRICH ({len(facts_shown)} shown, {total} total)\n{facts_text}"
 
         if self.accumulated_accepted:
             accepted_text = "\n".join(
@@ -168,6 +208,16 @@ class ContextEnricherLoopAgent(LoopAgent):
         if audit_feedback:
             query += (
                 f"\n\n## CONTEXT AUDIT FEEDBACK FROM PREVIOUS ATTEMPT\n{audit_feedback}"
+            )
+
+        # Structural feedback routed from the deterministic filter node (invalid
+        # references it flagged last round). The enricher must re-anchor or drop
+        # those facts. Routed via det_error_sources=["filter"] in the loop config.
+        if ctx.det_errors:
+            feedback = "\n".join(f"- {err}" for err in ctx.det_errors)
+            query += (
+                "\n\n## STRUCTURAL VALIDATION FEEDBACK (correct these facts and re-propose them)\n"
+                f"{feedback}"
             )
 
         return query

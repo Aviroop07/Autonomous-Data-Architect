@@ -34,7 +34,7 @@ async def derive_parameters(
 
     query = f"### GLOBAL SCHEMA:\n{schema_json}\n"
     query += f"\n### NULLABLE COLUMN CANDIDATES (Columns mentioned in NULL constraints):\n{json.dumps(nullable_columns_map, indent=2)}\n"
-    query += f"\n### BUSINESS FACTS:\n"
+    query += "\n### BUSINESS FACTS:\n"
     for f in business_facts:
         query += f"- {f}\n"
 
