@@ -1,10 +1,13 @@
 import asyncio
 import re
+import logging
 from typing import Type, TypeVar, Tuple, Optional, Union
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage, BaseMessage  # type: ignore[import]
 import openai  # type: ignore[import]
 from src.util.observability.llm_trace import get_active_trace_collector
+
+logger = logging.getLogger(__name__)
 
 _RETRY_DELAY_RE = re.compile(r"retry in\s+([\d.]+)s", re.IGNORECASE)
 _DAILY_QUOTA_RE = re.compile(r"PerDay", re.IGNORECASE)
@@ -38,7 +41,7 @@ async def _ainvoke_with_backoff(agent, input_dict: dict) -> dict:
                 raise
             m = _RETRY_DELAY_RE.search(err_str)
             wait = float(m.group(1)) + 3.0 if m else delay
-            print(
+            logger.warning(
                 f"[invoke] Rate limited (429). Retrying in {wait:.0f}s "
                 f"(attempt {attempt + 1}/{_MAX_RATE_LIMIT_RETRIES})..."
             )
@@ -47,7 +50,7 @@ async def _ainvoke_with_backoff(agent, input_dict: dict) -> dict:
         except openai.InternalServerError:
             if attempt == _MAX_RATE_LIMIT_RETRIES - 1:
                 raise
-            print(
+            logger.warning(
                 f"[invoke] Server unavailable (503). Retrying in {delay:.0f}s "
                 f"(attempt {attempt + 1}/{_MAX_RATE_LIMIT_RETRIES})..."
             )
@@ -79,6 +82,10 @@ async def get_response(
     if isinstance(query, str):
         query = query.encode("utf-8", errors="ignore").decode("utf-8")
 
+    agent_name = getattr(agent, "name", agent.__class__.__name__)
+    logger.info(f"[invoke] 🚀 Calling agent '{agent_name}'")
+    logger.debug(f"[invoke] Query preview (first 300 chars):\n{query[:300]}...")
+
     input_messages = [HumanMessage(content=query)]
     response = await _ainvoke_with_backoff(agent, {"messages": input_messages})
 
@@ -108,6 +115,8 @@ async def get_response(
 
     # Extract token usage from AI messages' metadata
     total_tokens = _extract_token_usage(response.get("messages", []))
+    logger.info(f"[invoke] ✅ Response received from '{agent_name}'. Tokens used: {total_tokens}")
+    logger.debug(f"[invoke] Parsed structure: {type(parsed).__name__}")
 
     collector = get_active_trace_collector()
     if collector is not None:
