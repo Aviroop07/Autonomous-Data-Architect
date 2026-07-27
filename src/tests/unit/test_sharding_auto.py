@@ -201,3 +201,129 @@ class TestShardSchemaAutoIntegration:
         assert found_joint, (
             "shard_schema_auto failed to group tables required by fact_1"
         )
+
+
+class TestSingleShardFastPath:
+    """When every table fits inside one shard, the single-shard assignment is a
+    global optimum for EVERY positive weight vector, so the 216-config sweep is
+    guaranteed to return it and is skipped.
+
+    Why it is optimal, term by term (see shard_schema_auto's own comment): one
+    active shard is the strict minimum for the w_shard term; total_size is
+    minimal because HC3/HC4 already force every table and column into at least
+    one shard and extra shards can only duplicate; every fact touches exactly
+    one shard, minimising the w_facts term; and every co-occurring pair is
+    co-located, maximising the subtracted cohesion reward.
+
+    Verified against the real solver on a live 11-table schema: all six corner
+    and centre weight vectors of the 0.1-30 cube returned one shard, matching
+    this path. Without the skip that check cost 30s per config; the sweep is
+    216 of them.
+    """
+
+    TABLES = ["CUSTOMERS", "ORDERS", "PRODUCTS"]
+    COLS = {
+        "CUSTOMERS": ["C_CUSTKEY", "C_NAME"],
+        "ORDERS": ["O_ORDERKEY", "O_CUSTKEY"],
+        "PRODUCTS": ["P_PRODUCTKEY"],
+    }
+    PKS = {
+        "CUSTOMERS": ["C_CUSTKEY"],
+        "ORDERS": ["O_ORDERKEY"],
+        "PRODUCTS": ["P_PRODUCTKEY"],
+    }
+    FKS = [("ORDERS", "O_CUSTKEY", "CUSTOMERS", "C_CUSTKEY")]
+
+    def _run(self, facts, context_window=1_000_000):
+        with patch(
+            "src.util.core.context_window.get_context_window",
+            return_value=context_window,
+        ):
+            return shard_schema_auto(
+                self.TABLES,
+                self.COLS,
+                self.PKS,
+                self.FKS,
+                facts,
+                provider="deepseek",
+                model="deepseek-v4-flash",
+            )
+
+    def test_returns_exactly_one_shard_holding_every_table_and_column(self):
+        shards, _ = self._run({"f1": [("CUSTOMERS", "C_NAME")]})
+        assert shards is not None
+        assert len(shards) == 1
+        assert set(shards[0]) == set(self.TABLES)
+        for table, columns in self.COLS.items():
+            assert sorted(shards[0][table]) == sorted(columns)
+
+    def test_all_resolvable_facts_are_reported_as_contained(self):
+        facts = {
+            "f1": [("CUSTOMERS", "C_NAME")],
+            "f2": [("ORDERS", "O_ORDERKEY"), ("PRODUCTS", "P_PRODUCTKEY")],
+        }
+        _, shard_facts = self._run(facts)
+        assert shard_facts is not None
+        assert sorted(shard_facts[0]) == ["f1", "f2"]
+
+    def test_unresolvable_facts_are_excluded_matching_HC7a(self):
+        """A fact whose column list resolves to nothing is forced h=0 by HC7a
+        in the solver, so the fast path must exclude it too rather than
+        claiming containment the ILP would have denied."""
+        facts = {"real": [("CUSTOMERS", "C_NAME")], "bogus": []}
+        _, shard_facts = self._run(facts)
+        assert shard_facts is not None
+        assert shard_facts[0] == ["real"]
+
+    def test_skips_the_sweep_entirely(self):
+        """The point of the fast path. If run_stability_sweep is reached at
+        all, the skip did not happen."""
+        with patch("src.util.algorithms.sharding_ilp.run_stability_sweep") as swept:
+            shards, _ = self._run({"f1": [("CUSTOMERS", "C_NAME")]})
+        swept.assert_not_called()
+        assert shards is not None and len(shards) == 1
+
+    def test_no_resolvable_fact_falls_through_to_the_sweep(self):
+        """HC9 requires every active shard to hold at least one valid fact, so
+        the one-shard assignment is not necessarily feasible when none exists
+        -- that case must still go to the solver."""
+        with patch(
+            "src.util.algorithms.sharding_ilp.run_stability_sweep",
+            return_value=None,
+        ) as swept:
+            self._run({"bogus": []})
+        swept.assert_called_once()
+
+    def test_schema_too_large_for_one_shard_falls_through_to_the_sweep(self):
+        """When the schema genuinely does not fit, HC5 fails, the fast path's
+        precondition is false, and the real optimisation must run.
+
+        This needs WIDE tables, not merely many of them, and not a small
+        context window. 40 narrow tables really do fit in 50k tokens, and a
+        window small enough to make the budget negative degrades to
+        "no meaningful cap" by design. 40 tables of 200 columns (~1752 tokens
+        each) against a 50k window is a case where the cap genuinely binds:
+        max_tables_per_shard comes out at 13.
+        """
+        wide_cols = {
+            f"T{i:02d}": [f"column_name_{j}" for j in range(200)] for i in range(40)
+        }
+        wide_pks = {t: [f"{t}_id"] for t in wide_cols}
+        with patch(
+            "src.util.algorithms.sharding_ilp.run_stability_sweep",
+            return_value=None,
+        ) as swept:
+            with patch(
+                "src.util.core.context_window.get_context_window",
+                return_value=50_000,
+            ):
+                shard_schema_auto(
+                    list(wide_cols),
+                    wide_cols,
+                    wide_pks,
+                    [],
+                    {"f1": [("T00", "column_name_0")]},
+                    provider="deepseek",
+                    model="deepseek-v4-flash",
+                )
+        swept.assert_called_once()

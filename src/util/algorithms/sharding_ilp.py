@@ -640,6 +640,47 @@ def shard_schema_auto(
         fixed_prompt_overhead_tokens=fixed_prompt_overhead_tokens,
         context_window_safety_margin=context_window_safety_margin,
     )
+    # Fast path: when every table already fits in one shard, the single-shard
+    # solution is a GLOBAL OPTIMUM for every positive weight vector, so all 216
+    # sweep configs are guaranteed to return it. Checking each objective term
+    # against the one-shard assignment (all tables, all columns, one shard):
+    #
+    #   w_shard   * sum(y_k)              1 active shard -- the strict minimum,
+    #                                     and strictly better than any k >= 2.
+    #   w_size    * total_size            len(tables) + total columns. HC3/HC4
+    #                                     force every table and column into at
+    #                                     least one shard, so no assignment can
+    #                                     be smaller; more shards can only
+    #                                     duplicate. Weakly minimal.
+    #   w_facts   * total_facts_touched   each fact touches exactly one shard;
+    #                                     with k shards a fact can touch several.
+    #                                     Minimal.
+    #   -w_cohesion * reward_cooccur      every co-occurring pair is co-located,
+    #                                     so the reward is maximal, and it is
+    #                                     SUBTRACTED. Minimal contribution.
+    #
+    # Every term is simultaneously at its optimum, so this is not a heuristic
+    # shortcut -- the output is identical to what the sweep would return, and
+    # skipping it is free. Feasibility needs HC5 (len(tables) <=
+    # max_tables_per_shard) and HC9 (at least one resolvable fact); HC1-HC4,
+    # HC7 and HC8 are satisfied trivially when everything is in one shard.
+    #
+    # Measured cost of NOT doing this: 453.6s and 487s on two live runs of an
+    # 11- and 12-table schema, both of which the sweep resolved to one shard.
+    has_valid_fact = any(pairs for pairs in facts.values())
+    if len(tables) <= max_tables_per_shard and has_valid_fact:
+        single = {t: list(columns_by_table.get(t, [])) for t in tables}
+        contained = [f for f, pairs in facts.items() if pairs]
+        logger.info(
+            "[sharder] %d tables fit within max_tables_per_shard=%d -- one shard "
+            "is provably optimal for every weight vector; skipping the %d-config "
+            "sweep.",
+            len(tables),
+            max_tables_per_shard,
+            len(SearchSpaceSeeder().generate_grid()),
+        )
+        return [single], [contained]
+
     grid_size = len(SearchSpaceSeeder().generate_grid())
     # This step emitted NOTHING before, and on a real run it took 8m07s of
     # wall clock between two log lines -- indistinguishable from a hang while
