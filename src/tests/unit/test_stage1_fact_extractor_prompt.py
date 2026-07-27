@@ -45,3 +45,16 @@ def test_a_clause_with_several_links_is_split_per_link():
     domain's sentences verbatim."""
     prompt = _prompt()
     assert "one fact per directional link" in prompt
+
+
+def test_enumeration_members_are_kept_in_one_fact():
+    """Caught by a live run. The de-compounding rules ("one fact per idea")
+    overrode the enumeration rule and split a value set per member, turning
+    one closed claim -- "the permitted values are A and B" -- into two open
+    ones. Stage 3 then correctly declined to build an IN-set from either half,
+    and the enumerated-value constraint was lost.
+
+    The value set has to be the stated exception to splitting."""
+    prompt = _prompt()
+    assert "the set is the claim" in prompt
+    assert "single fact" in prompt
