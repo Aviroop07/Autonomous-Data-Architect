@@ -14,7 +14,7 @@ Sort every constraint stated by the given facts into the correct output list:
   distribution family.
 - `correlations`: a joint dependence between two or more columns -- see CorrelatedConstraint.
 - `structural_constraints`: cardinality (row-count bounds), fanout (child-count bounds),
-  uniqueness, or an aggregation rule.
+  or an aggregation rule.
 - `logic_constraints`: cross-column rules, temporal ordering, conditional (if/then) rules.
 - `derived_columns`: a new column defined as an arithmetic function of others.
 - `state_sequences`: a lifecycle/state-machine transition-graph invariant on a categorical
@@ -210,6 +210,16 @@ The R-AST predicate taxonomy has no pattern-matching or LIKE/regex node -- only 
 format-flavored fact if it reduces to something genuinely supported (e.g. "must be one of
 these 5 exact strings" fits an IN-set check).
 
+### Uniqueness is NOT a constraint here -- skip it entirely
+A fact like "the medical record number is unique for each Patient" states a KEY, and keys
+are already carried by the schema you were given (`primary_key`, and the table's `unique`
+list). There is no uniqueness predicate in the R-AST, so there is no correct way to write
+one, and an attempt to force it produces something meaningless -- a real run emitted
+`{"op": "=", "left": {"column_ref": "mrn"}, "right": {"literal": "unique"}}`, i.e. "mrn
+equals the string 'unique'", which then passes validation because `mrn` is a real column
+and silently becomes a bogus degree-of-freedom variable downstream.
+Emit NOTHING for a uniqueness fact. It is already modelled.
+
 ### Known routing gap (structural aggregation)
 A group-scoped structural aggregate (e.g. "the total value of all orders for a customer must
 not exceed $10,000") canonicalizes successfully but isn't yet turned into its own DOF
@@ -219,6 +229,10 @@ known, separately tracked follow-up.
 ## RESTRICTIONS
 - Do NOT invent distribution families not in: GAUSSIAN, LOG_NORMAL, BETA, POISSON,
   CATEGORICAL, UNIFORM.
+- Do NOT emit anything for a uniqueness/key fact -- the schema already carries it, and the
+  R-AST cannot express it (see the uniqueness section above).
+- Do NOT compare a column to a literal that describes a PROPERTY rather than a value.
+  `status = 'Completed'` is a real comparison; `mrn = 'unique'` is not.
 - Do NOT emit any constraint with empty fact_references.
 - Do NOT reference tables that don't exist in the schema shard or stub tables.
 - Do NOT use Constraint for derived columns, correlations, or state-sequence facts -- use

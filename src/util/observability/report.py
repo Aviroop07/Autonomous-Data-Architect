@@ -21,6 +21,23 @@ logger = logging.getLogger(__name__)
 
 _BANNER_WIDTH = 62
 
+# HTTP client libraries log full request URLs at DEBUG. Gemini authenticates
+# with a `?key=` QUERY PARAMETER rather than a header, so urllib3's DEBUG line
+# writes the raw API key into the log file. Capping these at INFO is the fix:
+# the alternative (regex-redacting log records) is fragile and only covers the
+# key shapes you thought of. Nothing here is diagnostically useful anyway --
+# the project's own DEBUG logging is what a live run needs.
+_SECRET_LEAKING_LOGGERS = (
+    "urllib3",
+    "urllib3.connectionpool",
+    "httpx",
+    "httpcore",
+    "openai",
+    "requests",
+    "google",
+    "google_genai",
+)
+
 
 def configure_logging(
     log_dir: Path,
@@ -58,6 +75,10 @@ def configure_logging(
         logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S")
     )
     root.addHandler(console)
+
+    # Must come after the root level is lowered to DEBUG, or these inherit it.
+    for name in _SECRET_LEAKING_LOGGERS:
+        logging.getLogger(name).setLevel(logging.INFO)
 
     logger.info(
         "Logging to %s (file=DEBUG, console=%s)",

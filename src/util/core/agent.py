@@ -45,10 +45,23 @@ def _detect_provider() -> tuple[str, str, str | None, str]:
 
     The 4-tuple shape is kept because every caller and several tests destructure
     it; providers.resolve_provider() returns the richer ProviderSpec.
+
+    The 4th element is the ENV-RESOLVED model, not the bare provider default.
+    That matters for callers that use it directly rather than passing it back
+    through _build_llm -- notably the Stage 3 auto-sharder, which sizes shards
+    against the target model's real context window. Returning the bare default
+    made it size against gemini-2.5-flash while the run actually used
+    gemini-3.1-flash-lite (observed live), and for vllm it would have returned
+    the "local-model" placeholder instead of the served model name.
     """
     load_dotenv()
     spec = resolve_provider()
-    return spec.name, spec.resolve_key(), spec.resolve_base_url(), spec.default_model
+    return (
+        spec.name,
+        spec.resolve_key(),
+        spec.resolve_base_url(),
+        spec.resolve_model(None, spec.default_model),
+    )
 
 
 # ------------------------------------------------------------------
