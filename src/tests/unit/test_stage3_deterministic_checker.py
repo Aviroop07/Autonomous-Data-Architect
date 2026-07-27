@@ -17,7 +17,7 @@ from src.pipeline.stage3.middleware.deterministic_checker import (
     DeterministicCheckerLoopAgent,
 )
 from src.util.constraint_model.condition.expressions import RColumnRef, RLiteral
-from src.util.constraint_model.condition.predicates import RComparison
+from src.util.constraint_model.condition.predicates import RAnd, RComparison
 from src.pipeline.stage3.models.cross_shard import (
     Constraint,
     CorrelatedConstraint,
@@ -26,9 +26,11 @@ from src.pipeline.stage3.models.cross_shard import (
 )
 from src.pipeline.stage3.models.grain import _SchemaView
 from src.util.constraint_model.relation.nodes import (
-    JoinCondition,
+    Aggregate,
     BaseTable,
+    Fanout,
     Join,
+    JoinCondition,
     RawSQL,
 )
 
@@ -314,3 +316,114 @@ class TestCanonicalizeAllCoversEveryList:
         agent = DeterministicCheckerLoopAgent()
         errors = agent._canonicalize_all(UnifiedOutput(), _schema())
         assert errors == []
+
+
+class TestVacuousBounds:
+    """A bound every possible value satisfies constrains nothing, but still
+    canonicalizes cleanly and becomes a degree-of-freedom variable for Stage 4.
+
+    A live Gemini run emitted exactly `child_count >= 0` on a fanout. A count
+    is never negative, so it asserts nothing. This was previously only
+    discouraged by a prompt rule -- the model policing itself -- which is the
+    wrong layer for a purely mechanical check.
+    """
+
+    def _fanout_with(self, op, value):
+        return Constraint(
+            fact_references=[1],
+            on=Fanout(
+                parent_table="CUSTOMER",
+                child_table="ORDER_ROW",
+                fk_column="customer_id",
+            ),
+            condition=RComparison(
+                op=op,
+                left=RColumnRef(name="child_count"),
+                right=RLiteral(value=value),
+            ),
+            category="structural",
+        )
+
+    def _check(self, item):
+        agent = DeterministicCheckerLoopAgent()
+        return agent._canonicalize_list([item], "Structural", _schema(), _view())
+
+    def test_child_count_ge_zero_is_rejected(self):
+        errors = self._check(self._fanout_with(">=", 0))
+        assert len(errors) == 1
+        assert "vacuous" in errors[0]
+        assert "child_count" in errors[0]
+
+    def test_child_count_gt_negative_is_rejected(self):
+        assert self._check(self._fanout_with(">", -1)) != []
+
+    def test_child_count_ne_negative_is_rejected(self):
+        assert self._check(self._fanout_with("!=", -5)) != []
+
+    def test_the_real_bounds_are_accepted(self):
+        """'multiple' -> > 1 and 'at least one' -> >= 1 both say something."""
+        assert self._check(self._fanout_with(">", 1)) == []
+        assert self._check(self._fanout_with(">=", 1)) == []
+
+    def test_upper_bounds_are_untouched(self):
+        """<= 0 on a count is restrictive (means exactly zero), not vacuous."""
+        assert self._check(self._fanout_with("<=", 0)) == []
+
+    def test_ordinary_columns_are_not_assumed_non_negative(self):
+        """The rule applies to COUNTS, not to arbitrary numeric columns -- a
+        real column may legitimately be negative, so `total >= 0` is a genuine
+        constraint and must not be flagged."""
+        c = Constraint(
+            fact_references=[2],
+            on=BaseTable(name="ORDER_ROW"),
+            condition=RComparison(
+                op=">=", left=RColumnRef(name="total"), right=RLiteral(value=0)
+            ),
+            category="logic",
+        )
+        assert self._check(c) == []
+
+    def test_count_aggregate_alias_is_also_protected(self):
+        """A COUNT aggregate's own alias is non-negative for the same reason
+        child_count is."""
+        c = Constraint(
+            fact_references=[3],
+            on=Aggregate(
+                source=BaseTable(name="ORDER_ROW"),
+                fn="COUNT",
+                column="*",
+                group_by=["customer_id"],
+                alias="n_orders",
+            ),
+            condition=RComparison(
+                op=">=", left=RColumnRef(name="n_orders"), right=RLiteral(value=0)
+            ),
+            category="structural",
+        )
+        assert self._check(c) != []
+
+    def test_nested_inside_a_compound_predicate_is_still_found(self):
+        c = Constraint(
+            fact_references=[4],
+            on=Fanout(
+                parent_table="CUSTOMER",
+                child_table="ORDER_ROW",
+                fk_column="customer_id",
+            ),
+            condition=RAnd(
+                operands=[
+                    RComparison(
+                        op=">=",
+                        left=RColumnRef(name="child_count"),
+                        right=RLiteral(value=0),
+                    ),
+                    RComparison(
+                        op="<",
+                        left=RColumnRef(name="child_count"),
+                        right=RLiteral(value=100),
+                    ),
+                ]
+            ),
+            category="structural",
+        )
+        assert self._check(c) != []

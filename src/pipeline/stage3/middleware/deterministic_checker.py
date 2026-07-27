@@ -22,7 +22,13 @@ from typing import Any, Dict, List, Optional
 
 from src.pipeline.stage2.models.schema import Schema
 from src.pipeline.stage3.agents.extraction_outputs import UnifiedOutput
-from src.util.constraint_model.condition.predicates import extract_columns
+from src.util.constraint_model.condition.expressions import RColumnRef, RLiteral
+from src.util.constraint_model.condition.predicates import (
+    RComparison,
+    RPredicateUnion,
+    extract_columns,
+)
+from src.util.constraint_model.relation.nodes import Aggregate
 from src.pipeline.stage3.models.cross_shard import Constraint as CSConstraint
 from src.pipeline.stage3.models.cross_shard import CorrelatedConstraint
 from src.pipeline.stage3.models.cross_shard import DistributionConstraint
@@ -75,6 +81,78 @@ def _columns_to_validate(item: object) -> List[str]:
     return sorted(cols)
 
 
+# Columns whose domain is a COUNT, and therefore provably >= 0. `child_count`
+# is the synthetic column a Fanout exposes (see grain.py's
+# COUNT_CHILDREN_LEFT_JOIN signature); a COUNT aggregate's alias is added
+# per-item below, since it depends on the ON tree.
+_INHERENTLY_NON_NEGATIVE = {"child_count"}
+
+
+def _non_negative_columns(item: object) -> set[str]:
+    """Columns in `item`'s scope that cannot be negative: the fanout's
+    child_count, plus the alias of any COUNT aggregate in its ON tree."""
+    cols = set(_INHERENTLY_NON_NEGATIVE)
+    node = getattr(item, "on", None)
+    if isinstance(node, Aggregate) and node.fn == "COUNT":
+        cols.add(node.alias)
+    return cols
+
+
+def _vacuous_comparisons(pred: "RPredicateUnion", non_negative: set[str]) -> List[str]:
+    """Comparisons that EVERY possible value satisfies, so they constrain
+    nothing while still canonicalizing cleanly and consuming a degree of
+    freedom downstream.
+
+    Caught live: a fanout emitted `child_count >= 0`. A count is always >= 0,
+    so that asserts nothing, yet it validated fine (child_count is a real
+    column at a fanout grain) and became a DOF variable handed to Stage 4.
+    This was previously only discouraged by a prompt rule -- i.e. the model
+    policing itself -- which is the wrong layer for a purely mechanical check.
+    """
+    errors: List[str] = []
+
+    def walk(node: object) -> None:
+        if isinstance(node, RComparison):
+            left, right = node.left, node.right
+            if isinstance(left, RColumnRef) and isinstance(right, RLiteral):
+                name, value = left.name, right.value
+                if name in non_negative and isinstance(value, (int, float)):
+                    if (
+                        (node.op == ">=" and value <= 0)
+                        or (node.op == ">" and value < 0)
+                        or (node.op == "!=" and value < 0)
+                    ):
+                        errors.append(
+                            f"'{name} {node.op} {value}' is vacuous -- {name} is a "
+                            f"count and can never be negative, so this asserts "
+                            f"nothing. State the real bound (e.g. '> 1' for "
+                            f"'multiple', '>= 1' for 'at least one') or emit no "
+                            f"constraint."
+                        )
+        for attr in ("operands",):
+            for child in getattr(node, attr, []) or []:
+                walk(child)
+        for attr in ("operand", "antecedent", "consequent"):
+            child = getattr(node, attr, None)
+            if child is not None:
+                walk(child)
+
+    walk(pred)
+    return errors
+
+
+def _conditions_of(item: object) -> List["RPredicateUnion"]:
+    """Every predicate tree `item` carries, whatever its shape."""
+    out: List["RPredicateUnion"] = []
+    cond = getattr(item, "condition", None)
+    if cond is not None:
+        out.append(cond)
+    if_cond = getattr(item, "if_condition", None)
+    if if_cond is not None:
+        out.append(if_cond)
+    return out
+
+
 class DeterministicCheckerLoopAgent(LoopAgent):
     """LoopAgent for the deterministic ON-tree canonicalization node."""
 
@@ -109,6 +187,10 @@ class DeterministicCheckerLoopAgent(LoopAgent):
                 col_err = result.validate_column(col, view)
                 if col_err is not None:
                     errors.append(f"{label}[{i}] column '{col}' invalid: {col_err}")
+            non_negative = _non_negative_columns(item)
+            for cond in _conditions_of(item):
+                for msg in _vacuous_comparisons(cond, non_negative):
+                    errors.append(f"{label}[{i}] vacuous constraint: {msg}")
         return errors
 
     def _canonicalize_all(self, output: UnifiedOutput, schema: Schema) -> List[str]:
