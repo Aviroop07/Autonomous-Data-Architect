@@ -1,4 +1,5 @@
 import numpy as np
+from collections import Counter
 from typing import List, Tuple
 
 from src.pipeline.stage2.mapper.conceptual_model import (
@@ -169,7 +170,13 @@ def merge_all_shards(
         new_name = base.name  # Arbitrary base name
 
         all_attrs_dict = {}
-        all_ids = set()
+        # Counter, not a set. The chosen identifier used to be
+        # `list(all_ids)[0]` over a SET of tuples, i.e. whichever one Python's
+        # hash order happened to put first -- so the merged entity's primary key
+        # differed between runs on byte-identical input, since str hashing is
+        # randomised per process. Counting lets the pick be both deterministic
+        # and meaningful: the identifier the most shards agreed on.
+        id_votes: Counter = Counter()
         all_facts_set = set()
 
         for m in members:
@@ -189,23 +196,32 @@ def merge_all_shards(
                 all_facts_set.add(f_id)
 
             if e.identifier_attributes:
-                all_ids.add(tuple(e.identifier_attributes))
+                id_votes[tuple(e.identifier_attributes)] += 1
 
+        all_ids = set(id_votes)
         # Check ID conflict
         if len(all_ids) > 1:
             flags.append(
                 ConflictFlag(
                     flag_type="IDENTIFIER_DISAGREEMENT",
                     entities=[new_name],
-                    message=f"Entity {new_name} has conflicting IDs: {list(all_ids)}",
+                    message=(
+                        f"Entity {new_name} has conflicting IDs: "
+                        f"{sorted(all_ids)}"
+                    ),
                 )
             )
 
+        # Most-voted identifier wins; ties broken lexicographically so the
+        # result depends only on the input, never on iteration order.
+        chosen_id: Tuple[str, ...] = ()
+        if id_votes:
+            chosen_id = min(id_votes, key=lambda k: (-id_votes[k], k))
         merged_entity = Entity(
             name=new_name,
             attributes=list(all_attrs_dict.values()),
-            identifier_attributes=list(list(all_ids)[0]) if all_ids else [],
-            source_fact_ids=list(all_facts_set),
+            identifier_attributes=list(chosen_id),
+            source_fact_ids=sorted(all_facts_set),
         )
         unified_entities.append(merged_entity)
 

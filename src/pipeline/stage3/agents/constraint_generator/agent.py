@@ -113,7 +113,7 @@ class ConstraintGeneratorLoopAgent(LoopAgent):
             logger.warning(
                 "[ConstraintGenerator] Failed to parse initial_context as JSON."
             )
-        except TypeError, AttributeError:
+        except (TypeError, AttributeError):
             logger.warning(
                 "[ConstraintGenerator] initial_context was not a JSON string."
             )

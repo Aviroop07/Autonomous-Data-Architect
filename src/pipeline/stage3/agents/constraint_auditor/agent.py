@@ -64,7 +64,7 @@ class ConstraintAuditorLoopAgent(LoopAgent):
             logger.warning(
                 "[ConstraintAuditor] Failed to parse initial_context as JSON."
             )
-        except TypeError, AttributeError:
+        except (TypeError, AttributeError):
             logger.warning("[ConstraintAuditor] initial_context was not a JSON string.")
 
         fact_ids = context_data.get("fact_ids", [])

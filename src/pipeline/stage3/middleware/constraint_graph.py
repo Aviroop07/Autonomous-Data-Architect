@@ -426,6 +426,20 @@ def _range_constraint_to_rich(
     domain metadata, not DOF-consuming equations."""
     cols = extract_columns(c.condition)
     if len(cols) != 1:
+        # A range/bounds variable is single-column by construction: the bound
+        # metadata attaches to one column's domain. A cross-column rule is a
+        # real constraint that this representation simply cannot carry, so it
+        # is dropped here -- but it was dropped with no log at all, which made
+        # a whole class of extracted constraint (any rule relating two columns)
+        # vanish between extraction and the DOF graph with no trace anywhere.
+        logger.info(
+            "[ConstraintGraph] Constraint over %d columns %s (facts %s) has no "
+            "single-column range representation and contributes no DOF variable. "
+            "It remains in the constraint set; only the bounds view skips it.",
+            len(cols),
+            sorted(cols),
+            list(c.fact_references),
+        )
         return [], []
     col = next(iter(cols))
     refs = tuple(c.fact_references)

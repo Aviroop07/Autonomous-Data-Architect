@@ -729,7 +729,7 @@ class CritiqueReport(LoopOutputModel):
                         for fid in raw_fact_ids:
                             try:
                                 coerced.append(int(fid))
-                            except TypeError, ValueError:
+                            except (TypeError, ValueError):
                                 continue
                         patch["source_fact_ids"] = coerced
 

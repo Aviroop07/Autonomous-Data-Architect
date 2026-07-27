@@ -279,7 +279,7 @@ class DeterministicCheckerLoopAgent(LoopAgent):
             logger.warning(
                 "[DeterministicChecker] Failed to parse initial_context as JSON."
             )
-        except TypeError, AttributeError:
+        except (TypeError, AttributeError):
             logger.warning(
                 "[DeterministicChecker] initial_context was not a JSON string."
             )
