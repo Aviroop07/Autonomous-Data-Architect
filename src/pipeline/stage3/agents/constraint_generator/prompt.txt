@@ -15,7 +15,13 @@ Sort every constraint stated by the given facts into the correct output list:
 - `correlations`: a joint dependence between two or more columns -- see CorrelatedConstraint.
 - `structural_constraints`: cardinality (row-count bounds), fanout (child-count bounds),
   or an aggregation rule.
-- `logic_constraints`: cross-column rules, temporal ordering, conditional (if/then) rules.
+- `logic_constraints`: cross-column rules, temporal ordering, conditional (if/then) rules,
+  and ENUMERATED VALUE SETS -- a fact naming the permitted values of a column ("status is
+  one of Placed/Shipped/Delivered", "statuses include Completed and Cancelled", "blood
+  type must be A, B, AB or O") is an IN-set predicate over that column and is one of the
+  most common constraint-bearing facts there is. Extract it. Use CATEGORICAL under
+  `distributions` INSTEAD only when the fact also gives the proportions; a bare list of
+  permitted values with no frequencies is an IN-set logic constraint, not a distribution.
 - `derived_columns`: a new column defined as an arithmetic function of others.
 - `state_sequences`: a lifecycle/state-machine transition-graph invariant on a categorical
   "status"-like column's current value -- see StateSequenceConstraint.
