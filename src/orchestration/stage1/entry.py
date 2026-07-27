@@ -165,13 +165,24 @@ async def _orchestrate_impl(
         convert_to_atomic(all_facts, tag_results, segment_lookup)
     )
 
-    from src.pipeline.stage1.middleware.bayesian_chunker import BayesianChunker
+    # Chunks exist so each one FITS an ER-extraction prompt, so the boundary
+    # condition is the token budget, not semantic similarity. See
+    # budget_chunker.py for why the Dirichlet-process sampler it replaced was
+    # degenerate (it returned 1 chunk for every input measured, at 12,000
+    # sweeps a time) and why 1 chunk was nonetheless the right answer.
+    if ablation_config is not None and ablation_config.use_bayesian_chunker:
+        from src.pipeline.stage1.middleware.bayesian_chunker import BayesianChunker
 
-    logger.info("[Stage 1] Clustering facts via Bayesian partition sampler...")
-    chunker = BayesianChunker(alpha=0.5, n_burnin=2000, n_samples=2000, thin=5)
-    plan = chunker.fit(tagged_facts)
-    logger.info(f"[Stage 1] Bayesian chunker produced {len(plan.chunks)} cluster(s).")
-    # the Bayesian chunker is deterministic given random_state
+        logger.info("[Stage 1] Clustering facts via Bayesian partition sampler...")
+        plan = BayesianChunker(alpha=0.5, n_burnin=2000, n_samples=2000, thin=5).fit(
+            tagged_facts
+        )
+    else:
+        from src.pipeline.stage1.middleware.budget_chunker import BudgetChunker
+
+        logger.info("[Stage 1] Chunking facts to fit the model's context budget...")
+        plan = BudgetChunker(model=model).fit(tagged_facts)
+    logger.info(f"[Stage 1] Chunker produced {len(plan.chunks)} chunk(s).")
 
     output = Output(
         final_facts=tagged_facts,
