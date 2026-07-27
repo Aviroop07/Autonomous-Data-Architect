@@ -60,9 +60,16 @@ class TestConstraint:
         with pytest.raises(Exception):
             self._make(fact_references=[])
 
-    def test_duplicate_fact_references_rejected(self):
-        with pytest.raises(Exception):
-            self._make(fact_references=[1, 1])
+    def test_duplicate_fact_references_are_deduplicated_not_rejected(self):
+        """Raising here failed the ENTIRE UnifiedExtractionOutput parse, so one
+        constraint citing the same fact twice discarded every other constraint
+        the shard had extracted. A repeated id is mechanically repairable."""
+        c = self._make(fact_references=[1, 1])
+        assert c.fact_references == [1]
+
+    def test_deduplication_preserves_order(self):
+        c = self._make(fact_references=[3, 1, 3, 2, 1])
+        assert c.fact_references == [3, 1, 2]
 
     def test_rename_optional(self):
         c = self._make(rename=None)
@@ -269,9 +276,9 @@ class TestDistributionConstraint:
         assert dc.if_condition is not None
         assert dc._validate() == []
 
-    def test_duplicate_fact_references_rejected(self):
-        with pytest.raises(Exception):
-            self._make_gaussian(fact_references=[1, 1])
+    def test_duplicate_fact_references_are_deduplicated_not_rejected(self):
+        c = self._make_gaussian(fact_references=[1, 1])
+        assert c.fact_references == [1]
 
 
 # =========================================================================

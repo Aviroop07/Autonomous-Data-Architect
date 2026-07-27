@@ -218,11 +218,50 @@ class DeterministicCheckerLoopAgent(LoopAgent):
                 output.state_sequences, "StateSequence", schema, view
             )
         )
+        errors.extend(self._check_derived_columns(output.derived_columns, view))
+        return errors
+
+    def _check_derived_columns(self, items: list, view: _SchemaView) -> List[str]:
+        """Validate derived columns against the schema.
+
+        DerivedColumnConstraint carries no `on` tree, so it cannot go through
+        _canonicalize_list -- which is why it was the one output list checked by
+        nothing at all. Its table references are still checkable, and a
+        derivation naming a table the shard does not contain is exactly the kind
+        of hallucination the deterministic pass exists to catch before it
+        reaches the DOF graph.
+        """
+        errors: List[str] = []
+        for index, item in enumerate(items):
+            target = getattr(item, "target_table", None)
+            if target and target not in view.tables:
+                errors.append(
+                    f"DerivedColumn[{index}]: target_table '{target}' is not a table "
+                    f"in this shard's schema."
+                )
+            for referenced in getattr(item, "referenced_tables", []) or []:
+                if referenced not in view.tables:
+                    errors.append(
+                        f"DerivedColumn[{index}]: referenced_tables names "
+                        f"'{referenced}', which is not a table in this shard's schema."
+                    )
         return errors
 
     async def invoke(self, query: str) -> tuple[LoopOutputModel, int]:
         del query  # deterministic node -- state comes from build_context, not the query
-        if self._pending_output is None or self._schema is None:
+        if self._schema is None:
+            # An empty error list here means "checked and clean", and the loop
+            # acts on it by advancing to the auditor. Not being ABLE to check is
+            # a different thing, and build_context has already logged why at
+            # ERROR level. Returning empty is still the right routing decision
+            # -- sending the generator back to retry cannot conjure a schema it
+            # was never given -- but it must not be silent.
+            logger.warning(
+                "[DeterministicChecker] No usable schema; reporting no errors "
+                "WITHOUT having checked anything. This is not a clean pass."
+            )
+            return DetCheckOutput(errors=[]), 0
+        if self._pending_output is None:
             return DetCheckOutput(errors=[]), 0
         errors = self._canonicalize_all(self._pending_output, self._schema)
         return DetCheckOutput(errors=errors), 0
@@ -252,8 +291,25 @@ class DeterministicCheckerLoopAgent(LoopAgent):
         elif isinstance(schema_raw, dict):
             try:
                 schema = Schema(**schema_raw)
-            except Exception:
-                pass
+            except Exception as exc:
+                # Was a bare `pass`. Losing the schema here disables EVERY
+                # check this node performs, and invoke() then returned an empty
+                # error list -- indistinguishable from a genuine clean pass, so
+                # the loop routed straight on to the auditor. Silence was the
+                # worst possible response to it.
+                logger.error(
+                    "[DeterministicChecker] Could not reconstruct the shard Schema "
+                    "from context (%s: %s). Every canonicalization, column-resolution "
+                    "and vacuous-bound check will be SKIPPED for this round.",
+                    type(exc).__name__,
+                    exc,
+                )
+        elif schema_raw is not None:
+            logger.error(
+                "[DeterministicChecker] Context 'schema' has unexpected type %s; "
+                "expected Schema or dict. All checks will be SKIPPED this round.",
+                type(schema_raw).__name__,
+            )
         self._schema = schema
 
         return "deterministic canonicalize() pass over the generator's latest output"

@@ -252,7 +252,10 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
 
             for pk_c in pk_cols:
                 parent_col = _resolve_pk_column(
-                    columns, pk_c, table_name=t_name, purpose="a multi-valued-attribute table"
+                    columns,
+                    pk_c,
+                    table_name=t_name,
+                    purpose="a multi-valued-attribute table",
                 )
                 if parent_col is None:
                     continue
@@ -360,7 +363,10 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                 for pk_c in p_t.primary_key:
                     fk_col_name = f"{role_prefix}{pk_c}"
                     parent_col = _resolve_pk_column(
-                        p_t.columns, pk_c, table_name=p_t.name, purpose="a junction-table FK"
+                        p_t.columns,
+                        pk_c,
+                        table_name=p_t.name,
+                        purpose="a junction-table FK",
                     )
                     if parent_col is None:
                         continue
@@ -531,6 +537,28 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                         child_t.unique = []
                     child_t.unique.append(CompositeUnique(columns=fk_cols_added))
 
+        else:
+            # The three branches above cover n-ary/M:N, binary 1:N and binary
+            # 1:1. Anything else fell off the end of the chain and vanished
+            # with no trace. Two ways to get here, both reachable:
+            #   - a `kind` outside the Literal, which the adjudicator could
+            #     previously write (now blocked at its source, but the mapper
+            #     should not depend on that being the only writer);
+            #   - a NON-n-ary relationship declared 1:N or 1:1 with a
+            #     participant count other than two, which no branch matches.
+            # Logged rather than repaired: guessing a cardinality would invent
+            # a foreign key the specification never stated.
+            logger.warning(
+                "  [Mapper] Relationship '%s' matched no mapping rule "
+                "(kind=%r, degree=%r, %d participant(s)); no foreign key was "
+                "generated for it. Facts %s are unrepresented.",
+                rel.name,
+                rel.kind,
+                rel.degree,
+                len(rel.participants),
+                rel.source_fact_ids or "[]",
+            )
+
     schema = Schema(tables=tables, relationships=relationships_to_add)
     schema.normalize()
     schema.wire_orphan_fk_columns()
@@ -539,11 +567,12 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
     # A2: Enforce validation postcondition
     errors = schema._validate()
     if errors:
-        print(
-            f"  [Mapper] WARNING: Generated schema failed validation with {len(errors)} errors:"
+        logger.warning(
+            "  [Mapper] Generated schema failed validation with %d error(s):",
+            len(errors),
         )
         for e in errors[:5]:
-            print(f"    - {e}")
+            logger.warning("    - %s", e)
 
         # Bounded deterministic repair loop
         for _ in range(3):
@@ -557,7 +586,18 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
             seen_t = set()
             unique_tables = []
             for t in schema.tables:
+                # Every drop below is logged. These were bare `continue`s, so a
+                # table extracted from the spec could disappear between the
+                # conceptual model and the shipped schema with no trace, and
+                # the fact registry was never told -- leaving FK provenance and
+                # uncovered_fact_ids describing tables that no longer exist.
                 if not t.columns or not t.primary_key:
+                    logger.warning(
+                        "  [Mapper] Dropping table '%s': %s. Its source facts are "
+                        "no longer represented in the schema.",
+                        t.name,
+                        "no columns" if not t.columns else "no primary key",
+                    )
                     continue
 
                 # Identify hollow tables (PK-only), exempting composite-PK junctions and
@@ -569,8 +609,19 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                     and not non_pk_cols
                     and len(schema.tables) > 1
                 ):
+                    logger.warning(
+                        "  [Mapper] Dropping hollow table '%s': primary key only, no "
+                        "other columns, and nothing references it.",
+                        t.name,
+                    )
                     continue
 
+                if t.name in seen_t:
+                    logger.warning(
+                        "  [Mapper] Dropping duplicate table '%s'; keeping the first "
+                        "occurrence. Columns unique to this copy are lost.",
+                        t.name,
+                    )
                 if t.name not in seen_t:
                     seen_t.add(t.name)
                     unique_tables.append(t)
@@ -616,6 +667,6 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
 
     # Non-blocking naming/quality advisories (plural names, isolated tables): surfaced, never fatal.
     for w in schema._style_warnings():
-        print(f"  [Mapper] STYLE: {w}")
+        logger.info("  [Mapper] STYLE: %s", w)
 
     return schema

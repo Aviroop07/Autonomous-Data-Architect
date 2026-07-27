@@ -1,4 +1,4 @@
-﻿"""Cross-shard constraint models for Stage 3 extraction agents.
+"""Cross-shard constraint models for Stage 3 extraction agents.
 
 These models represent the output of per-shard extraction agents. Each
 constraint captures one atomic rule derived from Stage 1 facts, expressed
@@ -23,7 +23,7 @@ Design doc: docs/design/RELATION_CONDITION_CONSTRAINT_DESIGN.md
 from __future__ import annotations
 
 import math
-from typing import List, Literal, Optional, Union
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -73,9 +73,14 @@ class Constraint(BaseModel):
     @field_validator("fact_references")
     @classmethod
     def _no_duplicates(cls, v: List[int]) -> List[int]:
-        if len(v) != len(set(v)):
-            raise ValueError("fact_references contains duplicates.")
-        return v
+        # Deduplicate rather than reject. Raising here failed the ENTIRE
+        # UnifiedExtractionOutput parse, so one constraint citing [42, 42] threw
+        # away every other constraint the shard had extracted. A repeated id is
+        # mechanically repairable with no loss of meaning, and the
+        # deterministic-first rule says fix it here rather than spend a retry
+        # round asking the model to. Order is preserved so provenance still
+        # reads in the sequence the model produced.
+        return list(dict.fromkeys(v))
 
     def _validate(self) -> List[str]:
         errors: List[str] = []
@@ -123,12 +128,66 @@ class DistributionConstraint(BaseModel):
         "No SQL strings.",
     )
 
+    # Which parameters of each family must be single numbers. `parameters` is
+    # typed dict[str, float | list[str] | list[float]], so a model returning
+    # {"mean": [10], "std_dev": [2]} satisfies the annotation and only fails
+    # later, at the comparison -- with a TypeError, which pydantic v2 does NOT
+    # wrap into a ValidationError. It propagated out of model construction, out
+    # of get_response, and killed the whole shard's extraction.
+    _SCALAR_PARAMS: ClassVar[Dict[str, Tuple[str, ...]]] = {
+        "GAUSSIAN": ("mean", "std_dev"),
+        "LOG_NORMAL": ("mean", "std_dev"),
+        "BETA": ("alpha", "beta"),
+        "POISSON": ("lam",),
+        "UNIFORM": ("min_value", "max_value"),
+    }
+
+    @staticmethod
+    def _as_number(value: Any, *, family: str, key: str) -> float:
+        """Coerce one distribution parameter to a float, or raise ValueError.
+
+        ValueError, never TypeError: pydantic wraps the former into a
+        ValidationError the retry loop can feed back to the model as text, and
+        lets the latter escape. Single-element lists and numeric strings are
+        accepted rather than rejected -- both are common, unambiguous
+        serialisation slips, and refusing them would spend a retry round to
+        recover a value already in hand.
+        """
+        if isinstance(value, bool):
+            raise ValueError(
+                f"{family} parameter '{key}' must be a number, got a boolean."
+            )
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, (list, tuple)):
+            if len(value) == 1 and isinstance(value[0], (int, float)):
+                return float(value[0])
+            raise ValueError(
+                f"{family} parameter '{key}' must be a single number, got a "
+                f"sequence of {len(value)} value(s): {value!r}."
+            )
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except ValueError:
+                pass
+        raise ValueError(
+            f"{family} parameter '{key}' must be a number, got "
+            f"{type(value).__name__}: {value!r}."
+        )
+
     @field_validator("parameters")
     @classmethod
     def _validate_params(cls, v: dict, info) -> dict:
         family = info.data.get("family")
         if family is None:
             return v
+
+        # Normalise before any comparison, so every check below operates on a
+        # float and no arithmetic can raise TypeError.
+        for key in cls._SCALAR_PARAMS.get(family, ()):
+            if key in v:
+                v[key] = cls._as_number(v[key], family=family, key=key)
 
         if family == "GAUSSIAN":
             required = {"mean", "std_dev"}
@@ -181,6 +240,19 @@ class DistributionConstraint(BaseModel):
                 raise ValueError("CATEGORICAL categories must be a non-empty list.")
             probs = v.get("probabilities")
             if probs is not None:
+                # Same TypeError hazard as the scalar families: `len(probs)`
+                # and `sum(probs)` both raise if the model returned a bare
+                # number or a list of strings, and that escapes pydantic.
+                if not isinstance(probs, (list, tuple)):
+                    raise ValueError(
+                        f"CATEGORICAL probabilities must be a list, got "
+                        f"{type(probs).__name__}."
+                    )
+                if any(
+                    not isinstance(p, (int, float)) or isinstance(p, bool)
+                    for p in probs
+                ):
+                    raise ValueError("CATEGORICAL probabilities must all be numbers.")
                 if len(probs) != len(cats):
                     raise ValueError(
                         "CATEGORICAL probabilities length must match categories."
@@ -204,9 +276,14 @@ class DistributionConstraint(BaseModel):
     @field_validator("fact_references")
     @classmethod
     def _no_duplicates(cls, v: List[int]) -> List[int]:
-        if len(v) != len(set(v)):
-            raise ValueError("fact_references contains duplicates.")
-        return v
+        # Deduplicate rather than reject. Raising here failed the ENTIRE
+        # UnifiedExtractionOutput parse, so one constraint citing [42, 42] threw
+        # away every other constraint the shard had extracted. A repeated id is
+        # mechanically repairable with no loss of meaning, and the
+        # deterministic-first rule says fix it here rather than spend a retry
+        # round asking the model to. Order is preserved so provenance still
+        # reads in the sequence the model produced.
+        return list(dict.fromkeys(v))
 
     def _validate(self) -> List[str]:
         errors: List[str] = []
@@ -251,9 +328,14 @@ class DerivedColumnConstraint(BaseModel):
     @field_validator("fact_references")
     @classmethod
     def _no_duplicates(cls, v: List[int]) -> List[int]:
-        if len(v) != len(set(v)):
-            raise ValueError("fact_references contains duplicates.")
-        return v
+        # Deduplicate rather than reject. Raising here failed the ENTIRE
+        # UnifiedExtractionOutput parse, so one constraint citing [42, 42] threw
+        # away every other constraint the shard had extracted. A repeated id is
+        # mechanically repairable with no loss of meaning, and the
+        # deterministic-first rule says fix it here rather than spend a retry
+        # round asking the model to. Order is preserved so provenance still
+        # reads in the sequence the model produced.
+        return list(dict.fromkeys(v))
 
     def _validate(self) -> List[str]:
         errors: List[str] = []
@@ -335,9 +417,14 @@ class CorrelatedConstraint(BaseModel):
     @field_validator("fact_references")
     @classmethod
     def _no_duplicates(cls, v: List[int]) -> List[int]:
-        if len(v) != len(set(v)):
-            raise ValueError("fact_references contains duplicates.")
-        return v
+        # Deduplicate rather than reject. Raising here failed the ENTIRE
+        # UnifiedExtractionOutput parse, so one constraint citing [42, 42] threw
+        # away every other constraint the shard had extracted. A repeated id is
+        # mechanically repairable with no loss of meaning, and the
+        # deterministic-first rule says fix it here rather than spend a retry
+        # round asking the model to. Order is preserved so provenance still
+        # reads in the sequence the model produced.
+        return list(dict.fromkeys(v))
 
     def _validate(self) -> List[str]:
         errors: List[str] = []
@@ -417,9 +504,14 @@ class StateSequenceConstraint(BaseModel):
     @field_validator("fact_references")
     @classmethod
     def _no_duplicates(cls, v: List[int]) -> List[int]:
-        if len(v) != len(set(v)):
-            raise ValueError("fact_references contains duplicates.")
-        return v
+        # Deduplicate rather than reject. Raising here failed the ENTIRE
+        # UnifiedExtractionOutput parse, so one constraint citing [42, 42] threw
+        # away every other constraint the shard had extracted. A repeated id is
+        # mechanically repairable with no loss of meaning, and the
+        # deterministic-first rule says fix it here rather than spend a retry
+        # round asking the model to. Order is preserved so provenance still
+        # reads in the sequence the model produced.
+        return list(dict.fromkeys(v))
 
     def _validate(self) -> List[str]:
         errors: List[str] = []

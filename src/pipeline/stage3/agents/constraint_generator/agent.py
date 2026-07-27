@@ -146,17 +146,24 @@ class ConstraintGeneratorLoopAgent(LoopAgent):
                     it
                     for it in items
                     if not any(
-                        fid in self._errored_ids_history for fid in it.fact_references
+                        fid in self._errored_ids_history
+                        for fid in getattr(it, "fact_references", ())
                     )
                 ]
 
+            # Derived from the model's own fields rather than enumerated by
+            # hand. The hand-written version listed six of the seven constraint
+            # lists -- state_sequences was missing -- so on every retry the
+            # model was shown a snapshot with its state-machine constraints
+            # absent and told to "keep these unchanged", which silently dropped
+            # them. Enumerating fields at a call site is exactly the kind of
+            # thing that goes stale when an eighth list is added.
             accepted = UnifiedExtractionOutput(
-                distributions=_accepted(prior_output.distributions),
-                moment_targets=_accepted(prior_output.moment_targets),
-                correlations=_accepted(prior_output.correlations),
-                structural_constraints=_accepted(prior_output.structural_constraints),
-                logic_constraints=_accepted(prior_output.logic_constraints),
-                derived_columns=_accepted(prior_output.derived_columns),
+                **{
+                    field: _accepted(value)
+                    for field in UnifiedExtractionOutput.model_fields
+                    if isinstance(value := getattr(prior_output, field, None), list)
+                }
             )
             parts.append(
                 "## ACCEPTED OUTPUT (keep these unchanged)\n"
