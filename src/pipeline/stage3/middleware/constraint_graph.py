@@ -68,7 +68,8 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Rich variable model (adapted from experiments/stage3_conflict_v2/dof_engine.py)
+# Rich variable model (adapted from the stage3_conflict_v2 prototype, which is
+# no longer in the repo)
 # ---------------------------------------------------------------------------
 
 

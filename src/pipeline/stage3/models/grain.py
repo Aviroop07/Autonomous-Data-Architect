@@ -1,9 +1,10 @@
 """FK-PK-restricted join canonicalization.
 
-Reduces any ON tree (a chain of joins/aggregates over the schema, per
-on_nodes.py) to a canonical (grain, edge-set) pair, under the deliberate
+Reduces any ON tree (a chain of joins/aggregates over the schema, built from
+util/constraint_model's Relation nodes) to a canonical (grain, edge-set) pair,
+under the deliberate
 restriction that every join must be a real foreign-key-to-primary-key
-relationship. See experiments/stage3_conflict_v2/DESIGN.md section 1-2 for
+relationship. See docs/design/STAGE3_PHASE2_DESIGN.md for
 the full mathematical justification.
 
 This module operates on the REAL Stage 2 schema models (Table, Column,

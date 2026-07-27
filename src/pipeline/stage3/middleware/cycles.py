@@ -5,8 +5,8 @@ expressions, finds cycles, composes the linear expression around each
 cycle, and checks whether it has a fixed point. A cycle with no fixed
 point (e.g. x = x + 5) is a genuine, unresolvable contradiction.
 
-Ported from the validated experiments/stage3_conflict_v2/cycles.py
-prototype (see ISSUES.md items 1 and 7), fixing three real bugs found in
+Ported from the validated stage3_conflict_v2 prototype (no longer in the
+repo; see docs/ISSUES.md items 1 and 7), fixing three real bugs found in
 the original conflict_detection.py implementation:
 1. `_linear_coeff` used to return a bare `None` on any non-linear
    sub-expression, which its own caller unconditionally 2-tuple-unpacked

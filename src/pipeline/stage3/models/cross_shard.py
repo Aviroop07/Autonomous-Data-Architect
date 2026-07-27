@@ -1,4 +1,4 @@
-"""Cross-shard constraint models for Stage 3 extraction agents.
+﻿"""Cross-shard constraint models for Stage 3 extraction agents.
 
 These models represent the output of per-shard extraction agents. Each
 constraint captures one atomic rule derived from Stage 1 facts, expressed
@@ -17,7 +17,7 @@ Architecture:
         StructuralExtractionOutput
         LogicExtractionOutput
 
-Design doc: experiments/CONSTRAINT_REPRESENTATION_SPEC.md (v0.2)
+Design doc: docs/design/RELATION_CONDITION_CONSTRAINT_DESIGN.md
 """
 
 from __future__ import annotations
