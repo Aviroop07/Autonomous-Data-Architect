@@ -34,7 +34,7 @@ from src.pipeline.stage3.models.grain import (
     _SchemaView,
     canonicalize,
 )
-from src.pipeline.stage3.models.on_nodes import ONAggregate, ONBaseTable, ONNode
+from src.util.constraint_model.relation.nodes import Aggregate, BaseTable, RelationUnion
 from src.pipeline.stage3.models.probe import (
     Stage3AnalysisReport,
     VariableProbe,
@@ -319,11 +319,11 @@ def _resolve_branch(
 # ---------------------------------------------------------------------------
 
 
-def _on_base_table(node: ONNode) -> Optional[str]:
+def _on_base_table(node: RelationUnion) -> Optional[str]:
     """Extract the base table name from an ON tree."""
-    if isinstance(node, ONBaseTable):
+    if isinstance(node, BaseTable):
         return node.name
-    if isinstance(node, ONAggregate):
+    if isinstance(node, Aggregate):
         return _on_base_table(node.source)
     return None
 
@@ -572,9 +572,9 @@ def _convert_cross_shard_constraints(
             continue
 
         on_tables = set()
-        from src.pipeline.stage3.models.on_nodes import extract_tables
+        from src.util.constraint_model.relation.nodes import extract_base_tables
 
-        on_tables = extract_tables(c.on)
+        on_tables = extract_base_tables(c.on)
 
         if len(on_tables) == 1:
             # Single-table constraint -> cardinality
@@ -605,7 +605,7 @@ def _convert_cross_shard_constraints(
     # 4. Derived column constraints
     for i, dc in enumerate(derived):
         # Build a synthetic ON tree for the target table
-        on = ONBaseTable(name=dc.target_table)
+        on = BaseTable(name=dc.target_table)
         grain_result = canonicalize(on, schema)
         if isinstance(grain_result, CanonicalizationFailure):
             logger.warning(
@@ -635,7 +635,7 @@ def analyze_cross_shard_constraints(
 ) -> Tuple[Stage3AnalysisReport, Dict[str, List[int]]]:
     """Stage 3's complete DOF analysis for cross_shard.py-shaped extraction
     outputs. This is the NEW entry point that consumes the real extraction
-    agent output shapes (on: ONNode, condition: RPredicate) and routes
+    agent output shapes (on: RelationUnion, condition: RPredicate) and routes
     through grain canonicalization + real DOFGraph.
 
     Returns (Stage3AnalysisReport, variable_fact_map). The report has:

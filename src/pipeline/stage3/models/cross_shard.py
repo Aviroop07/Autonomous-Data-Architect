@@ -27,7 +27,7 @@ from typing import List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator
 
-from src.pipeline.stage3.models.on_nodes import ONBaseTable, ONNode
+from src.util.constraint_model.relation.nodes import BaseTable, RelationUnion
 from src.util.constraint_model.condition.expressions import RExprUnion
 from src.util.constraint_model.condition.predicates import (
     RPredicateUnion as RPredicate,
@@ -51,7 +51,7 @@ class Constraint(BaseModel):
         min_length=1,
         description="Stage 1 fact IDs that state this rule. Non-empty.",
     )
-    on: ONNode = Field(
+    on: RelationUnion = Field(
         description="Table/join/aggregate context (hybrid, normalized to pure objects)."
     )
     condition: RPredicate = Field(
@@ -107,7 +107,7 @@ class DistributionConstraint(BaseModel):
         min_length=1,
         description="Stage 1 fact IDs that state this distribution.",
     )
-    on: ONBaseTable = Field(
+    on: BaseTable = Field(
         description="The table containing the column. Must be a single base table."
     )
     column: str = Field(description="Column name (lower_snake_case).")
@@ -305,7 +305,7 @@ class PairwiseCorrelationSpec(BaseModel):
 class CorrelatedConstraint(BaseModel):
     """Joint dependence across an arbitrary-arity column list. `on` provides
     the schema context making every named column accessible -- a single
-    table if all columns live there, or an ONJoin reaching every table
+    table if all columns live there, or an Join reaching every table
     involved. `pairwise` may be partial (a fact stating only a qualitative
     direction with no number should omit that pair entirely, never invent
     an approximate value)."""
@@ -313,7 +313,7 @@ class CorrelatedConstraint(BaseModel):
     fact_references: List[int] = Field(
         min_length=1, description="Stage 1 fact IDs that state this joint dependence."
     )
-    on: ONNode = Field(
+    on: RelationUnion = Field(
         description="Table/join context making every column in `columns` accessible."
     )
     columns: List[str] = Field(
@@ -402,7 +402,7 @@ class StateSequenceConstraint(BaseModel):
     fact_references: List[int] = Field(
         min_length=1, description="Stage 1 fact IDs that state this sequencing rule."
     )
-    on: ONBaseTable = Field(description="The table the sequence column lives on.")
+    on: BaseTable = Field(description="The table the sequence column lives on.")
     sequence_column: str = Field(description="The categorical column tracked as state.")
     allowed_transitions: List[StateTransitionSpec] = Field(default_factory=list)
     forbidden_transitions: List[StateTransitionSpec] = Field(default_factory=list)

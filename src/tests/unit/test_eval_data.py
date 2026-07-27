@@ -3,6 +3,7 @@
 Deterministic, offline. No live API. Tests _mre, _ks, _parse_gt_dist,
 estimate_params, and log_pdf from distributions.py.
 """
+
 from __future__ import annotations
 
 import math
@@ -27,6 +28,7 @@ from src.evaluation.data_level.distributions import (
 # --------------------------------------------------------------------------- #
 # _mre
 # --------------------------------------------------------------------------- #
+
 
 def test_mre_perfect_params():
     assert _mre({"mean": 5.0, "std": 2.0}, {"mean": 5.0, "std": 2.0}) == 0.0
@@ -68,6 +70,7 @@ def test_mre_multiple_params_averaged():
 # _ks
 # --------------------------------------------------------------------------- #
 
+
 def test_ks_normal_data_vs_correct_gt_is_low():
     np.random.seed(0)
     data = np.random.normal(0.0, 1.0, 1000)
@@ -95,6 +98,7 @@ def test_ks_invalid_family_returns_one():
 # _parse_gt_dist
 # --------------------------------------------------------------------------- #
 
+
 def test_parse_normal_spec():
     result = _parse_gt_dist({"family": "normal", "params": {"mean": 7.0, "std": 1.3}})
     assert result is not None
@@ -105,7 +109,9 @@ def test_parse_normal_spec():
 
 
 def test_parse_lognormal_mean_variance_converts_to_mu_sigma():
-    result = _parse_gt_dist({"family": "lognormal", "params": {"mean": 3.5, "variance": 1.44}})
+    result = _parse_gt_dist(
+        {"family": "lognormal", "params": {"mean": 3.5, "variance": 1.44}}
+    )
     assert result is not None
     family, params = result
     assert family == "lognormal"
@@ -116,7 +122,9 @@ def test_parse_lognormal_mean_variance_converts_to_mu_sigma():
 
 
 def test_parse_lognormal_mu_sigma_passthrough():
-    result = _parse_gt_dist({"family": "lognormal", "params": {"mu": 3.5, "sigma": 1.2}})
+    result = _parse_gt_dist(
+        {"family": "lognormal", "params": {"mu": 3.5, "sigma": 1.2}}
+    )
     assert result is not None
     _, params = result
     assert params["mu"] == pytest.approx(3.5)
@@ -133,7 +141,9 @@ def test_parse_exponential_lambda_aliased_to_rate():
 
 
 def test_parse_uniform_spec():
-    result = _parse_gt_dist({"family": "uniform", "params": {"low": 0.0, "high": 100.0}})
+    result = _parse_gt_dist(
+        {"family": "uniform", "params": {"low": 0.0, "high": 100.0}}
+    )
     assert result is not None
     family, params = result
     assert family == "uniform"
@@ -155,6 +165,7 @@ def test_parse_case_insensitive_family():
 # --------------------------------------------------------------------------- #
 # estimate_params from distributions.py
 # --------------------------------------------------------------------------- #
+
 
 def test_estimate_params_normal():
     np.random.seed(42)
@@ -205,6 +216,7 @@ def test_estimate_params_raises_for_unknown_family():
 # log_pdf
 # --------------------------------------------------------------------------- #
 
+
 def test_log_pdf_normal_at_mean_is_maximum():
     params = {"mean": 0.0, "std": 1.0}
     at_mean = log_pdf(np.array([0.0]), "normal", params)[0]
@@ -230,6 +242,7 @@ def test_log_pdf_returns_array_same_shape():
 # max_density_point
 # --------------------------------------------------------------------------- #
 
+
 def test_max_density_normal_is_mean():
     assert max_density_point("normal", {"mean": 7.5, "std": 1.0}) == pytest.approx(7.5)
 
@@ -246,10 +259,13 @@ def test_max_density_zipf_is_one():
 # evaluate_column (end-to-end for a single column)
 # --------------------------------------------------------------------------- #
 
+
 def test_evaluate_column_near_perfect_fit_has_low_ks():
     np.random.seed(5)
     data = np.random.normal(50.0, 5.0, 500)
-    result = evaluate_column(data, {"family": "normal", "params": {"mean": 50.0, "std": 5.0}})
+    result = evaluate_column(
+        data, {"family": "normal", "params": {"mean": 50.0, "std": 5.0}}
+    )
     assert result["ks"] < 0.1
     assert result["fa"] > 0.9
 
@@ -257,7 +273,9 @@ def test_evaluate_column_near_perfect_fit_has_low_ks():
 def test_evaluate_column_bad_fit_has_high_ks():
     np.random.seed(5)
     data = np.random.normal(50.0, 5.0, 500)
-    result = evaluate_column(data, {"family": "normal", "params": {"mean": 1000.0, "std": 1.0}})
+    result = evaluate_column(
+        data, {"family": "normal", "params": {"mean": 1000.0, "std": 1.0}}
+    )
     assert result["ks"] > 0.3
 
 
@@ -268,5 +286,7 @@ def test_evaluate_column_malformed_spec_returns_worst_case():
 
 
 def test_evaluate_column_too_short_returns_worst_case():
-    result = evaluate_column(np.array([1.0]), {"family": "normal", "params": {"mean": 1.0, "std": 1.0}})
+    result = evaluate_column(
+        np.array([1.0]), {"family": "normal", "params": {"mean": 1.0, "std": 1.0}}
+    )
     assert result == WORST_CASE

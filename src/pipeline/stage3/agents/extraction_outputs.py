@@ -18,7 +18,7 @@ from src.pipeline.stage3.models.cross_shard import (
     StateSequenceConstraint,
     UnifiedExtractionOutput,
 )
-from src.pipeline.stage3.models.on_nodes import extract_tables
+from src.util.constraint_model.relation.nodes import extract_base_tables
 from src.util.orchestration.loop_types import LoopOutputModel
 
 
@@ -26,7 +26,7 @@ def _validate_constraint(c: Constraint, prefix: str) -> List[str]:
     errors: List[str] = []
     if not c.fact_references:
         errors.append(f"{prefix} fact_references cannot be empty.")
-    if not extract_tables(c.on):
+    if not extract_base_tables(c.on):
         errors.append(f"{prefix} ON node has no table reference.")
     if c.condition is None:
         errors.append(f"{prefix} condition is None.")
@@ -40,7 +40,7 @@ def _validate_distribution(d: DistributionConstraint, idx: int) -> List[str]:
         errors.append(f"{prefix} fact_references cannot be empty.")
     if not d.column.strip():
         errors.append(f"{prefix} column is empty.")
-    if not extract_tables(d.on):
+    if not extract_base_tables(d.on):
         errors.append(f"{prefix} ON node has no table reference.")
     return errors
 
@@ -60,7 +60,7 @@ def _validate_derived(dc: DerivedColumnConstraint, idx: int) -> List[str]:
 def _validate_correlated(c: CorrelatedConstraint, idx: int) -> List[str]:
     prefix = f"Correlation[{idx}]"
     errors: List[str] = [f"{prefix}: {e}" for e in c._validate()]
-    if not extract_tables(c.on):
+    if not extract_base_tables(c.on):
         errors.append(f"{prefix} ON node has no table reference.")
     return errors
 
@@ -68,7 +68,7 @@ def _validate_correlated(c: CorrelatedConstraint, idx: int) -> List[str]:
 def _validate_state_sequence(c: StateSequenceConstraint, idx: int) -> List[str]:
     prefix = f"StateSequence[{idx}]"
     errors: List[str] = [f"{prefix}: {e}" for e in c._validate()]
-    if not extract_tables(c.on):
+    if not extract_base_tables(c.on):
         errors.append(f"{prefix} ON node has no table reference.")
     return errors
 

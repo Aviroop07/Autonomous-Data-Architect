@@ -145,9 +145,7 @@ class TestNodeStructuralValidation:
             assert node._validate() == []
 
     def test_arithmetic_propagates_child_errors(self):
-        node = RArithmetic(
-            op="+", left=RColumnRef(name=""), right=RColumnRef(name="b")
-        )
+        node = RArithmetic(op="+", left=RColumnRef(name=""), right=RColumnRef(name="b"))
         errors = node._validate()
         assert any("RArithmetic.left" in e for e in errors)
 

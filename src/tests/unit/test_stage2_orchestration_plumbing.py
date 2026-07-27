@@ -7,6 +7,7 @@ These tests catch the kind of bugs that crashed the pipeline at the finish line:
 
 None of these tests call the LLM — they are purely structural/static checks.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -20,7 +21,10 @@ from src.pipeline.stage2.models.conflicts import (
     ResolutionAction,
     AdjudicatorResponse,
 )
-from src.pipeline.stage2.models.conceptual_critique import ConceptualCritiqueReport, SuggestedFix
+from src.pipeline.stage2.models.conceptual_critique import (
+    ConceptualCritiqueReport,
+    SuggestedFix,
+)
 from src.pipeline.stage2.models.corrections import FixHistoryStep
 from src.pipeline.stage2.mapper.conceptual_model import (
     ConceptualModel,
@@ -39,6 +43,7 @@ from src.pipeline.stage2.models.corrections import Correction, CorrectionStatus
 # ---------------------------------------------------------------------------
 # Output model construction — the bug that killed the first successful run
 # ---------------------------------------------------------------------------
+
 
 def make_minimal_schema(table_name: str = "TEST") -> Schema:
     return Schema(
@@ -84,13 +89,21 @@ def test_output_full_construction():
     schema = make_minimal_schema()
     plan = make_minimal_plan()
     cert = CritiqueReport(agent_name="test-certifier", patches=[])
-    steps = [FixHistoryStep(
-        attempt=1,
-        errors=["test issue"],
-        corrections=[Correction(error_message="err", status=CorrectionStatus.FIXED, description="desc")],
-        fixed_schema="",
-        schema_state=schema,
-    )]
+    steps = [
+        FixHistoryStep(
+            attempt=1,
+            errors=["test issue"],
+            corrections=[
+                Correction(
+                    error_message="err",
+                    status=CorrectionStatus.FIXED,
+                    description="desc",
+                )
+            ],
+            fixed_schema="",
+            schema_state=schema,
+        )
+    ]
     output = Output(
         segments=[schema],
         plan=plan,
@@ -122,6 +135,7 @@ def test_output_with_cert_report_none():
 # CritiqueReport property access — the bug that killed the second run
 # ---------------------------------------------------------------------------
 
+
 def test_critique_report_has_patches_not_has_violations():
     """CritiqueReport uses .patches (not .has_violations or .critiques)."""
     report = CritiqueReport(agent_name="test", patches=[])
@@ -133,10 +147,18 @@ def test_critique_report_has_patches_not_has_violations():
 
 def test_critique_report_with_patches():
     """CritiqueReport stores patches correctly (pass dicts, not model instances)."""
-    report = CritiqueReport(agent_name="test", patches=[
-        {"action": "ADD_COLUMN", "table_name": "TEST", "column_name": "new_col",
-         "data_type": "VARCHAR", "reason": "Need more data"},
-    ])
+    report = CritiqueReport(
+        agent_name="test",
+        patches=[
+            {
+                "action": "ADD_COLUMN",
+                "table_name": "TEST",
+                "column_name": "new_col",
+                "data_type": "VARCHAR",
+                "reason": "Need more data",
+            },
+        ],
+    )
     assert len(report.patches) == 1
     assert report.patches[0].table_name == "TEST"
     assert report.patches[0].column_name == "new_col"
@@ -145,6 +167,7 @@ def test_critique_report_with_patches():
 # ---------------------------------------------------------------------------
 # ConceptualCritiqueReport — separate model used in ER loop (not to be confused)
 # ---------------------------------------------------------------------------
+
 
 def test_conceptual_critique_report_structure():
     """ConceptualCritiqueReport has is_valid and fixes (not patches)."""
@@ -167,6 +190,7 @@ def test_conceptual_critique_report_with_fixes():
 # Conflict models structural checks
 # ---------------------------------------------------------------------------
 
+
 def test_conflict_flag_all_types():
     """All flag types should construct and serialize correctly."""
     for flag_type in [
@@ -187,27 +211,34 @@ def test_resolution_action_all_types():
     actions = [
         ResolutionAction(
             action_type=ActionType.MERGE_ENTITIES,
-            entity_a="X", entity_b="Y", new_name="Z",
+            entity_a="X",
+            entity_b="Y",
+            new_name="Z",
             rationale="Merge them",
         ),
         ResolutionAction(
             action_type=ActionType.RENAME_ATTRIBUTE,
-            entity_a="X", attribute_old="old", new_name="new",
+            entity_a="X",
+            attribute_old="old",
+            new_name="new",
             rationale="Rename",
         ),
         ResolutionAction(
             action_type=ActionType.RESOLVE_CARDINALITY,
-            relationship_name="R", new_cardinality="1:N",
+            relationship_name="R",
+            new_cardinality="1:N",
             rationale="Card fix",
         ),
         ResolutionAction(
             action_type=ActionType.RESOLVE_CROSS_CATEGORY,
-            entity_a="X", relationship_name="R",
+            entity_a="X",
+            relationship_name="R",
             rationale="Cross fix",
         ),
         ResolutionAction(
             action_type=ActionType.RESOLVE_IDENTIFIER,
-            entity_a="X", new_identifier_attributes=["id"],
+            entity_a="X",
+            new_identifier_attributes=["id"],
             rationale="ID fix",
         ),
         ResolutionAction(
@@ -232,13 +263,19 @@ def test_adjudicator_response():
 # _build_conflict_graph deterministic test
 # ---------------------------------------------------------------------------
 
+
 def test_build_conflict_graph():
     from src.orchestration.stage2.entry import _build_conflict_graph
 
     flags = [
         ConflictFlag(flag_type="VETOED_MERGE", entities=["A", "B"], message="m1"),
         ConflictFlag(flag_type="FORCED_MERGE", entities=["B", "C"], message="m2"),
-        ConflictFlag(flag_type="CARDINALITY_CONTRADICTION", entities=["A"], relationship="R", message="m3"),
+        ConflictFlag(
+            flag_type="CARDINALITY_CONTRADICTION",
+            entities=["A"],
+            relationship="R",
+            message="m3",
+        ),
     ]
     G, flag_map = _build_conflict_graph(flags)
     assert set(G.nodes()) == {"A", "B", "C"}
@@ -252,6 +289,7 @@ def test_build_conflict_graph():
 
 def test_build_conflict_graph_empty():
     from src.orchestration.stage2.entry import _build_conflict_graph
+
     G, flag_map = _build_conflict_graph([])
     assert len(G.nodes()) == 0
     assert flag_map == {}
@@ -260,6 +298,7 @@ def test_build_conflict_graph_empty():
 # ---------------------------------------------------------------------------
 # _compute_uncovered_facts deterministic test
 # ---------------------------------------------------------------------------
+
 
 def test_compute_uncovered_facts():
     from src.orchestration.stage2.entry import _compute_uncovered_facts
@@ -295,11 +334,15 @@ def test_compute_uncovered_facts_none():
 # apply_adjudicator_patches deterministic test
 # ---------------------------------------------------------------------------
 
+
 def _make_cm() -> ConceptualModel:
     return ConceptualModel(
         entities=[
-            Entity(name="A", attributes=[CMAttribute(name="x", type=DataType.VARCHAR)],
-                   identifier_attributes=["x"]),
+            Entity(
+                name="A",
+                attributes=[CMAttribute(name="x", type=DataType.VARCHAR)],
+                identifier_attributes=["x"],
+            ),
             Entity(name="B", attributes=[CMAttribute(name="y", type=DataType.INTEGER)]),
         ],
         relationships=[
@@ -323,7 +366,9 @@ def test_apply_adjudicator_patches_merge():
     patches = [
         ResolutionAction(
             action_type=ActionType.MERGE_ENTITIES,
-            entity_a="A", entity_b="B", new_name="C",
+            entity_a="A",
+            entity_b="B",
+            new_name="C",
             rationale="Merge test",
         ),
     ]
@@ -343,7 +388,9 @@ def test_apply_adjudicator_patches_rename_attr():
     patches = [
         ResolutionAction(
             action_type=ActionType.RENAME_ATTRIBUTE,
-            entity_a="A", attribute_old="x", new_name="z",
+            entity_a="A",
+            attribute_old="x",
+            new_name="z",
             rationale="Rename test",
         ),
     ]
@@ -358,7 +405,8 @@ def test_apply_adjudicator_patches_resolve_cardinality():
     patches = [
         ResolutionAction(
             action_type=ActionType.RESOLVE_CARDINALITY,
-            relationship_name="R_AB", new_cardinality="M:N",
+            relationship_name="R_AB",
+            new_cardinality="M:N",
             rationale="Card test",
         ),
     ]
@@ -373,7 +421,8 @@ def test_apply_adjudicator_patches_resolve_identifier():
     patches = [
         ResolutionAction(
             action_type=ActionType.RESOLVE_IDENTIFIER,
-            entity_a="A", new_identifier_attributes=["x", "y"],
+            entity_a="A",
+            new_identifier_attributes=["x", "y"],
             rationale="ID test",
         ),
     ]
@@ -389,7 +438,9 @@ def test_apply_adjudicator_patches_unknown_entity_warning():
     patches = [
         ResolutionAction(
             action_type=ActionType.MERGE_ENTITIES,
-            entity_a="NONEXISTENT", entity_b="B", new_name="C",
+            entity_a="NONEXISTENT",
+            entity_b="B",
+            new_name="C",
             rationale="Missing entity test",
         ),
     ]
@@ -401,6 +452,7 @@ def test_apply_adjudicator_patches_unknown_entity_warning():
 # Fixtures for mock-based orchestrate tests
 # ---------------------------------------------------------------------------
 
+
 def _plan_with_one_chunk() -> ChunkedPlan:
     return ChunkedPlan(
         core_modeling_facts=[AtomicFact(id=1, fact="test", tags=[FactTag.STRUCTURAL])],
@@ -411,8 +463,11 @@ def _plan_with_one_chunk() -> ChunkedPlan:
 def _cm_with_one_entity() -> ConceptualModel:
     return ConceptualModel(
         entities=[
-            Entity(name="TEST", attributes=[CMAttribute(name="id", type=DataType.INTEGER)],
-                   identifier_attributes=["id"]),
+            Entity(
+                name="TEST",
+                attributes=[CMAttribute(name="id", type=DataType.INTEGER)],
+                identifier_attributes=["id"],
+            ),
         ],
     )
 
@@ -420,6 +475,7 @@ def _cm_with_one_entity() -> ConceptualModel:
 # ---------------------------------------------------------------------------
 # Full orchestrate() plumbing test with mocked LLM calls
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_orchestrate_plumbing_with_mocks(mocker):
@@ -562,6 +618,7 @@ async def test_orchestrate_plumbing_no_sharding(mocker):
 # ---------------------------------------------------------------------------
 # Edge-case: zero chunks
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_orchestrate_zero_chunks_raises():

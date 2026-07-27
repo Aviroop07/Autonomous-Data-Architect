@@ -28,7 +28,7 @@ from src.pipeline.stage2.models.schema import Column, Schema, Table
 from src.util.constraint_model.condition.expressions import RColumnRef, RLiteral
 from src.util.constraint_model.condition.predicates import RComparison
 from src.pipeline.stage3.models.cross_shard import Constraint, UnifiedExtractionOutput
-from src.pipeline.stage3.models.on_nodes import ONBaseTable
+from src.util.constraint_model.relation.nodes import BaseTable
 from src.pipeline.stage3.models.probe import (
     ConflictReconciliation,
     GroupReconciliation,
@@ -36,7 +36,6 @@ from src.pipeline.stage3.models.probe import (
     ReconciliationVerdict,
 )
 from src.util.constraint_model.conflicts.models import Conflict
-from src.util.constraint_model.relation.nodes import BaseTable
 
 
 def _schema() -> Schema:
@@ -58,7 +57,7 @@ def _schema() -> Schema:
 def _range_constraint(fact_ids: list[int]) -> Constraint:
     return Constraint(
         fact_references=fact_ids,
-        on=ONBaseTable(name="ORDER"),
+        on=BaseTable(name="ORDER"),
         condition=RComparison(
             op=">=", left=RColumnRef(name="total"), right=RLiteral(value=5)
         ),

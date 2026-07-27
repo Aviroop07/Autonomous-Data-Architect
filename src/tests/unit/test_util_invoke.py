@@ -15,7 +15,11 @@ from pydantic import BaseModel
 from langchain_core.messages import AIMessage, HumanMessage
 
 from src.util.core.invoke import _extract_token_usage, get_response
-from src.util.observability.llm_trace import LLMTraceCollector, activate_trace_collector, reset_trace_collector
+from src.util.observability.llm_trace import (
+    LLMTraceCollector,
+    activate_trace_collector,
+    reset_trace_collector,
+)
 
 
 class SimpleResponse(BaseModel):
@@ -32,7 +36,11 @@ class FakeTracedAgent:
                 HumanMessage(content="hello"),
                 AIMessage(
                     content="world",
-                    usage_metadata={"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+                    usage_metadata={
+                        "input_tokens": 1,
+                        "output_tokens": 2,
+                        "total_tokens": 3,
+                    },
                 ),
             ],
         }
@@ -80,7 +88,10 @@ def test_plain_dict_with_no_usage_contributes_zero():
 
 def test_sums_across_mixed_messages():
     messages = [
-        AIMessage(content="a", usage_metadata={"input_tokens": 3, "output_tokens": 7, "total_tokens": 10}),
+        AIMessage(
+            content="a",
+            usage_metadata={"input_tokens": 3, "output_tokens": 7, "total_tokens": 10},
+        ),
         AIMessage(content="b", response_metadata={"token_usage": {"total_tokens": 20}}),
         {"usage_metadata": {"total_tokens": 30}},
         {"response_metadata": {"token_usage": {"total_tokens": 40}}},
@@ -99,7 +110,10 @@ def test_usage_metadata_missing_total_tokens_key_treated_as_zero():
 def test_empty_usage_metadata_falls_through_to_response_metadata():
     # An empty/falsy usage_metadata dict is falsy, so the helper uses the
     # response_metadata fallback branch for plain dicts.
-    msg = {"usage_metadata": {}, "response_metadata": {"token_usage": {"total_tokens": 9}}}
+    msg = {
+        "usage_metadata": {},
+        "response_metadata": {"token_usage": {"total_tokens": 9}},
+    }
     assert _extract_token_usage([msg]) == 9
 
 
@@ -107,11 +121,13 @@ def test_get_response_records_trace_when_collector_is_active():
     collector = LLMTraceCollector()
     token = activate_trace_collector(collector)
     try:
-        parsed, tokens = asyncio.run(get_response(
-            agent=FakeTracedAgent(),
-            output_structure=SimpleResponse,
-            query="trace me",
-        ))
+        parsed, tokens = asyncio.run(
+            get_response(
+                agent=FakeTracedAgent(),
+                output_structure=SimpleResponse,
+                query="trace me",
+            )
+        )
     finally:
         reset_trace_collector(token)
 

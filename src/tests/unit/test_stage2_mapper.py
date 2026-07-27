@@ -203,7 +203,11 @@ def test_multivalued_attribute():
             Entity(
                 name="Person",
                 identifier_attributes=["Person_ID"],
-                attributes=[CMAttribute(name="Phone", type=DataType.VARCHAR, is_multivalued=True)],
+                attributes=[
+                    CMAttribute(
+                        name="Phone", type=DataType.VARCHAR, is_multivalued=True
+                    )
+                ],
             )
         ]
     )

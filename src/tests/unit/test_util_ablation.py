@@ -16,7 +16,11 @@ def test_default_construction_all_enabled():
 
 def test_full_enables_everything():
     cfg = AblationConfig.full()
-    assert (cfg.enable_enrichment, cfg.enable_sharding, cfg.enable_logical_constraints) == (
+    assert (
+        cfg.enable_enrichment,
+        cfg.enable_sharding,
+        cfg.enable_logical_constraints,
+    ) == (
         True,
         True,
         True,
@@ -73,7 +77,9 @@ def test_factories_return_ablationconfig_instances():
 
 
 def test_explicit_override_respected():
-    cfg = AblationConfig(enable_enrichment=False, enable_sharding=False, enable_logical_constraints=False)
+    cfg = AblationConfig(
+        enable_enrichment=False, enable_sharding=False, enable_logical_constraints=False
+    )
     assert not any(
         (cfg.enable_enrichment, cfg.enable_sharding, cfg.enable_logical_constraints)
     )

@@ -6,6 +6,7 @@ those tests are skipped unless running in an environment that has it.
 
 The LCS and F1 functions are pure Python and require no ML or network.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -25,6 +26,7 @@ def evaluator():
 # --------------------------------------------------------------------------- #
 # coarsen_dt
 # --------------------------------------------------------------------------- #
+
 
 def test_coarsen_int_variants():
     assert coarsen_dt("INT") == "NUMERIC"
@@ -73,6 +75,7 @@ def test_coarsen_case_insensitive():
 # get_lcs_length (pure Python DP)
 # --------------------------------------------------------------------------- #
 
+
 def test_lcs_empty_strings(evaluator):
     assert evaluator.get_lcs_length("", "abc") == 0
     assert evaluator.get_lcs_length("abc", "") == 0
@@ -103,6 +106,7 @@ def test_lcs_is_longest_common_substring_not_subsequence(evaluator):
 # --------------------------------------------------------------------------- #
 # calculate_f1
 # --------------------------------------------------------------------------- #
+
 
 def test_f1_both_empty_returns_one(evaluator):
     f1, acc = evaluator.calculate_f1(set(), set(), lambda p, g: p == g)

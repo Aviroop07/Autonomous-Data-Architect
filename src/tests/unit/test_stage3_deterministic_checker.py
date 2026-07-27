@@ -2,9 +2,9 @@
 
 Focus: the normalize_on() -> canonicalize() wiring in _canonicalize_list()
 (previously zero coverage on this module). A generic Constraint's `on` can
-legally hold an ONSubquery -- these tests confirm normalize_on() replaces it
+legally hold an RawSQL -- these tests confirm normalize_on() replaces it
 in place (so canonicalize() sees a structured tree, and the bridge later
-never sees a raw ONSubquery) and that both normalization and
+never sees a raw RawSQL) and that both normalization and
 canonicalization failures surface as distinct, labeled error strings.
 """
 
@@ -25,11 +25,11 @@ from src.pipeline.stage3.models.cross_shard import (
     StateSequenceConstraint,
 )
 from src.pipeline.stage3.models.grain import _SchemaView
-from src.pipeline.stage3.models.on_nodes import (
+from src.util.constraint_model.relation.nodes import (
     JoinCondition,
-    ONBaseTable,
-    ONJoin,
-    ONSubquery,
+    BaseTable,
+    Join,
+    RawSQL,
 )
 
 
@@ -84,7 +84,7 @@ class TestCanonicalizeListNormalization:
     def test_subquery_join_is_normalized_and_canonicalizes_clean(self):
         c = Constraint(
             fact_references=[1],
-            on=ONSubquery(
+            on=RawSQL(
                 sql=(
                     "SELECT * FROM ORDER_ROW o JOIN CUSTOMER c ON o.customer_id = c.id"
                 )
@@ -96,16 +96,24 @@ class TestCanonicalizeListNormalization:
         agent = DeterministicCheckerLoopAgent()
         errors = agent._canonicalize_list([c], "Logic", _schema(), _view())
         assert errors == []
-        # The constraint's own `on` was replaced in place -- no ONSubquery
+        # The constraint's own `on` was replaced in place -- no RawSQL
         # survives past this node, so the bridge never has to see one.
-        assert isinstance(c.on, ONJoin)
-        assert isinstance(c.on.left, ONBaseTable)
-        assert isinstance(c.on.right, ONBaseTable)
+        assert isinstance(c.on, Join)
+        assert isinstance(c.on.left, BaseTable)
+        assert isinstance(c.on.right, BaseTable)
 
-    def test_subquery_that_cannot_normalize_reports_normalization_error(self):
+    def test_where_clause_in_an_on_subquery_is_rejected(self):
+        """A WHERE inside `on` has no ON-tree meaning -- row filtering belongs
+        in the constraint's own condition.
+
+        This used to fail at normalization, because the old translation layer
+        had its own opinion about which node shapes were legal. Now from_sql()
+        parses the WHERE into a Filter perfectly well and canonicalize() is the
+        single place that decides a Filter is not a legal ON tree. Same
+        rejection, one layer later, and only one layer knows the rule."""
         c = Constraint(
             fact_references=[2],
-            on=ONSubquery(sql="SELECT * FROM ORDER_ROW WHERE total > 100"),
+            on=RawSQL(sql="SELECT * FROM ORDER_ROW WHERE total > 100"),
             condition=_simple_condition(),
             category="logic",
             severity="hard",
@@ -113,18 +121,17 @@ class TestCanonicalizeListNormalization:
         agent = DeterministicCheckerLoopAgent()
         errors = agent._canonicalize_list([c], "Logic", _schema(), _view())
         assert len(errors) == 1
-        assert "Logic[0] ON normalization failed" in errors[0]
-        # Left untouched on failure -- nothing to canonicalize.
-        assert isinstance(c.on, ONSubquery)
+        assert "Logic[0] ON canonicalization failed" in errors[0]
+        assert "Filter" in errors[0]
 
     def test_structurally_valid_join_with_no_real_fk_reports_canonicalization_error(
         self,
     ):
         c = Constraint(
             fact_references=[3],
-            on=ONJoin(
-                left=ONBaseTable(name="ORDER_ROW"),
-                right=ONBaseTable(name="CUSTOMER"),
+            on=Join(
+                left=BaseTable(name="ORDER_ROW"),
+                right=BaseTable(name="CUSTOMER"),
                 on=[JoinCondition(left="ORDER_ROW.id", right="CUSTOMER.id")],
             ),
             condition=_simple_condition(),
@@ -139,7 +146,7 @@ class TestCanonicalizeListNormalization:
     def test_plain_base_table_needs_no_normalization(self):
         c = Constraint(
             fact_references=[4],
-            on=ONBaseTable(name="ORDER_ROW"),
+            on=BaseTable(name="ORDER_ROW"),
             condition=_simple_condition(),
             category="logic",
             severity="hard",
@@ -181,7 +188,7 @@ class TestColumnAccessibilityWiring:
     def test_condition_referencing_nonexistent_column_is_rejected(self):
         c = Constraint(
             fact_references=[10],
-            on=ONBaseTable(name="ORDER_ROW"),
+            on=BaseTable(name="ORDER_ROW"),
             condition=RComparison(
                 op=">",
                 left=RColumnRef(name="this_column_does_not_exist"),
@@ -198,9 +205,9 @@ class TestColumnAccessibilityWiring:
     def test_condition_referencing_ambiguous_self_join_column_is_rejected(self):
         c = Constraint(
             fact_references=[11],
-            on=ONJoin(
-                left=ONBaseTable(name="CATEGORY"),
-                right=ONBaseTable(name="CATEGORY"),
+            on=Join(
+                left=BaseTable(name="CATEGORY"),
+                right=BaseTable(name="CATEGORY"),
                 on=[JoinCondition(left="CATEGORY.parent_id", right="CATEGORY.id")],
             ),
             condition=RComparison(
@@ -221,9 +228,9 @@ class TestColumnAccessibilityWiring:
     def test_condition_referencing_joined_table_column_is_accepted(self):
         c = Constraint(
             fact_references=[12],
-            on=ONJoin(
-                left=ONBaseTable(name="ORDER_ROW"),
-                right=ONBaseTable(name="CUSTOMER"),
+            on=Join(
+                left=BaseTable(name="ORDER_ROW"),
+                right=BaseTable(name="CUSTOMER"),
                 on=[JoinCondition(left="ORDER_ROW.customer_id", right="CUSTOMER.id")],
             ),
             condition=RComparison(
@@ -241,7 +248,7 @@ class TestColumnAccessibilityWiring:
     def test_distribution_column_field_is_checked(self):
         d = DistributionConstraint(
             fact_references=[13],
-            on=ONBaseTable(name="ORDER_ROW"),
+            on=BaseTable(name="ORDER_ROW"),
             column="not_a_real_column",
             family="GAUSSIAN",
             parameters={"mean": 100, "std_dev": 10},
@@ -254,7 +261,7 @@ class TestColumnAccessibilityWiring:
     def test_distribution_if_condition_columns_are_checked(self):
         d = DistributionConstraint(
             fact_references=[14],
-            on=ONBaseTable(name="ORDER_ROW"),
+            on=BaseTable(name="ORDER_ROW"),
             column="total",
             family="GAUSSIAN",
             parameters={"mean": 100, "std_dev": 10},
@@ -272,7 +279,7 @@ class TestColumnAccessibilityWiring:
     def test_correlated_columns_are_checked(self):
         c = CorrelatedConstraint(
             fact_references=[15],
-            on=ONBaseTable(name="ORDER_ROW"),
+            on=BaseTable(name="ORDER_ROW"),
             columns=["total", "not_a_real_column"],
         )
         agent = DeterministicCheckerLoopAgent()
@@ -283,7 +290,7 @@ class TestColumnAccessibilityWiring:
     def test_state_sequence_sequence_column_is_checked(self):
         s = StateSequenceConstraint(
             fact_references=[16],
-            on=ONBaseTable(name="ORDER_ROW"),
+            on=BaseTable(name="ORDER_ROW"),
             sequence_column="not_a_real_column",
         )
         agent = DeterministicCheckerLoopAgent()
@@ -294,7 +301,7 @@ class TestColumnAccessibilityWiring:
     def test_state_sequence_with_all_valid_columns_passes(self):
         s = StateSequenceConstraint(
             fact_references=[18],
-            on=ONBaseTable(name="ORDER_ROW"),
+            on=BaseTable(name="ORDER_ROW"),
             sequence_column="total",
         )
         agent = DeterministicCheckerLoopAgent()
