@@ -4,6 +4,17 @@ from collections import defaultdict
 from pydantic import BaseModel, Field
 import itertools
 import concurrent.futures
+import logging
+import time
+
+logger = logging.getLogger(__name__)
+
+# Per-solve wall-clock cap handed to CP-SAT. Measured on a real 12-table /
+# 14-FK / 52-fact schema: EVERY solve in the 216-config sweep ran to this cap
+# without proving optimality, so the sweep's runtime is grid_size * this /
+# pool_size rather than anything data-dependent. Hoisted from a literal so the
+# cost is stated in one place and can be logged before the sweep starts.
+_SOLVER_MAX_SECONDS = 30.0
 
 
 class ILPSharder:
@@ -290,7 +301,7 @@ class ILPSharder:
         )
 
         solver = cp_model.CpSolver()
-        solver.parameters.max_time_in_seconds = 30.0
+        solver.parameters.max_time_in_seconds = _SOLVER_MAX_SECONDS
         solver.parameters.num_search_workers = 1
 
         status = solver.Solve(model)
@@ -629,6 +640,26 @@ def shard_schema_auto(
         fixed_prompt_overhead_tokens=fixed_prompt_overhead_tokens,
         context_window_safety_margin=context_window_safety_margin,
     )
+    grid_size = len(SearchSpaceSeeder().generate_grid())
+    # This step emitted NOTHING before, and on a real run it took 8m07s of
+    # wall clock between two log lines -- indistinguishable from a hang while
+    # watching a live run. Every solve is capped at 30s (see shard_schema), so
+    # the worst case is knowable up front; say so.
+    logger.info(
+        "[sharder] %d tables, %d FKs, %d facts | derived max_shards=%d, "
+        "max_tables_per_shard=%d (model=%s) | sweeping %d weight configs, "
+        "each capped at %.0fs -- worst case ~%.0fs of CPU across the pool",
+        len(tables),
+        len(fks),
+        len(facts),
+        max_shards,
+        max_tables_per_shard,
+        model,
+        grid_size,
+        _SOLVER_MAX_SECONDS,
+        grid_size * _SOLVER_MAX_SECONDS,
+    )
+    started = time.monotonic()
     plateau = run_stability_sweep(
         tables,
         columns_by_table,
@@ -638,6 +669,16 @@ def shard_schema_auto(
         max_shards=max_shards,
         max_tables_per_shard=max_tables_per_shard,
     )
+    elapsed = time.monotonic() - started
     if plateau is None:
+        logger.warning(
+            "[sharder] sweep found no feasible structure after %.1fs.", elapsed
+        )
         return None, None
+    logger.info(
+        "[sharder] sweep done in %.1fs -> %d shard(s): %s",
+        elapsed,
+        len(plateau.structure),
+        [sorted(s.keys()) for s in plateau.structure],
+    )
     return plateau.structure, plateau.shard_facts

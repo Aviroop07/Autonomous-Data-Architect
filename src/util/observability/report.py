@@ -21,22 +21,23 @@ logger = logging.getLogger(__name__)
 
 _BANNER_WIDTH = 62
 
-# HTTP client libraries log full request URLs at DEBUG. Gemini authenticates
-# with a `?key=` QUERY PARAMETER rather than a header, so urllib3's DEBUG line
-# writes the raw API key into the log file. Capping these at INFO is the fix:
-# the alternative (regex-redacting log records) is fragile and only covers the
-# key shapes you thought of. Nothing here is diagnostically useful anyway --
-# the project's own DEBUG logging is what a live run needs.
-_SECRET_LEAKING_LOGGERS = (
-    "urllib3",
-    "urllib3.connectionpool",
-    "httpx",
-    "httpcore",
-    "openai",
-    "requests",
-    "google",
-    "google_genai",
-)
+# DEBUG means OUR debug, not the whole process tree's.
+#
+# Enabling DEBUG on the root logger turns it on for every third-party library
+# too, which is both a security problem and a diagnosability one. Measured on a
+# single live run:
+#   - urllib3.connectionpool logged full request URLs, and Gemini authenticates
+#     with a `?key=` QUERY PARAMETER rather than a header, so the raw API key
+#     was written to the log in plaintext.
+#   - ddgs's Rust HTML parser (html5ever) emitted 468,392 lines / 89.8 MB --
+#     97% of a 93 MB log file -- burying every line that mattered.
+#
+# So the project logger opts IN to DEBUG and the root stays at WARNING, rather
+# than the root opting in and third parties being blacklisted one by one. A
+# blacklist only ever covers the libraries you already know about; html5ever,
+# rustls, hickory_resolver and h2 were all in that log and none would have been
+# on a list written beforehand.
+_PROJECT_LOGGER = "src"
 
 
 def configure_logging(
@@ -46,19 +47,23 @@ def configure_logging(
     file_level: int = logging.DEBUG,
     run_name: str = "run",
 ) -> Path:
-    """Attach a DEBUG file handler plus a console handler to the root logger
-    and return the log file's path.
+    """Attach a file handler plus a console handler and return the log path.
 
-    Called BEFORE the first provider call, never after. The file always gets
-    DEBUG regardless of what the console shows -- the point is that the full
-    trace survives on disk even when the terminal is quiet.
+    Called BEFORE the first provider call, never after. `src.*` logs at
+    file_level (DEBUG) to disk regardless of what the console shows, so the
+    full trace survives even when the terminal is quiet.
+
+    Third-party libraries stay at WARNING -- see _PROJECT_LOGGER's note. The
+    mechanism: a record is filtered by the level of the logger it was emitted
+    on, not by the root's, so raising `src` to DEBUG while leaving root at
+    WARNING lets our records reach the handlers and nobody else's.
     """
     log_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     log_path = log_dir / f"{run_name}_{stamp}.log"
 
     root = logging.getLogger()
-    root.setLevel(min(console_level, file_level))
+    root.setLevel(logging.WARNING)
     for handler in list(root.handlers):
         root.removeHandler(handler)
 
@@ -76,13 +81,14 @@ def configure_logging(
     )
     root.addHandler(console)
 
-    # Must come after the root level is lowered to DEBUG, or these inherit it.
-    for name in _SECRET_LEAKING_LOGGERS:
-        logging.getLogger(name).setLevel(logging.INFO)
+    # The opt-in: our own package, and the driver's own logger.
+    logging.getLogger(_PROJECT_LOGGER).setLevel(min(console_level, file_level))
+    logging.getLogger("run_pipeline").setLevel(min(console_level, file_level))
 
     logger.info(
-        "Logging to %s (file=DEBUG, console=%s)",
+        "Logging to %s (src.*=%s to file, console=%s, third-party=WARNING)",
         log_path,
+        logging.getLevelName(file_level),
         logging.getLevelName(console_level),
     )
     return log_path
