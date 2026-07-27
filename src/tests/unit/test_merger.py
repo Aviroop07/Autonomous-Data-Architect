@@ -3,6 +3,7 @@
 Mocks embed_texts (avoids loading sentence_transformers) and the Beta
 mixture functions (already tested separately) to control merge posteriors.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -34,12 +35,14 @@ def _make_shard(
 ) -> ConceptualModel:
     es = []
     for ename, attrs, id_attrs in entities:
-        es.append(Entity(
-            name=ename,
-            attributes=[CMAttribute(name=a, type=DataType.VARCHAR) for a in attrs],
-            identifier_attributes=list(id_attrs),
-            source_fact_ids=[1],
-        ))
+        es.append(
+            Entity(
+                name=ename,
+                attributes=[CMAttribute(name=a, type=DataType.VARCHAR) for a in attrs],
+                identifier_attributes=list(id_attrs),
+                source_fact_ids=[1],
+            )
+        )
     return ConceptualModel(
         entities=es,
         relationships=relationships or [],
@@ -70,6 +73,7 @@ def _mock_flag_posteriors(similarities: list[float]) -> list[float]:
 
 # ── fixture ──────────────────────────────────────────────────────────────────
 
+
 @pytest.fixture
 def merger_mocks(mocker):
     mocker.patch(f"{MOCK_MODULE}.embed_texts", side_effect=_mock_embed_fn)
@@ -88,9 +92,11 @@ def merger_mocks(mocker):
 # merge_all_shards — basic structure
 # =========================================================================
 
+
 class TestMergeAllShards:
     def test_empty_shards(self, merger_mocks):  # noqa: ARG002
         from src.pipeline.stage2.middleware.conceptual_merger import merge_all_shards
+
         cm, flags = merge_all_shards([], [])
         assert cm.entities == []
         assert cm.relationships == []
@@ -98,18 +104,25 @@ class TestMergeAllShards:
 
     def test_empty_entities(self, merger_mocks):  # noqa: ARG002
         from src.pipeline.stage2.middleware.conceptual_merger import merge_all_shards
-        cm, flags = merge_all_shards([ConceptualModel(entities=[], relationships=[])], [])
+
+        cm, flags = merge_all_shards(
+            [ConceptualModel(entities=[], relationships=[])], []
+        )
         assert cm.entities == []
         assert flags == []
 
     def test_single_shard_no_change(self, merger_mocks):  # noqa: ARG002
         from src.pipeline.stage2.middleware.conceptual_merger import merge_all_shards
-        cm, flags = merge_all_shards([_make_shard("A", [("CUSTOMER", ["id", "name"], ["id"])])], [])
+
+        cm, flags = merge_all_shards(
+            [_make_shard("A", [("CUSTOMER", ["id", "name"], ["id"])])], []
+        )
         assert len(cm.entities) == 1
         assert cm.entities[0].name == "CUSTOMER"
 
     def test_two_distinct_entities_no_merge(self, merger_mocks):  # noqa: ARG002
         from src.pipeline.stage2.middleware.conceptual_merger import merge_all_shards
+
         s1 = _make_shard("1", [("CUSTOMER", ["id", "name"], ["id"])])
         s2 = _make_shard("2", [("PRODUCT", ["id", "price"], ["id"])])
         cm, flags = merge_all_shards([s1, s2], [_make_fact(1), _make_fact(1)])
@@ -127,7 +140,10 @@ class TestMergeAllShards:
                 P[0, 1] = P[1, 0] = 0.99
             return P
 
-        merger_mocks.patch(f"{MOCK_MODULE}.compute_merge_probability_matrix", side_effect=_custom_posterior)
+        merger_mocks.patch(
+            f"{MOCK_MODULE}.compute_merge_probability_matrix",
+            side_effect=_custom_posterior,
+        )
         s1 = _make_shard("1", [("A", ["id"], ["id"])])
         s2 = _make_shard("2", [("B", ["id"], ["id"])])
         cm, flags = merge_all_shards([s1, s2], [_make_fact(1), _make_fact(1)])
@@ -144,9 +160,16 @@ class TestMergeAllShards:
                 P[0, 2] = P[2, 0] = 0.99  # shard1.CUST(0) + shard2.CUST(2)
             return P
 
-        merger_mocks.patch(f"{MOCK_MODULE}.compute_merge_probability_matrix", side_effect=_custom_posterior)
-        s1 = _make_shard("1", [("CUSTOMER", ["id", "name"], ["id"]), ("ORDER", ["id"], ["id"])])
-        s2 = _make_shard("2", [("CUSTOMER", ["id", "email"], ["id"]), ("PRODUCT", ["id"], ["id"])])
+        merger_mocks.patch(
+            f"{MOCK_MODULE}.compute_merge_probability_matrix",
+            side_effect=_custom_posterior,
+        )
+        s1 = _make_shard(
+            "1", [("CUSTOMER", ["id", "name"], ["id"]), ("ORDER", ["id"], ["id"])]
+        )
+        s2 = _make_shard(
+            "2", [("CUSTOMER", ["id", "email"], ["id"]), ("PRODUCT", ["id"], ["id"])]
+        )
         cm, flags = merge_all_shards([s1, s2], [_make_fact(1)] * 4)  # noqa: ARG002
         assert len(cm.entities) == 3
         names = {e.name for e in cm.entities}
@@ -154,11 +177,13 @@ class TestMergeAllShards:
 
     def test_zero_facts_does_not_crash(self, merger_mocks):  # noqa: ARG002
         from src.pipeline.stage2.middleware.conceptual_merger import merge_all_shards
+
         cm, flags = merge_all_shards([_make_shard("1", [("TEST", ["id"], ["id"])])], [])
         assert len(cm.entities) == 1
 
     def test_20_entities_no_merge(self, merger_mocks):  # noqa: ARG002
         from src.pipeline.stage2.middleware.conceptual_merger import merge_all_shards
+
         s1 = _make_shard("1", [(f"E{i}", ["id"], ["id"]) for i in range(10)])
         s2 = _make_shard("2", [(f"E{i}", ["id"], ["id"]) for i in range(10, 20)])
         cm, flags = merge_all_shards([s1, s2], [_make_fact(1)] * 20)
@@ -170,10 +195,12 @@ class TestMergeAllShards:
 # Name boost
 # =========================================================================
 
+
 class TestNameBoost:
     def test_boost_merges_same_name(self, merger_mocks):
         """Same name → boost to 0.95 → W=0.45 → merge."""
         from src.pipeline.stage2.middleware.conceptual_merger import merge_all_shards
+
         s1 = _make_shard("1", [("CUSTOMER", ["id"], ["id"])])
         s2 = _make_shard("2", [("CUSTOMER", ["id"], ["id"])])
         cm, flags = merge_all_shards([s1, s2], [_make_fact(1), _make_fact(1)])  # noqa: ARG002
@@ -181,9 +208,12 @@ class TestNameBoost:
 
     def test_boost_ignores_different_names(self, merger_mocks):  # noqa: ARG002
         from src.pipeline.stage2.middleware.conceptual_merger import merge_all_shards
+
         cm, flags = merge_all_shards(
-            [_make_shard("1", [("CUSTOMER", ["id"], ["id"])]),
-             _make_shard("2", [("PRODUCT", ["id"], ["id"])])],
+            [
+                _make_shard("1", [("CUSTOMER", ["id"], ["id"])]),
+                _make_shard("2", [("PRODUCT", ["id"], ["id"])]),
+            ],
             [_make_fact(1), _make_fact(1)],
         )
         assert len(cm.entities) == 2
@@ -192,6 +222,7 @@ class TestNameBoost:
 # =========================================================================
 # VETOED_MERGE flag
 # =========================================================================
+
 
 class TestVetoedMergeFlag:
     def test_uniform_high_posterior_still_merges(self, merger_mocks):
@@ -208,10 +239,14 @@ class TestVetoedMergeFlag:
                         P[i, j] = 0.6
             return P
 
-        merger_mocks.patch(f"{MOCK_MODULE}.compute_merge_probability_matrix", side_effect=_post)
+        merger_mocks.patch(
+            f"{MOCK_MODULE}.compute_merge_probability_matrix", side_effect=_post
+        )
         cm, flags = merge_all_shards(
-            [_make_shard("1", [("A", ["id"], ["id"])]),
-             _make_shard("2", [("B", ["id"], ["id"])])],
+            [
+                _make_shard("1", [("A", ["id"], ["id"])]),
+                _make_shard("2", [("B", ["id"], ["id"])]),
+            ],
             [_make_fact(1), _make_fact(1)],
         )
         assert len(cm.entities) == 1
@@ -221,6 +256,7 @@ class TestVetoedMergeFlag:
 # =========================================================================
 # FORCED_MERGE flag
 # =========================================================================
+
 
 class TestForcedMergeFlag:
     def test_name_boost_overrides_low_posterior(self, merger_mocks):
@@ -236,13 +272,17 @@ class TestForcedMergeFlag:
                         P[i, j] = 0.45
             return P
 
-        merger_mocks.patch(f"{MOCK_MODULE}.compute_merge_probability_matrix", side_effect=_post)
+        merger_mocks.patch(
+            f"{MOCK_MODULE}.compute_merge_probability_matrix", side_effect=_post
+        )
         cm, flags = merge_all_shards(
-            [_make_shard("1", [("CUSTOMER", ["id"], ["id"])]),
-             _make_shard("2", [("CUSTOMER", ["id"], ["id"])])],
+            [
+                _make_shard("1", [("CUSTOMER", ["id"], ["id"])]),
+                _make_shard("2", [("CUSTOMER", ["id"], ["id"])]),
+            ],
             [_make_fact(1), _make_fact(1)],
         )
-        assert len(cm.entities) == 1                     # merged via name boost
+        assert len(cm.entities) == 1  # merged via name boost
         assert not any(f.flag_type == "FORCED_MERGE" for f in flags)
         assert not any(f.flag_type == "VETOED_MERGE" for f in flags)
 
@@ -250,6 +290,7 @@ class TestForcedMergeFlag:
 # =========================================================================
 # Identifier disagreement
 # =========================================================================
+
 
 class TestIdentifierConflict:
     def test_different_ids_across_shards_flagged(self, merger_mocks):
@@ -262,10 +303,14 @@ class TestIdentifierConflict:
                 P[0, 1] = P[1, 0] = 0.99
             return P
 
-        merger_mocks.patch(f"{MOCK_MODULE}.compute_merge_probability_matrix", side_effect=_post)
+        merger_mocks.patch(
+            f"{MOCK_MODULE}.compute_merge_probability_matrix", side_effect=_post
+        )
         cm, flags = merge_all_shards(
-            [_make_shard("1", [("CUSTOMER", ["id"], ["id"])]),
-             _make_shard("2", [("CUSTOMER", ["id", "ssn"], ["ssn"])])],
+            [
+                _make_shard("1", [("CUSTOMER", ["id"], ["id"])]),
+                _make_shard("2", [("CUSTOMER", ["id", "ssn"], ["ssn"])]),
+            ],
             [_make_fact(1), _make_fact(1)],
         )
         id_flags = [f for f in flags if f.flag_type == "IDENTIFIER_DISAGREEMENT"]
@@ -276,23 +321,36 @@ class TestIdentifierConflict:
 # Relationship merging
 # =========================================================================
 
+
 class TestRelationshipMerge:
     def test_relationship_survives_merge(self, merger_mocks):  # noqa: ARG002
         from src.pipeline.stage2.middleware.conceptual_merger import merge_all_shards
+
         rel = Relationship(
             name="OWNS",
             participants=[
                 Participant(entity="CUSTOMER", cardinality_min=1, cardinality_max=1),
                 Participant(entity="PRODUCT", cardinality_min=0, cardinality_max=None),
             ],
-            degree="binary", kind="1:N",
+            degree="binary",
+            kind="1:N",
         )
         s1 = ConceptualModel(
-            entities=[Entity(name="CUSTOMER", attributes=[CMAttribute(name="id", type=DataType.VARCHAR)])],
+            entities=[
+                Entity(
+                    name="CUSTOMER",
+                    attributes=[CMAttribute(name="id", type=DataType.VARCHAR)],
+                )
+            ],
             relationships=[rel],
         )
         s2 = ConceptualModel(
-            entities=[Entity(name="PRODUCT", attributes=[CMAttribute(name="id", type=DataType.VARCHAR)])],
+            entities=[
+                Entity(
+                    name="PRODUCT",
+                    attributes=[CMAttribute(name="id", type=DataType.VARCHAR)],
+                )
+            ],
             relationships=[],
         )
         cm, flags = merge_all_shards([s1, s2], [_make_fact(1), _make_fact(1)])
@@ -302,13 +360,15 @@ class TestRelationshipMerge:
 
     def test_cardinality_contradiction_flagged(self, merger_mocks):  # noqa: ARG002
         from src.pipeline.stage2.middleware.conceptual_merger import merge_all_shards
+
         rel1 = Relationship(
             name="WORKS_FOR",
             participants=[
                 Participant(entity="EMPLOYEE", cardinality_min=1, cardinality_max=1),
                 Participant(entity="DEPT", cardinality_min=0, cardinality_max=None),
             ],
-            degree="binary", kind="1:N",
+            degree="binary",
+            kind="1:N",
         )
         rel2 = Relationship(
             name="WORKS_FOR",
@@ -316,16 +376,21 @@ class TestRelationshipMerge:
                 Participant(entity="EMPLOYEE", cardinality_min=1, cardinality_max=1),
                 Participant(entity="DEPT", cardinality_min=0, cardinality_max=None),
             ],
-            degree="binary", kind="M:N",
+            degree="binary",
+            kind="M:N",
         )
         s1 = ConceptualModel(
-            entities=[Entity(name="EMPLOYEE", attributes=[]),
-                      Entity(name="DEPT", attributes=[])],
+            entities=[
+                Entity(name="EMPLOYEE", attributes=[]),
+                Entity(name="DEPT", attributes=[]),
+            ],
             relationships=[rel1],
         )
         s2 = ConceptualModel(
-            entities=[Entity(name="EMPLOYEE", attributes=[]),
-                      Entity(name="DEPT", attributes=[])],
+            entities=[
+                Entity(name="EMPLOYEE", attributes=[]),
+                Entity(name="DEPT", attributes=[]),
+            ],
             relationships=[rel2],
         )
         cm, flags = merge_all_shards([s1, s2], [_make_fact(1)] * 4)

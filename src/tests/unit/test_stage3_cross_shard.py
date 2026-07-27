@@ -8,22 +8,20 @@ from __future__ import annotations
 
 import pytest
 
-from src.pipeline.stage3.models.condition_nodes import (
+from src.util.constraint_model.condition.expressions import (
     RArithmetic,
-    RBetween,
     RColumnRef,
-    RComparison,
     RLiteral,
 )
+from src.util.constraint_model.condition.predicates import RComparison
 from src.pipeline.stage3.models.cross_shard import (
     Constraint,
     DerivedColumnConstraint,
     DistributionConstraint,
 )
-from src.pipeline.stage3.models.on_nodes import (
-    ONAggregate,
-    ONBaseTable,
-    ONJoin,
+from src.util.constraint_model.relation.nodes import (
+    BaseTable,
+    Join,
     JoinCondition,
 )
 
@@ -37,7 +35,7 @@ class TestConstraint:
     def _make(self, **overrides):
         defaults = dict(
             fact_references=[1],
-            on=ONBaseTable(name="ORDER"),
+            on=BaseTable(name="ORDER"),
             condition=RComparison(
                 op="=",
                 left=RColumnRef(name="status"),
@@ -75,9 +73,9 @@ class TestConstraint:
         assert c.rename["SUM(x)"] == "total_x"
 
     def test_validate_with_on_join(self):
-        on = ONJoin(
-            left=ONBaseTable(name="A"),
-            right=ONBaseTable(name="B"),
+        on = Join(
+            left=BaseTable(name="A"),
+            right=BaseTable(name="B"),
             on=[JoinCondition(left="A.id", right="B.id")],
         )
         c = self._make(on=on)
@@ -99,7 +97,7 @@ class TestDistributionConstraint:
     def _make_gaussian(self, **overrides):
         defaults = dict(
             fact_references=[1],
-            on=ONBaseTable(name="ORDER"),
+            on=BaseTable(name="ORDER"),
             column="shipping_cost",
             family="GAUSSIAN",
             parameters={"mean": 8.0, "std_dev": 2.0},
@@ -131,7 +129,7 @@ class TestDistributionConstraint:
     def test_valid_poisson(self):
         dc = DistributionConstraint(
             fact_references=[1],
-            on=ONBaseTable(name="LINE_ITEM"),
+            on=BaseTable(name="LINE_ITEM"),
             column="quantity",
             family="POISSON",
             parameters={"lam": 2.0},
@@ -142,7 +140,7 @@ class TestDistributionConstraint:
         with pytest.raises(Exception):
             DistributionConstraint(
                 fact_references=[1],
-                on=ONBaseTable(name="T"),
+                on=BaseTable(name="T"),
                 column="x",
                 family="POISSON",
                 parameters={"lam": -1},
@@ -151,7 +149,7 @@ class TestDistributionConstraint:
     def test_valid_beta(self):
         dc = DistributionConstraint(
             fact_references=[1],
-            on=ONBaseTable(name="T"),
+            on=BaseTable(name="T"),
             column="score",
             family="BETA",
             parameters={"alpha": 2.0, "beta": 5.0},
@@ -162,7 +160,7 @@ class TestDistributionConstraint:
         with pytest.raises(Exception):
             DistributionConstraint(
                 fact_references=[1],
-                on=ONBaseTable(name="T"),
+                on=BaseTable(name="T"),
                 column="x",
                 family="BETA",
                 parameters={"alpha": -1, "beta": 5},
@@ -171,7 +169,7 @@ class TestDistributionConstraint:
     def test_valid_categorical(self):
         dc = DistributionConstraint(
             fact_references=[1],
-            on=ONBaseTable(name="T"),
+            on=BaseTable(name="T"),
             column="color",
             family="CATEGORICAL",
             parameters={"categories": ["R", "G", "B"]},
@@ -181,7 +179,7 @@ class TestDistributionConstraint:
     def test_categorical_with_probabilities(self):
         dc = DistributionConstraint(
             fact_references=[1],
-            on=ONBaseTable(name="T"),
+            on=BaseTable(name="T"),
             column="color",
             family="CATEGORICAL",
             parameters={
@@ -195,7 +193,7 @@ class TestDistributionConstraint:
         with pytest.raises(Exception):
             DistributionConstraint(
                 fact_references=[1],
-                on=ONBaseTable(name="T"),
+                on=BaseTable(name="T"),
                 column="x",
                 family="CATEGORICAL",
                 parameters={
@@ -208,7 +206,7 @@ class TestDistributionConstraint:
         with pytest.raises(Exception):
             DistributionConstraint(
                 fact_references=[1],
-                on=ONBaseTable(name="T"),
+                on=BaseTable(name="T"),
                 column="x",
                 family="CATEGORICAL",
                 parameters={"categories": []},
@@ -217,7 +215,7 @@ class TestDistributionConstraint:
     def test_valid_uniform(self):
         dc = DistributionConstraint(
             fact_references=[1],
-            on=ONBaseTable(name="T"),
+            on=BaseTable(name="T"),
             column="x",
             family="UNIFORM",
             parameters={"min_value": 0.0, "max_value": 1.0},
@@ -228,7 +226,7 @@ class TestDistributionConstraint:
         with pytest.raises(Exception):
             DistributionConstraint(
                 fact_references=[1],
-                on=ONBaseTable(name="T"),
+                on=BaseTable(name="T"),
                 column="x",
                 family="UNIFORM",
                 parameters={"min_value": 1.0, "max_value": 0.0},
@@ -237,7 +235,7 @@ class TestDistributionConstraint:
     def test_valid_log_normal(self):
         dc = DistributionConstraint(
             fact_references=[1],
-            on=ONBaseTable(name="T"),
+            on=BaseTable(name="T"),
             column="income",
             family="LOG_NORMAL",
             parameters={"mean": 10.0, "std_dev": 1.5},
@@ -248,7 +246,7 @@ class TestDistributionConstraint:
         with pytest.raises(Exception):
             DistributionConstraint(
                 fact_references=[1],
-                on=ONBaseTable(name="T"),
+                on=BaseTable(name="T"),
                 column="x",
                 family="LOG_NORMAL",
                 parameters={"mean": 10, "std_dev": -1},
@@ -262,7 +260,7 @@ class TestDistributionConstraint:
         )
         dc = DistributionConstraint(
             fact_references=[1],
-            on=ONBaseTable(name="T"),
+            on=BaseTable(name="T"),
             column="discount",
             family="GAUSSIAN",
             parameters={"mean": 0.1, "std_dev": 0.05},

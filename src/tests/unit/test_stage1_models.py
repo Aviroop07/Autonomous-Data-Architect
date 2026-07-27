@@ -147,7 +147,9 @@ def test_from_raw_multiple_tags():
 
 
 def test_atomicfact_str_includes_tags_and_segment():
-    f = AtomicFact(id=9, fact="Has segment.", segment_text="snippet", tags=[FactTag.LOGICAL])
+    f = AtomicFact(
+        id=9, fact="Has segment.", segment_text="snippet", tags=[FactTag.LOGICAL]
+    )
     s = str(f)
     assert "9." in s
     assert "LOGICAL" in s

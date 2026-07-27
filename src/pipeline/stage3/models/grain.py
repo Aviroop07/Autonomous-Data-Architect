@@ -1,14 +1,24 @@
 """FK-PK-restricted join canonicalization.
 
-Reduces any ON tree (a chain of joins/aggregates over the schema, per
-on_nodes.py) to a canonical (grain, edge-set) pair, under the deliberate
+Reduces any ON tree (a chain of joins/aggregates over the schema, built from
+util/constraint_model's Relation nodes) to a canonical (grain, edge-set) pair,
+under the deliberate
 restriction that every join must be a real foreign-key-to-primary-key
-relationship. See experiments/stage3_conflict_v2/DESIGN.md section 1-2 for
+relationship. See docs/design/STAGE3_PHASE2_DESIGN.md for
 the full mathematical justification.
 
 This module operates on the REAL Stage 2 schema models (Table, Column,
-ForeignKey) and the REAL ON node types (ONBaseTable, ONJoin, ONAggregate,
-ONFanout) -- not prototype dataclasses.
+ForeignKey) and on constraint_model's Relation nodes (BaseTable, Join,
+Aggregate, Fanout) -- not prototype dataclasses, and no longer on a
+Stage-3-local copy of those node types.
+
+Relation shapes that the ON algebra has no meaning for -- Filter, Project,
+and an unnormalized RawSQL -- are not excluded by the type system (they are
+members of RelationUnion, and Join/Aggregate recurse on the full union). They
+are rejected HERE instead, by _canonicalize_inner's explicit branches, which
+is the right layer: canonicalize() is what every extracted constraint must
+pass in the deterministic-checker node, so a rejection here is a retryable
+validation error with a specific message rather than a type error.
 """
 
 from __future__ import annotations
@@ -17,16 +27,23 @@ import logging
 from dataclasses import dataclass
 from typing import Dict, FrozenSet, Optional, Tuple, Union
 
-from src.pipeline.stage2.models.schema import Schema, Table, Column, ForeignKey
-from src.pipeline.stage3.models.on_nodes import (
-    ONBaseTable,
-    ONJoin,
-    ONAggregate,
-    ONFanout,
-    ONNode,
-    JoinCondition,
-    _validate_on_node,
+from src.pipeline.stage2.models.schema import Schema, Table, ForeignKey
+from src.util.constraint_model.relation.nodes import (
+    Aggregate,
+    BaseTable,
+    Fanout,
+    Filter,
+    Join,
+    Project,
+    RawSQL,
+    RelationUnion,
 )
+
+# The aggregate functions the ON algebra can canonicalize. constraint_model's
+# AggregateFn is wider (COUNT_DISTINCT/STDDEV/VARIANCE/PERCENTILE/MODE); those
+# have no Grain semantics defined here, so they are rejected explicitly rather
+# than silently producing an agg_signature nothing downstream understands.
+_CANONICALIZABLE_AGG_FNS = frozenset({"SUM", "COUNT", "AVG", "MAX", "MIN", "MEDIAN"})
 
 logger = logging.getLogger(__name__)
 
@@ -248,17 +265,48 @@ def _split_qualified(ref: str) -> Tuple[Optional[str], str]:
     return None, ref
 
 
-def canonicalize(node: ONNode, schema: Schema) -> CanonicalizeResult:
+def canonicalize(node: "RelationUnion", schema: Schema) -> CanonicalizeResult:
     """Reduce an ON tree to its (grain, edge-set) canonical form, or explain
-    why not.  Operates on the real ONNode types and real Schema model."""
+    why not.  Operates on constraint_model Relation nodes and the real
+    Schema model."""
     view = _SchemaView.from_schema(schema)
     return _canonicalize_inner(node, view)
 
 
-def _canonicalize_inner(node: ONNode, view: _SchemaView) -> CanonicalizeResult:
+def _canonicalize_inner(node: "RelationUnion", view: _SchemaView) -> CanonicalizeResult:
     """Core canonicalization, operating on a pre-built _SchemaView."""
 
-    if isinstance(node, ONBaseTable):
+    if isinstance(node, Filter):
+        return CanonicalizationFailure(
+            reason=(
+                "A Filter (WHERE/HAVING) has no ON-tree equivalent -- express "
+                "row-level filtering in the constraint's own condition (or "
+                "if_condition), not inside `on`."
+            ),
+            node_repr=repr(node),
+        )
+
+    if isinstance(node, Project):
+        return CanonicalizationFailure(
+            reason=(
+                "A Project (explicit SELECT column list) has no ON-tree "
+                "equivalent -- `on` describes table/join/aggregate structure "
+                "only, never column projection."
+            ),
+            node_repr=repr(node),
+        )
+
+    if isinstance(node, RawSQL):
+        return CanonicalizationFailure(
+            reason=(
+                "RawSQL reached canonicalize() unnormalized -- normalize_on() "
+                "should have replaced it with structured nodes first: "
+                f"{node.sql}"
+            ),
+            node_repr=repr(node),
+        )
+
+    if isinstance(node, BaseTable):
         t = view.tables.get(node.name)
         if t is None:
             return CanonicalizationFailure(
@@ -271,7 +319,15 @@ def _canonicalize_inner(node: ONNode, view: _SchemaView) -> CanonicalizeResult:
             edges=frozenset(),
         )
 
-    if isinstance(node, ONAggregate):
+    if isinstance(node, Aggregate):
+        if node.fn not in _CANONICALIZABLE_AGG_FNS:
+            return CanonicalizationFailure(
+                reason=(
+                    f"Aggregate function '{node.fn}' has no Grain semantics -- "
+                    f"use one of {sorted(_CANONICALIZABLE_AGG_FNS)}."
+                ),
+                node_repr=repr(node),
+            )
         source_result = _canonicalize_inner(node.source, view)
         if isinstance(source_result, CanonicalizationFailure):
             return source_result
@@ -323,7 +379,7 @@ def _canonicalize_inner(node: ONNode, view: _SchemaView) -> CanonicalizeResult:
             narrowed=new_narrowed,
         )
 
-    if isinstance(node, ONFanout):
+    if isinstance(node, Fanout):
         parent = view.tables.get(node.parent_table)
         child = view.tables.get(node.child_table)
         if parent is None:
@@ -361,7 +417,7 @@ def _canonicalize_inner(node: ONNode, view: _SchemaView) -> CanonicalizeResult:
             ),
         )
 
-    if isinstance(node, ONJoin):
+    if isinstance(node, Join):
         left_result = _canonicalize_inner(node.left, view)
         if isinstance(left_result, CanonicalizationFailure):
             return left_result
@@ -441,5 +497,6 @@ def _canonicalize_inner(node: ONNode, view: _SchemaView) -> CanonicalizeResult:
         )
 
     return CanonicalizationFailure(
-        reason=f"Unknown ON node type: {type(node)}", node_repr=repr(node)
+        reason=f"Unknown Relation node type: {type(node).__name__}",
+        node_repr=repr(node),
     )

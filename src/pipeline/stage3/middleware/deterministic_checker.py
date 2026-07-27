@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 
 from src.pipeline.stage2.models.schema import Schema
 from src.pipeline.stage3.agents.extraction_outputs import UnifiedOutput
-from src.pipeline.stage3.models.condition_nodes import extract_columns
+from src.util.constraint_model.condition.predicates import extract_columns
 from src.pipeline.stage3.models.cross_shard import Constraint as CSConstraint
 from src.pipeline.stage3.models.cross_shard import CorrelatedConstraint
 from src.pipeline.stage3.models.cross_shard import DistributionConstraint

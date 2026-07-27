@@ -1,7 +1,7 @@
-"""Bipartite variable-constraint graph construction and Dulmage-Mendelsohn
+﻿"""Bipartite variable-constraint graph construction and Dulmage-Mendelsohn
 feasibility classification for Stage 3 Phase 2.
 
-See baselines/experiments/STAGE3_PHASE2_DESIGN.md section 2 for the design
+See docs/design/STAGE3_PHASE2_DESIGN.md section 2 for the design
 this implements, and STAGE3_DOF_OPEN_QUESTIONS.md Q1/Q7/Q8 for the research
 and hands-on validation behind it. Two rules here were real modeling mistakes
 the first time this was prototyped, not stylistic choices:

@@ -3,6 +3,7 @@
 Deterministic, offline. Covers register, merge_tables, rename_table,
 delete_table, and get_facts_for_tables operations.
 """
+
 from __future__ import annotations
 
 
@@ -19,6 +20,7 @@ def make_registry() -> TableFactRegistry:
 # --------------------------------------------------------------------------- #
 # register_table_facts
 # --------------------------------------------------------------------------- #
+
 
 def test_register_new_table_creates_entry():
     reg = TableFactRegistry()
@@ -57,6 +59,7 @@ def test_register_empty_list():
 # --------------------------------------------------------------------------- #
 # merge_tables
 # --------------------------------------------------------------------------- #
+
 
 def test_merge_moves_facts_to_target():
     reg = make_registry()
@@ -97,6 +100,7 @@ def test_merge_uppercases_both_names():
 # rename_table
 # --------------------------------------------------------------------------- #
 
+
 def test_rename_preserves_facts():
     reg = make_registry()
     reg.rename_table("USER", "ACCOUNT")
@@ -131,6 +135,7 @@ def test_rename_uppercases_both():
 # delete_table
 # --------------------------------------------------------------------------- #
 
+
 def test_delete_removes_entry():
     reg = make_registry()
     reg.delete_table("ORDER")
@@ -153,6 +158,7 @@ def test_delete_uppercases_name():
 # --------------------------------------------------------------------------- #
 # get_facts_for_tables
 # --------------------------------------------------------------------------- #
+
 
 def test_get_facts_single_table():
     reg = make_registry()

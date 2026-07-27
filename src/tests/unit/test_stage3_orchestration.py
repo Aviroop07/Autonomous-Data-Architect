@@ -12,22 +12,22 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.orchestration.stage3 import entry as stage3_entry
-from src.orchestration.stage3.entry import (
+from src.orchestration.stage3 import reconciliation as stage3_reconciliation
+from src.orchestration.stage3.reconciliation import (
     _ConflictItem,
     _conflict_items_from,
     _fact_to_tables,
     _group_by_schema_locality,
-    _merge_all,
     _reconcile_and_apply,
-    _ShardState,
 )
+from src.orchestration.stage3.state import _merge_all, _ShardState
 from src.pipeline.stage1.models.rephrased_nl import AtomicFact
 from src.pipeline.stage2.models.data_types import DataType
 from src.pipeline.stage2.models.schema import Column, Schema, Table
-from src.pipeline.stage3.models.condition_nodes import RColumnRef, RComparison, RLiteral
+from src.util.constraint_model.condition.expressions import RColumnRef, RLiteral
+from src.util.constraint_model.condition.predicates import RComparison
 from src.pipeline.stage3.models.cross_shard import Constraint, UnifiedExtractionOutput
-from src.pipeline.stage3.models.on_nodes import ONBaseTable
+from src.util.constraint_model.relation.nodes import BaseTable
 from src.pipeline.stage3.models.probe import (
     ConflictReconciliation,
     GroupReconciliation,
@@ -35,7 +35,6 @@ from src.pipeline.stage3.models.probe import (
     ReconciliationVerdict,
 )
 from src.util.constraint_model.conflicts.models import Conflict
-from src.util.constraint_model.relation.nodes import BaseTable
 
 
 def _schema() -> Schema:
@@ -57,7 +56,7 @@ def _schema() -> Schema:
 def _range_constraint(fact_ids: list[int]) -> Constraint:
     return Constraint(
         fact_references=fact_ids,
-        on=ONBaseTable(name="ORDER"),
+        on=BaseTable(name="ORDER"),
         condition=RComparison(
             op=">=", left=RColumnRef(name="total"), right=RLiteral(value=5)
         ),
@@ -199,11 +198,13 @@ class TestReconcileAndApplyRouting:
             return ConflictReport()
 
         monkeypatch.setattr(
-            stage3_entry, "analyze_cross_shard_constraints", _empty_report
+            stage3_reconciliation, "analyze_cross_shard_constraints", _empty_report
         )
-        monkeypatch.setattr(stage3_entry, "evaluate_constraints", fake_evaluate)
         monkeypatch.setattr(
-            stage3_entry,
+            stage3_reconciliation, "evaluate_constraints", fake_evaluate
+        )
+        monkeypatch.setattr(
+            stage3_reconciliation,
             "reconcile_conflict_group",
             AsyncMock(
                 return_value=(
@@ -221,7 +222,7 @@ class TestReconcileAndApplyRouting:
             ),
         )
 
-        conflicts, dismissed, unsupported, tokens = await _reconcile_and_apply(
+        conflicts, dismissed, unsupported, tokens, _dof = await _reconcile_and_apply(
             [ss], schema, facts_map, {1: 0}, None, 5, 5, 3
         )
         assert conflicts == []
@@ -250,11 +251,13 @@ class TestReconcileAndApplyRouting:
             return ConflictReport(conflicts=[conflict])
 
         monkeypatch.setattr(
-            stage3_entry, "analyze_cross_shard_constraints", _empty_report
+            stage3_reconciliation, "analyze_cross_shard_constraints", _empty_report
         )
-        monkeypatch.setattr(stage3_entry, "evaluate_constraints", fake_evaluate)
         monkeypatch.setattr(
-            stage3_entry,
+            stage3_reconciliation, "evaluate_constraints", fake_evaluate
+        )
+        monkeypatch.setattr(
+            stage3_reconciliation,
             "reconcile_conflict_group",
             AsyncMock(
                 return_value=(
@@ -272,7 +275,7 @@ class TestReconcileAndApplyRouting:
             ),
         )
 
-        conflicts, dismissed, unsupported, tokens = await _reconcile_and_apply(
+        conflicts, dismissed, unsupported, tokens, _dof = await _reconcile_and_apply(
             [ss], schema, facts_map, {1: 0}, None, 5, 2, 3
         )
         assert len(conflicts) == 1
@@ -306,11 +309,13 @@ class TestReconcileAndApplyRouting:
             return ConflictReport()
 
         monkeypatch.setattr(
-            stage3_entry, "analyze_cross_shard_constraints", _empty_report
+            stage3_reconciliation, "analyze_cross_shard_constraints", _empty_report
         )
-        monkeypatch.setattr(stage3_entry, "evaluate_constraints", fake_evaluate)
         monkeypatch.setattr(
-            stage3_entry,
+            stage3_reconciliation, "evaluate_constraints", fake_evaluate
+        )
+        monkeypatch.setattr(
+            stage3_reconciliation,
             "reconcile_conflict_group",
             AsyncMock(
                 return_value=(
@@ -341,9 +346,9 @@ class TestReconcileAndApplyRouting:
             rerun_calls.append(guidance)
             return UnifiedExtractionOutput(), 0
 
-        monkeypatch.setattr(stage3_entry, "_rerun_shard", fake_rerun_shard)
+        monkeypatch.setattr(stage3_reconciliation, "_rerun_shard", fake_rerun_shard)
 
-        conflicts, dismissed, unsupported, tokens = await _reconcile_and_apply(
+        conflicts, dismissed, unsupported, tokens, _dof = await _reconcile_and_apply(
             [ss], schema, facts_map, {1: 0}, None, 5, 5, 3
         )
         assert len(rerun_calls) == 1
@@ -374,11 +379,13 @@ class TestReconcileAndApplyRouting:
             return ConflictReport(conflicts=[conflict])
 
         monkeypatch.setattr(
-            stage3_entry, "analyze_cross_shard_constraints", _empty_report
+            stage3_reconciliation, "analyze_cross_shard_constraints", _empty_report
         )
-        monkeypatch.setattr(stage3_entry, "evaluate_constraints", fake_evaluate)
         monkeypatch.setattr(
-            stage3_entry,
+            stage3_reconciliation, "evaluate_constraints", fake_evaluate
+        )
+        monkeypatch.setattr(
+            stage3_reconciliation,
             "reconcile_conflict_group",
             AsyncMock(
                 return_value=(
@@ -404,9 +411,9 @@ class TestReconcileAndApplyRouting:
                 structural_constraints=[_range_constraint([1])]
             ), 0
 
-        monkeypatch.setattr(stage3_entry, "_rerun_shard", fake_rerun_shard)
+        monkeypatch.setattr(stage3_reconciliation, "_rerun_shard", fake_rerun_shard)
 
-        conflicts, dismissed, unsupported, tokens = await _reconcile_and_apply(
+        conflicts, dismissed, unsupported, tokens, _dof = await _reconcile_and_apply(
             [ss], schema, facts_map, {1: 0}, None, 5, 10, 2
         )
         # After max_constraint_retries=2 reconciler calls with no resolution,

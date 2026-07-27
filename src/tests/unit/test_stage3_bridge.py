@@ -7,14 +7,11 @@ from pydantic import ValidationError
 
 from src.pipeline.stage2.models.data_types import DataType
 from src.pipeline.stage2.models.schema import Column, Schema, Table
-from src.pipeline.stage3.models.condition_nodes import (
+from src.util.constraint_model.condition.expressions import RColumnRef, RLiteral
+from src.util.constraint_model.condition.predicates import (
     RBetween,
-    RColumnRef,
     RComparison,
-    RExists,
     RIfThen,
-    RLiteral,
-    SubqueryRef,
 )
 from src.pipeline.stage3.models.cross_shard import (
     Constraint,
@@ -24,22 +21,19 @@ from src.pipeline.stage3.models.cross_shard import (
     StateSequenceConstraint,
     StateTransitionSpec,
 )
-from src.pipeline.stage3.models.on_nodes import (
-    ONAggregate,
-    ONBaseTable,
-    ONFanout,
-    ONJoin,
-)
-from src.pipeline.stage3.models.on_nodes import JoinCondition as CSJoinCondition
-from src.util.constraint_model.bridge.from_cross_shard import bridge_constraints
-from src.util.constraint_model.condition.cohesive import Correlated, Distributed
-from src.util.constraint_model.condition.cohesive import StateSequence as MStateSequence
 from src.util.constraint_model.relation.nodes import (
     Aggregate,
     BaseTable,
     Fanout,
-    Filter,
     Join,
+    RawSQL,
+)
+from src.util.constraint_model.relation.nodes import JoinCondition as CSJoinCondition
+from src.util.constraint_model.bridge.from_cross_shard import bridge_constraints
+from src.util.constraint_model.condition.cohesive import Correlated, Distributed
+from src.util.constraint_model.condition.cohesive import StateSequence as MStateSequence
+from src.util.constraint_model.relation.nodes import (
+    Filter,
 )
 
 
@@ -79,7 +73,7 @@ class TestBridgeDistribution:
     def test_unconditional_distribution_bridges_to_base_table_plus_distributed(self):
         d = DistributionConstraint(
             fact_references=[1],
-            on=ONBaseTable(name="ORDER"),
+            on=BaseTable(name="ORDER"),
             column="total",
             family="GAUSSIAN",
             parameters={"mean": 100, "std_dev": 10},
@@ -93,12 +87,12 @@ class TestBridgeDistribution:
         assert bridged[0].condition.family == "GAUSSIAN"
 
     def test_conditional_distribution_bridges_if_condition_to_a_filter_wrapper(self):
-        # DistributionConstraint.on is typed ONBaseTable only (a single-table
+        # DistributionConstraint.on is typed BaseTable only (a single-table
         # constraint) -- if_condition restricts to a same-table categorical
         # column, not a cross-table join.
         d = DistributionConstraint(
             fact_references=[2],
-            on=ONBaseTable(name="ORDER"),
+            on=BaseTable(name="ORDER"),
             column="total",
             family="GAUSSIAN",
             parameters={"mean": 300, "std_dev": 50},
@@ -119,8 +113,8 @@ class TestBridgeGenericConstraint:
     def test_moment_target_over_aggregate_bridges_relation_and_condition(self):
         c = Constraint(
             fact_references=[3],
-            on=ONAggregate(
-                source=ONBaseTable(name="ORDER"),
+            on=Aggregate(
+                source=BaseTable(name="ORDER"),
                 fn="AVG",
                 column="total",
                 group_by=["customer_id"],
@@ -142,7 +136,7 @@ class TestBridgeGenericConstraint:
     def test_fanout_constraint_bridges_to_fanout_relation(self):
         c = Constraint(
             fact_references=[4],
-            on=ONFanout(
+            on=Fanout(
                 parent_table="CUSTOMER", child_table="ORDER", fk_column="customer_id"
             ),
             condition=RBetween(
@@ -156,41 +150,30 @@ class TestBridgeGenericConstraint:
         assert unsupported == []
         assert isinstance(bridged[0].relation, Fanout)
 
-    def test_rexists_predicate_reported_unsupported_not_silently_dropped(self):
-        c = Constraint(
-            fact_references=[5],
-            on=ONBaseTable(name="ORDER"),
-            condition=RExists(
-                subquery=SubqueryRef(
-                    from_table="CUSTOMER",
-                    where_left="ORDER.customer_id",
-                    where_right="CUSTOMER.id",
-                )
-            ),
-            category="logic",
-        )
-        bridged, unsupported = bridge_constraints([], [], [], [], [c], _schema())
-        assert bridged == []
-        assert len(unsupported) == 1
-        assert "RExists" in unsupported[0]
+    def test_exists_predicates_are_unconstructible_not_merely_rejected(self):
+        """These used to be two tests asserting that RExists and RComparison
+        op='~' reached the bridge and were REPORTED as unsupported. Both node
+        types are now simply absent from the predicate taxonomy the extraction
+        models use, so the constraint can no longer be built at all -- a
+        strictly stronger guarantee than catching it one layer later, and one
+        that also removes them from the JSON schema the LLM is given."""
+        import src.util.constraint_model.condition.predicates as predicates
 
-    def test_tilde_operator_reported_unsupported(self):
-        c = Constraint(
-            fact_references=[6],
-            on=ONBaseTable(name="ORDER"),
-            condition=RComparison(
-                op="~", left=RColumnRef(name="total"), right=RLiteral(value=1)
-            ),
-            category="logic",
-        )
-        bridged, unsupported = bridge_constraints([], [], [], [], [c], _schema())
-        assert bridged == []
-        assert len(unsupported) == 1
+        assert not hasattr(predicates, "RExists")
+        assert not hasattr(predicates, "RNotExists")
+        assert not hasattr(predicates, "SubqueryRef")
+
+        with pytest.raises(ValidationError):
+            RComparison(
+                op="~",  # type: ignore[arg-type]
+                left=RColumnRef(name="total"),
+                right=RLiteral(value=1),
+            )
 
     def test_if_then_wrapped_conditional_bridges_recursively(self):
         c = Constraint(
             fact_references=[7],
-            on=ONBaseTable(name="ORDER"),
+            on=BaseTable(name="ORDER"),
             condition=RIfThen(
                 antecedent=RComparison(
                     op="=", left=RColumnRef(name="total"), right=RLiteral(value=1)
@@ -210,7 +193,7 @@ class TestBridgeCorrelated:
     def test_same_table_correlation_with_pairwise_value_bridges_directly(self):
         c = CorrelatedConstraint(
             fact_references=[10],
-            on=ONBaseTable(name="ORDER"),
+            on=BaseTable(name="ORDER"),
             columns=["total", "customer_id"],
             family="GAUSSIAN",
             pairwise=[
@@ -228,7 +211,7 @@ class TestBridgeCorrelated:
     def test_qualitative_correlation_with_empty_pairwise_bridges_directly(self):
         c = CorrelatedConstraint(
             fact_references=[11],
-            on=ONBaseTable(name="ORDER"),
+            on=BaseTable(name="ORDER"),
             columns=["total", "customer_id"],
             pairwise=[],
         )
@@ -241,9 +224,9 @@ class TestBridgeCorrelated:
     def test_cross_table_correlation_bridges_via_join(self):
         c = CorrelatedConstraint(
             fact_references=[12],
-            on=ONJoin(
-                left=ONBaseTable(name="ORDER"),
-                right=ONBaseTable(name="CUSTOMER"),
+            on=Join(
+                left=BaseTable(name="ORDER"),
+                right=BaseTable(name="CUSTOMER"),
                 on=[CSJoinCondition(left="ORDER.customer_id", right="CUSTOMER.id")],
             ),
             columns=["total", "loyalty_tier"],
@@ -257,7 +240,7 @@ class TestBridgeStateSequence:
     def test_state_sequence_with_transitions_bridges_directly(self):
         c = StateSequenceConstraint(
             fact_references=[20],
-            on=ONBaseTable(name="ORDER"),
+            on=BaseTable(name="ORDER"),
             sequence_column="customer_id",
             allowed_transitions=[
                 StateTransitionSpec(from_state="a", to_state="b"),
@@ -293,13 +276,13 @@ class TestCorrelatedConstraintValidation:
         # on the same Field(min_length=2) rather than a redundant check).
         with pytest.raises(ValidationError):
             CorrelatedConstraint(
-                fact_references=[30], on=ONBaseTable(name="ORDER"), columns=["total"]
+                fact_references=[30], on=BaseTable(name="ORDER"), columns=["total"]
             )
 
     def test_duplicate_columns_is_rejected(self):
         c = CorrelatedConstraint(
             fact_references=[30],
-            on=ONBaseTable(name="ORDER"),
+            on=BaseTable(name="ORDER"),
             columns=["total", "total"],
         )
         errors = c._validate()
@@ -308,7 +291,7 @@ class TestCorrelatedConstraintValidation:
     def test_pairwise_value_out_of_range_is_rejected(self):
         c = CorrelatedConstraint(
             fact_references=[31],
-            on=ONBaseTable(name="ORDER"),
+            on=BaseTable(name="ORDER"),
             columns=["total", "customer_id"],
             pairwise=[
                 PairwiseCorrelationSpec(left="total", right="customer_id", value=1.5)
@@ -327,7 +310,7 @@ class TestStateSequenceConstraintValidation:
     def test_same_edge_allowed_and_forbidden_is_rejected(self):
         c = StateSequenceConstraint(
             fact_references=[32],
-            on=ONBaseTable(name="ORDER"),
+            on=BaseTable(name="ORDER"),
             sequence_column="customer_id",
             allowed_transitions=[StateTransitionSpec(from_state="a", to_state="b")],
             forbidden_transitions=[StateTransitionSpec(from_state="a", to_state="b")],
@@ -336,26 +319,37 @@ class TestStateSequenceConstraintValidation:
         assert any("both allowed and forbidden" in e for e in errors)
 
 
-class TestBridgeReportsEveryUnsupportedNeverDrops:
-    def test_mixed_batch_bridges_supported_and_reports_unsupported_separately(self):
-        good = Constraint(
-            fact_references=[8],
-            on=ONBaseTable(name="ORDER"),
-            condition=RComparison(
-                op=">", left=RColumnRef(name="total"), right=RLiteral(value=0)
+class TestBridgeNeverDropsAConstraint:
+    def test_every_constraint_in_a_mixed_batch_is_wrapped(self):
+        """This used to assert that a bad constraint came back in
+        `unsupported`. Nothing can be unsupported any more: `on` is already a
+        RelationUnion and `condition` already an RPredicateUnion, so wrapping
+        is total. The invariant worth keeping is the one the class is named
+        for -- every input appears in the output, none is silently dropped.
+
+        Constraints whose ON tree is nonetheless meaningless (an unnormalized
+        RawSQL, a Filter) are rejected by canonicalize() in the checker node
+        BEFORE reaching the bridge -- see test_stage3_deterministic_checker.py.
+        """
+        made = [
+            Constraint(
+                fact_references=[8],
+                on=BaseTable(name="ORDER"),
+                condition=RComparison(
+                    op=">", left=RColumnRef(name="total"), right=RLiteral(value=0)
+                ),
+                category="logic",
             ),
-            category="logic",
-        )
-        bad = Constraint(
-            fact_references=[9],
-            on=ONBaseTable(name="ORDER"),
-            condition=RComparison(
-                op="~", left=RColumnRef(name="total"), right=RLiteral(value=1)
+            Constraint(
+                fact_references=[9],
+                on=RawSQL(sql="SELECT * FROM ORDER"),
+                category="logic",
+                condition=RComparison(
+                    op=">", left=RColumnRef(name="total"), right=RLiteral(value=0)
+                ),
             ),
-            category="logic",
-        )
-        bridged, unsupported = bridge_constraints(
-            [], [], [], [], [good, bad], _schema()
-        )
-        assert len(bridged) == 1
-        assert len(unsupported) == 1
+        ]
+        bridged, unsupported = bridge_constraints([], [], [], [], made, _schema())
+        assert len(bridged) == len(made)
+        assert unsupported == []
+        assert [c.fact_references for c in bridged] == [[8], [9]]

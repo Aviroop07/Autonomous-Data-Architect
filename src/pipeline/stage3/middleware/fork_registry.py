@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pydantic import BaseModel
-from typing import Literal, List, Dict, Optional, Union
+from typing import List, Dict, Optional, Union
 from enum import Enum
 import sqlglot
 from sqlglot import exp

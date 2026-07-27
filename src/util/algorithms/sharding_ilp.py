@@ -4,6 +4,17 @@ from collections import defaultdict
 from pydantic import BaseModel, Field
 import itertools
 import concurrent.futures
+import logging
+import time
+
+logger = logging.getLogger(__name__)
+
+# Per-solve wall-clock cap handed to CP-SAT. Measured on a real 12-table /
+# 14-FK / 52-fact schema: EVERY solve in the 216-config sweep ran to this cap
+# without proving optimality, so the sweep's runtime is grid_size * this /
+# pool_size rather than anything data-dependent. Hoisted from a literal so the
+# cost is stated in one place and can be logged before the sweep starts.
+_SOLVER_MAX_SECONDS = 30.0
 
 
 class ILPSharder:
@@ -290,7 +301,7 @@ class ILPSharder:
         )
 
         solver = cp_model.CpSolver()
-        solver.parameters.max_time_in_seconds = 30.0
+        solver.parameters.max_time_in_seconds = _SOLVER_MAX_SECONDS
         solver.parameters.num_search_workers = 1
 
         status = solver.Solve(model)
@@ -629,6 +640,67 @@ def shard_schema_auto(
         fixed_prompt_overhead_tokens=fixed_prompt_overhead_tokens,
         context_window_safety_margin=context_window_safety_margin,
     )
+    # Fast path: when every table already fits in one shard, the single-shard
+    # solution is a GLOBAL OPTIMUM for every positive weight vector, so all 216
+    # sweep configs are guaranteed to return it. Checking each objective term
+    # against the one-shard assignment (all tables, all columns, one shard):
+    #
+    #   w_shard   * sum(y_k)              1 active shard -- the strict minimum,
+    #                                     and strictly better than any k >= 2.
+    #   w_size    * total_size            len(tables) + total columns. HC3/HC4
+    #                                     force every table and column into at
+    #                                     least one shard, so no assignment can
+    #                                     be smaller; more shards can only
+    #                                     duplicate. Weakly minimal.
+    #   w_facts   * total_facts_touched   each fact touches exactly one shard;
+    #                                     with k shards a fact can touch several.
+    #                                     Minimal.
+    #   -w_cohesion * reward_cooccur      every co-occurring pair is co-located,
+    #                                     so the reward is maximal, and it is
+    #                                     SUBTRACTED. Minimal contribution.
+    #
+    # Every term is simultaneously at its optimum, so this is not a heuristic
+    # shortcut -- the output is identical to what the sweep would return, and
+    # skipping it is free. Feasibility needs HC5 (len(tables) <=
+    # max_tables_per_shard) and HC9 (at least one resolvable fact); HC1-HC4,
+    # HC7 and HC8 are satisfied trivially when everything is in one shard.
+    #
+    # Measured cost of NOT doing this: 453.6s and 487s on two live runs of an
+    # 11- and 12-table schema, both of which the sweep resolved to one shard.
+    has_valid_fact = any(pairs for pairs in facts.values())
+    if len(tables) <= max_tables_per_shard and has_valid_fact:
+        single = {t: list(columns_by_table.get(t, [])) for t in tables}
+        contained = [f for f, pairs in facts.items() if pairs]
+        logger.info(
+            "[sharder] %d tables fit within max_tables_per_shard=%d -- one shard "
+            "is provably optimal for every weight vector; skipping the %d-config "
+            "sweep.",
+            len(tables),
+            max_tables_per_shard,
+            len(SearchSpaceSeeder().generate_grid()),
+        )
+        return [single], [contained]
+
+    grid_size = len(SearchSpaceSeeder().generate_grid())
+    # This step emitted NOTHING before, and on a real run it took 8m07s of
+    # wall clock between two log lines -- indistinguishable from a hang while
+    # watching a live run. Every solve is capped at 30s (see shard_schema), so
+    # the worst case is knowable up front; say so.
+    logger.info(
+        "[sharder] %d tables, %d FKs, %d facts | derived max_shards=%d, "
+        "max_tables_per_shard=%d (model=%s) | sweeping %d weight configs, "
+        "each capped at %.0fs -- worst case ~%.0fs of CPU across the pool",
+        len(tables),
+        len(fks),
+        len(facts),
+        max_shards,
+        max_tables_per_shard,
+        model,
+        grid_size,
+        _SOLVER_MAX_SECONDS,
+        grid_size * _SOLVER_MAX_SECONDS,
+    )
+    started = time.monotonic()
     plateau = run_stability_sweep(
         tables,
         columns_by_table,
@@ -638,6 +710,16 @@ def shard_schema_auto(
         max_shards=max_shards,
         max_tables_per_shard=max_tables_per_shard,
     )
+    elapsed = time.monotonic() - started
     if plateau is None:
+        logger.warning(
+            "[sharder] sweep found no feasible structure after %.1fs.", elapsed
+        )
         return None, None
+    logger.info(
+        "[sharder] sweep done in %.1fs -> %d shard(s): %s",
+        elapsed,
+        len(plateau.structure),
+        [sorted(s.keys()) for s in plateau.structure],
+    )
     return plateau.structure, plateau.shard_facts

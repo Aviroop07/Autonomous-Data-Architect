@@ -11,9 +11,6 @@ Usage examples
   # Evaluate on the 20 handcrafted cases
   python run_evaluation.py --dataset handcrafted
 
-import warnings
-warnings.filterwarnings("ignore", message="Core Pydantic V1 functionality")
-
   # Evaluate on RSchema (first 50 cases)
   python run_evaluation.py --dataset rschema --limit 50
 
@@ -22,6 +19,10 @@ warnings.filterwarnings("ignore", message="Core Pydantic V1 functionality")
 
   # Save results to a specific directory
   python run_evaluation.py --dataset handcrafted --output-dir eval_results/
+
+Stage 4 does not exist yet. Its metrics (smoke pass rate, and the data-level
+MRE/NLL/KS/FA that need generated data) are reported as their empty defaults
+until it lands; Stages 1-3 are scored normally.
 """
 
 from __future__ import annotations
@@ -41,6 +42,8 @@ import numpy as np  # type: ignore[import]
 
 PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.util.core.providers import PROVIDERS  # noqa: E402  (needs sys.path above)
 
 DATASET_ROOT = PROJECT_ROOT / "dataset"
 
@@ -88,21 +91,47 @@ def extract_nl(case: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _load_stage4():
+    """Stage 4 is not built. Returns (orchestrate, run_smoke_test) when it
+    exists, (None, None) otherwise.
+
+    This module used to import src.orchestration.stage4.entry unconditionally
+    at the top of run_case(), so EVERY case died with ModuleNotFoundError
+    before Stage 1 even started. Guarded so the harness can score Stages 1-3
+    today and pick Stage 4 up automatically once it lands.
+    """
+    try:
+        # type: ignore -- these modules do not exist yet by design; the whole
+        # point of this function is to tolerate that.
+        from src.orchestration.stage4.entry import (  # type: ignore[import-not-found]
+            orchestrate as stage4,
+        )
+        from src.pipeline.stage4.smoke_test import (  # type: ignore[import-not-found]
+            run_smoke_test,
+        )
+
+        return stage4, run_smoke_test
+    except ImportError:
+        return None, None
+
+
 async def run_case(
     case: Dict[str, Any],
     model: Optional[str],
     ablation_config: Any,
 ) -> Tuple[Optional[Any], Optional[Any], Optional[Any], Optional[Any], List[str]]:
     """
-    Run the full 4-stage pipeline on a single case.
+    Run the pipeline on a single case.
 
     Returns (s1_output, s2_output, s3_output, s4_result, logs).
     Any stage that fails returns None for that output and all downstream outputs.
+    s4_result is always None until Stage 4 exists.
     """
     from src.orchestration.stage1.entry import orchestrate as stage1
     from src.orchestration.stage2.entry import orchestrate as stage2
     from src.orchestration.stage3.entry import orchestrate as stage3
-    from src.orchestration.stage4.entry import orchestrate as stage4
+
+    stage4, _ = _load_stage4()
 
     nl = extract_nl(case)
     logs: List[str] = []
@@ -114,22 +143,23 @@ async def run_case(
             model=model,
             ablation_config=ablation_config,
         )
-        logs.append("[Stage 1] OK")
+        logs.append(f"[Stage 1] OK ({len(s1_out.final_facts)} facts)")
     except Exception as e:
         logs.append(f"[Stage 1] FAILED: {e}")
         return None, None, None, None, logs
 
-    # Stage 2
+    # Stage 2 -- `plan` is required (fact chunking moved into Stage 1's own
+    # chunker); omitting it used to raise TypeError on every case.
     try:
-        result2 = await stage2(
+        s2_out, _, _registry = await stage2(
+            plan=s1_out.plan,
             facts=s1_out.final_facts,
             domain=s1_out.domain,
             analytical_goal=s1_out.analytical_goal,
+            nl_query=nl,
             model=model,
             ablation_config=ablation_config,
         )
-        # stage2 always returns (Output, int, TableFactRegistry)
-        s2_out, _, s2_registry = result2  # type: ignore[misc]
         logs.append("[Stage 2] OK")
     except Exception as e:
         logs.append(f"[Stage 2] FAILED: {e}")
@@ -142,33 +172,33 @@ async def run_case(
         logs.append("[Stage 2] ERROR: no usable schema in output")
         return s1_out, s2_out, None, None, logs
 
-    # Stage 3
+    # Stage 3 -- signature is (schema, facts, shards=...), not the
+    # global_schema=/all_facts=/registry= this used to pass. Shards are derived
+    # internally when not supplied, so the registry is no longer threaded here.
     try:
-        kw: Dict[str, Any] = dict(
-            global_schema=global_schema,
-            all_facts=s1_out.final_facts,
+        s3_out, _ = await stage3(
+            schema=global_schema,
+            facts=s1_out.final_facts,
             model=model,
             ablation_config=ablation_config,
         )
-        if s2_registry is not None:
-            kw["registry"] = s2_registry
-        result3 = await stage3(**kw)
-        s3_out = result3[0] if isinstance(result3, tuple) else result3
-        logs.append("[Stage 3] OK")
+        report = s3_out.analysis_report
+        logs.append(
+            f"[Stage 3] OK ({s3_out.total_constraints} constraints, "
+            f"{len(report.conflicts)} unresolved conflicts)"
+        )
     except Exception as e:
         logs.append(f"[Stage 3] FAILED: {e}")
         return s1_out, s2_out, None, None, logs
 
-    manifest = getattr(s3_out, "global_manifest", None)
-    if manifest is None:
-        logs.append("[Stage 3] ERROR: no manifest in output")
+    if stage4 is None:
+        logs.append("[Stage 4] SKIPPED (not built)")
         return s1_out, s2_out, s3_out, None, logs
 
-    # Stage 4
     try:
         s4_result, _ = await stage4(
             global_schema=global_schema,
-            manifest=manifest,
+            constraints=s3_out,
             business_facts=s1_out.final_facts,
             model=model,
             ablation_config=ablation_config,
@@ -191,7 +221,18 @@ async def run_case(
 def _schema_metrics(pred_schema: Any, gt_case: Dict[str, Any]) -> Dict[str, Any]:
     """Compute schema-level metrics for one case."""
     from src.evaluation.schema_level.schema_eval import SchemaEvaluator
+    from src.pipeline.stage2.models.data_types import DataType
     from src.pipeline.stage2.models.schema import Schema, Table, Column, ForeignKey
+
+    def _as_data_type(raw: Any) -> DataType:
+        """Ground-truth JSON carries data types as free strings. Column.data_type
+        is a DataType enum, so an unrecognised or missing value falls back to
+        VARCHAR rather than raising -- a GT file with an odd type name should
+        not abort the whole evaluation."""
+        try:
+            return DataType(str(raw).upper())
+        except ValueError:
+            return DataType.VARCHAR
 
     try:
         gt_raw = gt_case.get("ground_truth_schema", {})
@@ -205,13 +246,16 @@ def _schema_metrics(pred_schema: Any, gt_case: Dict[str, Any]) -> Dict[str, Any]
             cols = []
             for c in t.get("columns", []):
                 dt = c.get("data_type") or "VARCHAR"
-                cols.append(Column(name=c["name"], data_type=dt))
-                gt_col_types[f"{t_name}.{c['name']}"] = dt
+                cols.append(Column(name=c["name"], data_type=_as_data_type(dt)))
+                gt_col_types[f"{t_name}.{c['name']}"] = str(dt)
+            # Table's field is `primary_key: List[str]`, not `pk: str`.
+            raw_pk = t.get("pk") or t.get("primary_key") or default_pk
+            primary_key = [raw_pk] if isinstance(raw_pk, str) else list(raw_pk)
             gt_tables.append(
                 Table(
                     name=t_name,
                     columns=cols,
-                    pk=t.get("pk") or default_pk,
+                    primary_key=primary_key,
                 )
             )
         gt_rels = [
@@ -336,7 +380,8 @@ def _print_aggregate(agg: Dict[str, Any], label: str = "ScribbleDB") -> None:
 
 async def evaluate(args: argparse.Namespace) -> None:
     from src.util.config.ablation import AblationConfig
-    from src.pipeline.stage4.smoke_test import run_smoke_test
+
+    _, run_smoke_test = _load_stage4()
 
     ablation = AblationConfig(
         enable_enrichment=not args.no_enrichment,
@@ -367,7 +412,13 @@ async def evaluate(args: argparse.Namespace) -> None:
     out_dir = (
         Path(args.output_dir)
         if args.output_dir
-        else (PROJECT_ROOT / "output" / "eval" / f"{ts}_{args.dataset}_{ablation_tag}")
+        else (
+            PROJECT_ROOT
+            / "artifacts"
+            / "runs"
+            / "eval"
+            / f"{ts}_{args.dataset}_{ablation_tag}"
+        )
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -413,7 +464,11 @@ async def evaluate(args: argparse.Namespace) -> None:
             if s4_result is not None:
                 smoke_passed = bool(s4_result.success)
                 # Re-run smoke test at full scale to collect DataFrames for metrics
-                if smoke_passed and case.get("ground_truth_distributions"):
+                if (
+                    smoke_passed
+                    and run_smoke_test is not None
+                    and case.get("ground_truth_distributions")
+                ):
                     try:
                         _, smoke_dfs, _ = run_smoke_test(
                             s4_result.generated_code, scale_factor=1.0
@@ -495,7 +550,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--provider",
-        choices=["openai", "gemini"],
+        # Sourced from the registry so this list cannot drift from what the
+        # code actually supports -- it used to say openai|gemini only.
+        choices=sorted(PROVIDERS),
         default=None,
         help="LLM provider (overrides PROVIDER env var)",
     )
@@ -504,7 +561,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         dest="output_dir",
-        help="Output directory (default: output/eval/{timestamp}_{dataset})",
+        help="Output directory (default: artifacts/runs/eval/{timestamp}_{dataset})",
     )
     p.add_argument("--no-enrichment", action="store_true", dest="no_enrichment")
     p.add_argument("--no-sharding", action="store_true", dest="no_sharding")

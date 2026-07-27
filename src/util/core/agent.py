@@ -1,5 +1,4 @@
 import logging
-import os
 from operator import itemgetter
 from typing import Any, Dict, List, Literal, Optional, Type, TypeVar, Union
 
@@ -19,6 +18,7 @@ from langchain_core.runnables import (  # type: ignore[import]
 from langchain_openai import ChatOpenAI  # type: ignore[import]
 from pydantic import BaseModel, SecretStr
 
+from src.util.core.providers import PROVIDERS, resolve_provider
 from src.util.schema_ops.schema_utils import generate_hierarchical_schema_description
 
 logger = logging.getLogger(__name__)
@@ -29,107 +29,39 @@ T = TypeVar("T", bound=BaseModel)
 AgentType = Union["StructuredAgent", Runnable]
 
 # ------------------------------------------------------------------
-# Provider constants
-# ------------------------------------------------------------------
-
-_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
-_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-_GEMINI_DEFAULT_MODEL = "gemini-2.5-flash"
-_OPENAI_DEFAULT_MODEL = "gpt-4o"
-_OPENROUTER_DEFAULT_MODEL = "openai/gpt-4o"
-_GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-_GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile"
-_CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
-_CEREBRAS_DEFAULT_MODEL = "gpt-oss-120b"
-_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-_DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"
-# Self-hosted OpenAI-compatible endpoint (vLLM / SGLang). Unlike every other
-# provider here, its base URL is not a fixed constant -- it points at whatever
-# machine is currently serving, so it is read from the environment.
-_VLLM_DEFAULT_BASE_URL = "http://localhost:8000/v1"
-_VLLM_DEFAULT_MODEL = "local-model"
-
-
-# ------------------------------------------------------------------
 # Provider detection
 # ------------------------------------------------------------------
+#
+# The per-provider constants, the detection ladder and the model-override
+# ladder all live in core/providers.py now -- see that module for why.
 
 
 def _detect_provider() -> tuple[str, str, str | None, str]:
     """Returns (provider, api_key, base_url_or_None, default_model).
 
-    Selection rules (explicit PROVIDER override wins; otherwise key presence):
-      - PROVIDER=openrouter, or only OPENROUTER_API_KEY set  -> openrouter
-      - PROVIDER=openai, or only OPENAI_API_KEY set          -> openai
-      - PROVIDER=gemini, or only GEMINI_API_KEY set          -> gemini
-      - Multiple keys, no PROVIDER override                  -> openai > gemini > openrouter
-      - No keys                                              -> RuntimeError
+    An explicit PROVIDER env var wins (with `local` as an alias for `vllm`);
+    otherwise the first provider with a key present, in the registration order
+    of providers.PROVIDERS. Raises RuntimeError when nothing is configured.
+
+    The 4-tuple shape is kept because every caller and several tests destructure
+    it; providers.resolve_provider() returns the richer ProviderSpec.
+
+    The 4th element is the ENV-RESOLVED model, not the bare provider default.
+    That matters for callers that use it directly rather than passing it back
+    through _build_llm -- notably the Stage 3 auto-sharder, which sizes shards
+    against the target model's real context window. Returning the bare default
+    made it size against gemini-2.5-flash while the run actually used
+    gemini-3.1-flash-lite (observed live), and for vllm it would have returned
+    the "local-model" placeholder instead of the served model name.
     """
     load_dotenv()
-    gemini_key = os.getenv("GEMINI_API_KEY", "")
-    openai_key = os.getenv("OPENAI_API_KEY", "")
-    openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
-    groq_key = os.getenv("GROQ_API_KEY", "")
-    cerebras_key = os.getenv("CEREBRAS_API_KEY", "")
-    deepseek_key = os.getenv("DEEPSEEK_API_KEY", "")
-    provider_override = os.getenv("PROVIDER", "").lower()
-
-    if provider_override in ("vllm", "local"):
-        provider = "vllm"
-    elif provider_override == "cerebras":
-        provider = "cerebras"
-    elif provider_override == "deepseek":
-        provider = "deepseek"
-    elif provider_override == "groq":
-        provider = "groq"
-    elif provider_override == "openrouter":
-        provider = "openrouter"
-    elif provider_override == "openai":
-        provider = "openai"
-    elif provider_override == "gemini":
-        provider = "gemini"
-    elif groq_key:
-        provider = "groq"
-    elif cerebras_key:
-        provider = "cerebras"
-    elif deepseek_key:
-        provider = "deepseek"
-    elif gemini_key:
-        provider = "gemini"
-    elif openai_key:
-        provider = "openai"
-    elif openrouter_key:
-        provider = "openrouter"
-    else:
-        raise RuntimeError(
-            "No LLM API key found. Set CEREBRAS_API_KEY, DEEPSEEK_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, GROQ_API_KEY, or OPENROUTER_API_KEY in .env."
-        )
-
-    if provider == "vllm":
-        # Self-hosted endpoints are unauthenticated by default; vLLM ignores the
-        # key entirely, but the OpenAI client requires a non-empty string.
-        return (
-            "vllm",
-            os.getenv("VLLM_API_KEY", "EMPTY"),
-            os.getenv("VLLM_BASE_URL", _VLLM_DEFAULT_BASE_URL),
-            os.getenv("VLLM_BASE_MODEL", _VLLM_DEFAULT_MODEL),
-        )
-    if provider == "cerebras":
-        return "cerebras", cerebras_key, _CEREBRAS_BASE_URL, _CEREBRAS_DEFAULT_MODEL
-    if provider == "deepseek":
-        return "deepseek", deepseek_key, _DEEPSEEK_BASE_URL, _DEEPSEEK_DEFAULT_MODEL
-    if provider == "groq":
-        return "groq", groq_key, _GROQ_BASE_URL, _GROQ_DEFAULT_MODEL
-    if provider == "gemini":
-        return "gemini", gemini_key, _GEMINI_BASE_URL, _GEMINI_DEFAULT_MODEL
-    if provider == "openrouter":
-        return (
-            "openrouter",
-            openrouter_key,
-            _OPENROUTER_BASE_URL,
-            _OPENROUTER_DEFAULT_MODEL,
-        )
-    return "openai", openai_key, None, _OPENAI_DEFAULT_MODEL
+    spec = resolve_provider()
+    return (
+        spec.name,
+        spec.resolve_key(),
+        spec.resolve_base_url(),
+        spec.resolve_model(None, spec.default_model),
+    )
 
 
 # ------------------------------------------------------------------
@@ -150,73 +82,22 @@ def _build_llm(
     Model resolution order (highest to lowest priority):
       1. explicit model param
       2. BASE_MODEL env var (generic override, e.g. from --model CLI flag)
-      3. GEMINI_BASE_MODEL / OPENAI_BASE_MODEL (provider-specific .env setting)
-      4. provider default constant
+      3. the provider's own <PROVIDER>_BASE_MODEL (.env setting)
+      4. provider default
 
-    use_responses_api is silently ignored for Gemini (only applies to OpenAI
-    Responses API). This is intentional — callers don't need to branch on
-    provider when building tool-using agents.
+    use_responses_api applies only to the OpenAI Responses API and is silently
+    ignored elsewhere -- intentional, so callers don't branch on provider when
+    building tool-using agents.
     """
-    if provider == "vllm":
-        resolved = (
-            model
-            or os.getenv("BASE_MODEL")
-            or os.getenv("VLLM_BASE_MODEL")
-            or env_default
-        )
-    elif provider == "cerebras":
-        resolved = (
-            model
-            or os.getenv("BASE_MODEL")
-            or os.getenv("CEREBRAS_BASE_MODEL")
-            or env_default
-        )
-    elif provider == "deepseek":
-        resolved = (
-            model
-            or os.getenv("BASE_MODEL")
-            or os.getenv("DEEPSEEK_BASE_MODEL")
-            or env_default
-        )
-    elif provider == "groq":
-        resolved = (
-            model
-            or os.getenv("BASE_MODEL")
-            or os.getenv("GROQ_BASE_MODEL")
-            or env_default
-        )
-    elif provider == "gemini":
-        resolved = (
-            model
-            or os.getenv("BASE_MODEL")
-            or os.getenv("GEMINI_BASE_MODEL")
-            or env_default
-        )
-    elif provider == "openrouter":
-        resolved = (
-            model
-            or os.getenv("BASE_MODEL")
-            or os.getenv("OPENROUTER_BASE_MODEL")
-            or env_default
-        )
-    else:
-        resolved = (
-            model
-            or os.getenv("BASE_MODEL")
-            or os.getenv("OPENAI_BASE_MODEL")
-            or env_default
-        )
+    spec = PROVIDERS.get(provider, PROVIDERS["openai"])
+    resolved = spec.resolve_model(model, env_default)
 
     kwargs: Dict[str, Any] = dict(api_key=SecretStr(api_key), model=resolved)
     if base_url is not None:
         kwargs["base_url"] = base_url
-    if provider == "openrouter":
-        kwargs["default_headers"] = {
-            "HTTP-Referer": os.getenv(
-                "OPENROUTER_REFERER", "https://github.com/scribbledb"
-            ),
-            "X-Title": os.getenv("OPENROUTER_TITLE", "ScribbleDB"),
-        }
+    headers = spec.headers()
+    if headers:
+        kwargs["default_headers"] = headers
     if use_responses_api and provider == "openai":
         kwargs["use_responses_api"] = True
     return ChatOpenAI(**kwargs)
@@ -536,12 +417,10 @@ def get_agent_(
     provider, api_key, base_url, env_default = _detect_provider()
     llm = _build_llm(provider, api_key, base_url, env_default, model, use_responses_api)
 
-    if provider == "vllm":
-        method = "json_schema"
-    elif provider in ("gemini", "deepseek"):
-        method = "json_mode"
-    else:
-        method = "function_calling"
+    # Which structured-output method a provider supports is a property of the
+    # provider, so it lives on its ProviderSpec rather than in a third ladder
+    # here (see core/providers.py).
+    method = PROVIDERS.get(provider, PROVIDERS["openai"]).method
     if method == "json_mode":
         output_format = generate_hierarchical_schema_description(output_structure)
         full_prompt = (

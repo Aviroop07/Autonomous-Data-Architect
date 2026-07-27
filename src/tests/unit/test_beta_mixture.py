@@ -3,10 +3,10 @@
 Tests the adaptive grid, per-config runner, MoM estimator, ensemble averaging,
 backward-compat single-config fit, and the public API surface.
 """
+
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from src.util.algorithms.beta_mixture import (
     _build_adaptive_grid,
@@ -18,7 +18,6 @@ from src.util.algorithms.beta_mixture import (
     compute_posterior_same,
     compute_merge_probability_matrix,
     compute_flag_posteriors,
-    MIN_OBS_FOR_MIXTURE,
     CLIP_EPS,
 )
 
@@ -26,6 +25,7 @@ from src.util.algorithms.beta_mixture import (
 # =========================================================================
 # _log_beta_pdf
 # =========================================================================
+
 
 class TestLogBetaPdf:
     def test_at_one_is_neg_inf(self):
@@ -49,6 +49,7 @@ class TestLogBetaPdf:
 # =========================================================================
 # _beta_mom
 # =========================================================================
+
 
 class TestBetaMom:
     def test_too_few_samples_returns_none(self):
@@ -79,6 +80,7 @@ class TestBetaMom:
 # =========================================================================
 # _build_adaptive_grid
 # =========================================================================
+
 
 class TestBuildAdaptiveGrid:
     def test_below_min_obs_returns_empty(self):
@@ -118,7 +120,7 @@ class TestBuildAdaptiveGrid:
 
     def test_high_p_exact_shifts_thresholds(self):
         """p_exact > 0.15 should shift thresholds up (max >= 0.90)."""
-        x = np.array([0.1]*8 + [0.991, 0.992, 0.993, 0.994])
+        x = np.array([0.1] * 8 + [0.991, 0.992, 0.993, 0.994])
         grid = _build_adaptive_grid(x)
         if grid:
             thresholds = [cfg[3] for cfg in grid]
@@ -127,7 +129,7 @@ class TestBuildAdaptiveGrid:
 
     def test_low_p_exact_adds_low_threshold(self):
         """p_exact < 0.03 adds 0.75 before gap override, so >= 3 distinct thresholds."""
-        x = np.array([0.1]*8 + [0.85, 0.88])
+        x = np.array([0.1] * 8 + [0.85, 0.88])
         grid = _build_adaptive_grid(x)
         if grid:
             thresholds = [cfg[3] for cfg in grid]
@@ -138,6 +140,7 @@ class TestBuildAdaptiveGrid:
 # =========================================================================
 # _run_config
 # =========================================================================
+
 
 class TestRunConfig:
     def test_below_min_obs(self):
@@ -201,7 +204,7 @@ class TestRunConfig:
         assert ok or not ok
 
     def test_posteriors_monotonic_for_two_clusters(self):
-        rng = np.random.default_rng(42)
+        np.random.default_rng(42)
         low = np.array([0.10, 0.12, 0.15, 0.18, 0.20, 0.22, 0.25, 0.28])
         high = np.array([0.85, 0.88, 0.90, 0.92])
         x = np.concatenate([low, high])
@@ -214,6 +217,7 @@ class TestRunConfig:
 # =========================================================================
 # fit_beta_mixture_ensemble
 # =========================================================================
+
 
 class TestFitBetaMixtureEnsemble:
     def test_too_few_samples_returns_all_point_five(self):
@@ -273,6 +277,7 @@ class TestFitBetaMixtureEnsemble:
 # fit_beta_mixture (backward compat single-config)
 # =========================================================================
 
+
 class TestFitBetaMixture:
     def test_too_few_samples_returns_fallback(self):
         pi, a0, b0, a1, b1 = fit_beta_mixture(np.array([0.1, 0.2, 0.3]))
@@ -280,7 +285,7 @@ class TestFitBetaMixture:
         assert a0 == 1.0
 
     def test_dominant_same_cluster_returns_pi_above_zero(self):
-        rng = np.random.default_rng(42)
+        np.random.default_rng(42)
         low = np.array([0.10, 0.12, 0.15, 0.18])
         high = np.array([0.85, 0.88, 0.90, 0.92, 0.95, 0.96])
         x = np.concatenate([low, high])
@@ -290,10 +295,12 @@ class TestFitBetaMixture:
 
     def test_returns_valid_components(self):
         rng = np.random.default_rng(42)
-        x = np.concatenate([
-            rng.beta(2.0, 10.0, size=10),
-            rng.beta(30.0, 2.0, size=4),
-        ])
+        x = np.concatenate(
+            [
+                rng.beta(2.0, 10.0, size=10),
+                rng.beta(30.0, 2.0, size=4),
+            ]
+        )
         pi, a0, b0, a1, b1 = fit_beta_mixture(x)
         assert pi >= 0.0 and pi <= 1.0
         assert a0 > 0 and b0 > 0
@@ -304,6 +311,7 @@ class TestFitBetaMixture:
 # compute_posterior_same
 # =========================================================================
 
+
 class TestComputePosteriorSame:
     def test_default_params_runs_ensemble(self):
         x = np.array([0.1, 0.2, 0.3, 0.4])
@@ -313,25 +321,32 @@ class TestComputePosteriorSame:
 
     def test_custom_params_returns_direct(self):
         x = np.array([0.1, 0.5, 0.9])
-        posts = compute_posterior_same(x, pi1=0.3, alpha0=2.0, beta0=8.0, alpha1=10.0, beta1=2.0)
+        posts = compute_posterior_same(
+            x, pi1=0.3, alpha0=2.0, beta0=8.0, alpha1=10.0, beta1=2.0
+        )
         assert len(posts) == 3
         assert posts[0] < 0.5
         assert posts[2] > 0.5
 
     def test_custom_params_monotonic(self):
         x = np.linspace(0.01, 0.99, 10)
-        posts = compute_posterior_same(x, pi1=0.4, alpha0=2.0, beta0=5.0, alpha1=5.0, beta1=2.0)
+        posts = compute_posterior_same(
+            x, pi1=0.4, alpha0=2.0, beta0=5.0, alpha1=5.0, beta1=2.0
+        )
         assert np.all(np.diff(posts) >= -1e-6)
 
     def test_custom_params_clamps_pi(self):
         x = np.array([0.5])
-        posts = compute_posterior_same(x, pi1=0.0, alpha0=1.0, beta0=1.0, alpha1=1.0, beta1=1.0)
+        posts = compute_posterior_same(
+            x, pi1=0.0, alpha0=1.0, beta0=1.0, alpha1=1.0, beta1=1.0
+        )
         assert np.isfinite(posts[0])
 
 
 # =========================================================================
 # compute_merge_probability_matrix
 # =========================================================================
+
 
 class TestComputeMergeProbabilityMatrix:
     def test_empty_input_returns_zeros(self):
@@ -358,6 +373,7 @@ class TestComputeMergeProbabilityMatrix:
 # compute_flag_posteriors
 # =========================================================================
 
+
 class TestComputeFlagPosteriors:
     def test_empty_list_returns_empty(self):
         posts = compute_flag_posteriors([])
@@ -377,6 +393,7 @@ class TestComputeFlagPosteriors:
 # =========================================================================
 # CLIP_EPS boundary
 # =========================================================================
+
 
 class TestClipEps:
     def test_values_at_zero_and_one_are_clipped(self):

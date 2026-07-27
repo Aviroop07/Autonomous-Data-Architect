@@ -1,8 +1,13 @@
-"""Standalone Relation/Condition/Constraint object model.
+"""The Relation/Condition/Constraint object model -- Stage 3's single source
+of truth for what a constraint IS.
 
-Design reference: experiments/RELATION_CONDITION_CONSTRAINT_DESIGN.md
-(project root). This package is built and validated in isolation --
-nothing in src/pipeline/stage3 imports from it yet, and it does not import
-from src/pipeline/stage3 either. It supersedes on_nodes.py/
-condition_nodes.py/grain.py eventually, not yet.
+Design reference: docs/design/RELATION_CONDITION_CONSTRAINT_DESIGN.md, which
+the modules here cite by section number.
+
+This package is no longer "built and validated in isolation", as this
+docstring used to claim: the Stage 3 extraction models (pipeline/stage3/
+models/) now use `condition/` directly instead of carrying their own copy of
+the predicate/expression taxonomy -- which is why condition_nodes.py no longer
+exists. The `bridge/` subpackage translates only what genuinely still differs:
+the ON tree's node shapes, plus the four constraint-level wrappers.
 """

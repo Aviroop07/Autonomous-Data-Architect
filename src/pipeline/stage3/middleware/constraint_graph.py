@@ -23,38 +23,38 @@ from typing import Dict, List, Optional, Tuple
 from src.pipeline.stage2.models.schema import Schema
 from src.pipeline.stage3.middleware.cycles import detect_derived_cycles
 from src.pipeline.stage3.middleware.fork_registry import (
+    BranchCondition,
     ForkKey,
     ForkKeyRegistry,
+    Operator,
     Unresolved,
-    parse_if_condition,
 )
 from src.pipeline.stage3.models import cross_shard
-from src.pipeline.stage3.models.condition_nodes import (
-    RColumnRef,
-    RComparison,
-    RLiteral,
-    RPredicate,
-    extract_columns,
-)
 from src.pipeline.stage3.models.grain import (
     CanonicalizationFailure,
     Grain,
     _SchemaView,
     canonicalize,
 )
-from src.pipeline.stage3.models.on_nodes import ONAggregate, ONBaseTable, ONNode
+from src.util.constraint_model.relation.nodes import Aggregate, BaseTable, RelationUnion
 from src.pipeline.stage3.models.probe import (
     Stage3AnalysisReport,
     VariableProbe,
 )
 from src.util.algorithms.dof_graph import (
-    Constraint,
     Constraint as DOFConstraint,
     DOFClassification,
     DOFGraph,
     OverconstrainedBlock,
-    Variable,
     Variable as DOFVariable,
+)
+from src.util.constraint_model.condition.expressions import RColumnRef, RLiteral
+from src.util.constraint_model.condition.predicates import (
+    RComparison,
+    extract_columns,
+)
+from src.util.constraint_model.condition.predicates import (
+    RPredicateUnion as RPredicate,
 )
 
 logger = logging.getLogger(__name__)
@@ -68,7 +68,8 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Rich variable model (adapted from experiments/stage3_conflict_v2/dof_engine.py)
+# Rich variable model (adapted from the stage3_conflict_v2 prototype, which is
+# no longer in the repo)
 # ---------------------------------------------------------------------------
 
 
@@ -279,7 +280,9 @@ def _resolve_branch(
         return None
     if not isinstance(condition, RComparison):
         return None
-    if condition.op not in ("=", "==", "in"):
+    # RComparison.op is Literal["<", "<=", "=", "!=", ">=", ">"] -- this used
+    # to also test for "==" and "in", neither of which the type permits.
+    if condition.op != "=":
         return None
     if not isinstance(condition.left, RColumnRef):
         return None
@@ -297,14 +300,7 @@ def _resolve_branch(
     for fk, _cats in registry.forks.items():
         if fk.column_name == col_name:
             branch_vals = registry.get_branches_for_condition(
-                __import__(
-                    "src.pipeline.stage3.middleware.fork_registry",
-                    fromlist=["BranchCondition"],
-                ).BranchCondition(
-                    fork_key=fk,
-                    operator="EQ",
-                    values=[val],
-                )
+                BranchCondition(fork_key=fk, operator=Operator.EQ, values=[val])
             )
             if isinstance(branch_vals, Unresolved):
                 return None
@@ -321,11 +317,11 @@ def _resolve_branch(
 # ---------------------------------------------------------------------------
 
 
-def _on_base_table(node: ONNode) -> Optional[str]:
+def _on_base_table(node: RelationUnion) -> Optional[str]:
     """Extract the base table name from an ON tree."""
-    if isinstance(node, ONBaseTable):
+    if isinstance(node, BaseTable):
         return node.name
-    if isinstance(node, ONAggregate):
+    if isinstance(node, Aggregate):
         return _on_base_table(node.source)
     return None
 
@@ -574,9 +570,9 @@ def _convert_cross_shard_constraints(
             continue
 
         on_tables = set()
-        from src.pipeline.stage3.models.on_nodes import extract_tables
+        from src.util.constraint_model.relation.nodes import extract_base_tables
 
-        on_tables = extract_tables(c.on)
+        on_tables = extract_base_tables(c.on)
 
         if len(on_tables) == 1:
             # Single-table constraint -> cardinality
@@ -607,7 +603,7 @@ def _convert_cross_shard_constraints(
     # 4. Derived column constraints
     for i, dc in enumerate(derived):
         # Build a synthetic ON tree for the target table
-        on = ONBaseTable(name=dc.target_table)
+        on = BaseTable(name=dc.target_table)
         grain_result = canonicalize(on, schema)
         if isinstance(grain_result, CanonicalizationFailure):
             logger.warning(
@@ -637,7 +633,7 @@ def analyze_cross_shard_constraints(
 ) -> Tuple[Stage3AnalysisReport, Dict[str, List[int]]]:
     """Stage 3's complete DOF analysis for cross_shard.py-shaped extraction
     outputs. This is the NEW entry point that consumes the real extraction
-    agent output shapes (on: ONNode, condition: RPredicate) and routes
+    agent output shapes (on: RelationUnion, condition: RPredicate) and routes
     through grain canonicalization + real DOFGraph.
 
     Returns (Stage3AnalysisReport, variable_fact_map). The report has:
@@ -761,11 +757,9 @@ def _build_fork_registry(
 
 def parse_if_condition_from_predicate(
     pred: RPredicate,
-) -> Optional:
+) -> Optional[BranchCondition]:
     """Parse an R-predicate into a BranchCondition for fork registry lookup.
     Handles RComparison EQ/IN against literal values."""
-    from src.pipeline.stage3.middleware.fork_registry import BranchCondition, Operator
-
     if isinstance(pred, RComparison):
         if not isinstance(pred.left, RColumnRef):
             return None

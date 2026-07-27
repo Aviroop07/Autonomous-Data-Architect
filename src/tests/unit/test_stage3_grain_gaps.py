@@ -1,6 +1,6 @@
 """Characterization tests for two real, PRE-EXISTING gaps in grain.py
 found while stress-testing on_sql_normalize.py -- neither is caused by,
-or specific to, the ONSubquery/SQL path; both apply equally to any
+or specific to, the RawSQL/SQL path; both apply equally to any
 directly-authored ON tree.
 
 1. Grain.pk_columns for a multi-column GROUP BY aggregate stays the
@@ -32,11 +32,11 @@ from __future__ import annotations
 from src.pipeline.stage2.models.data_types import DataType
 from src.pipeline.stage2.models.schema import Column, ForeignKey, Schema, Table
 from src.pipeline.stage3.models.grain import CanonicalizationFailure, canonicalize
-from src.pipeline.stage3.models.on_nodes import (
+from src.util.constraint_model.relation.nodes import (
     JoinCondition,
-    ONAggregate,
-    ONBaseTable,
-    ONJoin,
+    Aggregate,
+    BaseTable,
+    Join,
 )
 
 
@@ -93,8 +93,8 @@ class TestMultiColumnGroupByPkColumnsStaysStale:
         answer. Contrast with constraint_model/population.py's
         Population, which correctly sets pk_columns=frozenset(group_by)
         for the same shape."""
-        agg = ONAggregate(
-            source=ONBaseTable(name="ORDER_ROW"),
+        agg = Aggregate(
+            source=BaseTable(name="ORDER_ROW"),
             fn="AVG",
             column="total",
             group_by=["customer_id", "region"],
@@ -111,8 +111,8 @@ class TestMultiColumnGroupByPkColumnsStaysStale:
         a wrong accessible-column answer."""
         from src.pipeline.stage3.models.grain import _SchemaView
 
-        agg = ONAggregate(
-            source=ONBaseTable(name="ORDER_ROW"),
+        agg = Aggregate(
+            source=BaseTable(name="ORDER_ROW"),
             fn="AVG",
             column="total",
             group_by=["customer_id", "region"],
@@ -134,14 +134,14 @@ class TestColumnAccessibilityValidation:
         at all -- it only validates the ON tree's structure. An outer
         aggregate's `column` is never checked against what its `source`
         actually exposes, aggregate-of-aggregate or not."""
-        inner = ONAggregate(
-            source=ONBaseTable(name="ORDER_ROW"),
+        inner = Aggregate(
+            source=BaseTable(name="ORDER_ROW"),
             fn="SUM",
             column="total",
             group_by=["customer_id"],
             alias="sum_total",
         )
-        outer = ONAggregate(
+        outer = Aggregate(
             source=inner,
             fn="AVG",
             column="this_column_does_not_exist_anywhere",
@@ -159,9 +159,9 @@ class TestColumnAccessibilityValidation:
         parent_id genuinely ambiguous without table-qualification."""
         from src.pipeline.stage3.models.grain import _SchemaView
 
-        join = ONJoin(
-            left=ONBaseTable(name="CATEGORY"),
-            right=ONBaseTable(name="CATEGORY"),
+        join = Join(
+            left=BaseTable(name="CATEGORY"),
+            right=BaseTable(name="CATEGORY"),
             on=[JoinCondition(left="CATEGORY.parent_id", right="CATEGORY.id")],
         )
         schema = _self_join_schema()

@@ -109,7 +109,6 @@ def test_table_lowercase_name_flagged_as_not_upper_snake():
     assert any("UPPER_SNAKE_CASE" in e for e in errors)
 
 
-
 def test_table_missing_pk_flagged():
     t = Table(
         name="WIDGET",

@@ -109,3 +109,86 @@ class TestTypeValidation:
         )
         errors = validate_predicate_types(tree, {"name": DataType.VARCHAR})
         assert len(errors) == 3
+
+
+# ---------------------------------------------------------------------------
+# Ported from the deleted test_stage3_condition_nodes.py, which covered the
+# duplicate copy of this taxonomy at pipeline/stage3/models/condition_nodes.py:
+# construction-time rejections and predicate-union round-tripping, neither of
+# which the structural/type tests above touch.
+# ---------------------------------------------------------------------------
+
+
+class TestPredicateConstructionRules:
+    def test_all_six_comparison_operators_accepted(self):
+        for op in ("<", "<=", "=", "!=", ">=", ">"):
+            assert _cmp("total", op, 1)._validate() == []
+
+    def test_tilde_operator_rejected(self):
+        """'~' existed on the old duplicate taxonomy for distribution pins.
+        Distributed absorbed that meaning, so it must not be constructible."""
+        with pytest.raises(ValidationError):
+            RComparison(
+                op="~",  # type: ignore[arg-type]
+                left=RColumnRef(name="total"),
+                right=RLiteral(value=1),
+            )
+
+    def test_in_set_rejects_empty_values_at_construction(self):
+        with pytest.raises(ValidationError):
+            RInSet(expr=RColumnRef(name="status"), values=[])
+
+    def test_not_in_set_rejects_empty_values_at_construction(self):
+        with pytest.raises(ValidationError):
+            RNotInSet(expr=RColumnRef(name="status"), values=[])
+
+    def test_not_wraps_any_predicate(self):
+        assert validate_predicate_tree(RNot(operand=_cmp("total", ">", 0))) == []
+
+    def test_between_accepts_arithmetic_bounds(self):
+        from src.util.constraint_model.condition.expressions import RArithmetic
+
+        node = RBetween(
+            expr=RColumnRef(name="total"),
+            low=RLiteral(value=0),
+            high=RArithmetic(
+                op="*", left=RColumnRef(name="base"), right=RLiteral(value=2)
+            ),
+        )
+        assert validate_predicate_tree(node) == []
+
+    def test_if_then_nests_recursively(self):
+        inner = RIfThen(antecedent=_cmp("a", "=", 1), consequent=_cmp("b", ">", 0))
+        outer = RIfThen(antecedent=_cmp("c", "=", 2), consequent=inner)
+        assert validate_predicate_tree(outer) == []
+
+    def test_if_then_with_compound_antecedent(self):
+        node = RIfThen(
+            antecedent=RAnd(operands=[_cmp("a", "=", 1), _cmp("b", "=", 2)]),
+            consequent=_cmp("c", ">", 0),
+        )
+        assert validate_predicate_tree(node) == []
+
+
+class TestPredicateUnionRoundTrip:
+    def test_nested_predicate_survives_serialize_deserialize(self):
+        from pydantic import TypeAdapter
+
+        from src.util.constraint_model.condition.predicates import RPredicateUnion
+
+        original = RIfThen(
+            antecedent=RAnd(operands=[_cmp("a", "=", 1), _cmp("b", "=", 2)]),
+            consequent=RNot(operand=_cmp("c", ">", 0)),
+        )
+        restored = TypeAdapter(RPredicateUnion).validate_python(original.model_dump())
+        assert isinstance(restored, RIfThen)
+        assert isinstance(restored.antecedent, RAnd)
+        assert isinstance(restored.consequent, RNot)
+
+    def test_exists_node_types_are_absent_from_the_taxonomy(self):
+        """RExists/RNotExists/SubqueryRef existed only on the old duplicate
+        taxonomy and were rejected 100% of the time by the bridge."""
+        import src.util.constraint_model.condition.predicates as predicates
+
+        for name in ("RExists", "RNotExists", "SubqueryRef"):
+            assert not hasattr(predicates, name)

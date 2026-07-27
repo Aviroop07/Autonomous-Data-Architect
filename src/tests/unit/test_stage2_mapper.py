@@ -97,7 +97,7 @@ def test_binary_1_n_relationship():
     )
     schema = map_conceptual_to_relational(cm)
     assert len(schema.tables) == 2
-    dept = next(t for t in schema.tables if t.name == "DEPARTMENT")
+    next(t for t in schema.tables if t.name == "DEPARTMENT")
     emp = next(t for t in schema.tables if t.name == "EMPLOYEE")
 
     assert "dept_id" in [c.name for c in emp.columns]
@@ -203,7 +203,11 @@ def test_multivalued_attribute():
             Entity(
                 name="Person",
                 identifier_attributes=["Person_ID"],
-                attributes=[CMAttribute(name="Phone", type=DataType.VARCHAR, is_multivalued=True)],
+                attributes=[
+                    CMAttribute(
+                        name="Phone", type=DataType.VARCHAR, is_multivalued=True
+                    )
+                ],
             )
         ]
     )

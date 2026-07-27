@@ -27,6 +27,7 @@ from src.util.analysis.dist_miner import (
 # Helper functions
 # ---------------------------------------------------------------------------
 
+
 def test_clean_drops_nan_and_inf():
     arr = _clean(np.array([1.0, np.nan, np.inf, -np.inf, 2.0, 3.0]))
     assert arr.tolist() == [1.0, 2.0, 3.0]
@@ -64,6 +65,7 @@ def test_is_discrete_false_when_too_many_uniques():
 # Error handling
 # ---------------------------------------------------------------------------
 
+
 def test_raises_on_too_few_samples():
     with pytest.raises(ValueError):
         mine_column_distribution([1.0, 2.0, 3.0])  # fewer than MIN_SAMPLES
@@ -76,6 +78,7 @@ def test_min_samples_constant_is_eight():
 # ---------------------------------------------------------------------------
 # Family selection
 # ---------------------------------------------------------------------------
+
 
 def test_normal_data_ranks_normal_near_top():
     np.random.seed(42)
@@ -127,6 +130,7 @@ def test_force_discrete_override_is_respected():
 # ---------------------------------------------------------------------------
 # AIC ordering & result structure
 # ---------------------------------------------------------------------------
+
 
 def test_valid_candidates_sorted_by_aic_ascending():
     np.random.seed(42)

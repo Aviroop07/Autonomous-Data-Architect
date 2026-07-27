@@ -34,13 +34,15 @@ class FakeAgent:
 async def _always_invalid_validator(output: object, context: str | None):
     return ValidationResult(
         is_valid=False,
-        errors=[ErrorRecord(
-            iteration=0,
-            error_type=ErrorType.MISSING,
-            severity=Severity.MEDIUM,
-            description="Missing relationship fact.",
-            signature_key="missing_relationship:a:b",
-        )],
+        errors=[
+            ErrorRecord(
+                iteration=0,
+                error_type=ErrorType.MISSING,
+                severity=Severity.MEDIUM,
+                description="Missing relationship fact.",
+                signature_key="missing_relationship:a:b",
+            )
+        ],
     )
 
 
@@ -68,12 +70,14 @@ def test_retry_loop_raises_when_serious_errors_remain_after_max_retries():
 async def _low_only_validator(output: object, context: str | None):
     return ValidationResult(
         is_valid=False,
-        errors=[ErrorRecord(
-            iteration=0,
-            error_type=ErrorType.MISSING,
-            severity=Severity.LOW,
-            description="Low-only warning.",
-        )],
+        errors=[
+            ErrorRecord(
+                iteration=0,
+                error_type=ErrorType.MISSING,
+                severity=Severity.LOW,
+                description="Low-only warning.",
+            )
+        ],
     )
 
 
@@ -101,23 +105,27 @@ def test_retry_loop_raises_only_latest_unresolved_blocking_errors():
         if call_count == 1:
             return ValidationResult(
                 is_valid=False,
-                errors=[ErrorRecord(
-                    iteration=0,
-                    error_type=ErrorType.MISSING,
-                    severity=Severity.MEDIUM,
-                    description="Old error.",
-                    signature_key="old:error",
-                )],
+                errors=[
+                    ErrorRecord(
+                        iteration=0,
+                        error_type=ErrorType.MISSING,
+                        severity=Severity.MEDIUM,
+                        description="Old error.",
+                        signature_key="old:error",
+                    )
+                ],
             )
         return ValidationResult(
             is_valid=False,
-            errors=[ErrorRecord(
-                iteration=0,
-                error_type=ErrorType.MISSING,
-                severity=Severity.MEDIUM,
-                description="New error.",
-                signature_key="new:error",
-            )],
+            errors=[
+                ErrorRecord(
+                    iteration=0,
+                    error_type=ErrorType.MISSING,
+                    severity=Severity.MEDIUM,
+                    description="New error.",
+                    signature_key="new:error",
+                )
+            ],
         )
 
     loop = RetryLoop(
