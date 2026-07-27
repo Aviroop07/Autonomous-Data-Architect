@@ -1,60 +1,87 @@
+# ---------------------------------------------------------------------------
+# ScribbleDB .gitignore
+#
+# This repo tracks a deliberately small surface: src/, paper/, the run scripts,
+# and the packaging files. Docs and data are excluded wholesale by the `*.md`
+# and `*.json` rules below and re-included case by case, so a new tracked file
+# of either kind needs an explicit `!` negation here.
+# ---------------------------------------------------------------------------
+
+# --- environments, secrets, caches -----------------------------------------
 **/venv/**
 .env
-all_cases.txt
-*.md
-*.json
-main.py
-temp.txt
 **/__pycache__/**
-**.png
-generated_generator.py
-research/
-output/
-paper_latex/
-poster/
-presentation/
-output*.txt
-run_log_*.txt
-run_test.py
 .pytest_cache/
 .ruff_cache/
-plan.txt
+requirements.txt
+
+# --- broad exclusions (see header; negations follow) ------------------------
+*.md
+!README.md
+*.json
 *.pdf
 !paper/*.pdf
+**.png
 *.mp4
-demo_paper/
-dataset/
-SchemaAgent/
-baselines/
-tmp/
-!README.md
-diagram_to_base64.py
-.claude/
-requirements.txt
-src/algorithm/
-src/backend/
-src/frontend/
-src/frontend_plan.md
-experiments/
-LLM4DBdesign/
 
-# Downloaded model weights (large, not part of the artifact)
-/models/
-
-# Local testing and scratch scripts
-/test_*.py
-/check_*.py
-/agent_schema_report.py
-/run_tier_d.ps1
-
-# Local logs and temporary output
+# --- generated run artifacts ------------------------------------------------
+# Everything a pipeline/eval/live run emits lands under artifacts/ (runs/,
+# live/, logs/, scratch/). One gitignored tree instead of run outputs scattered
+# across output/, experiments/, and the repo root.
+/artifacts/
+output/
+output*.txt
+run_log_*.txt
 /pipeline_*_log.txt
 /pipeline_log.txt
 /benerator.log
 /descr.txt
 /stage1_output.txt
+/s1_output.json
+/s2_output.json
+generated_generator.py
 
-# LaTeX build artifacts
+# --- large external assets (not part of the artifact) -----------------------
+/models/
+dataset/
+baselines/
+LLM4DBdesign/
+SchemaAgent/
+/API costing/
+
+# --- scratch / throwaway ----------------------------------------------------
+experiments/
+/prototype/
+tmp/
+research/
+all_cases.txt
+temp.txt
+plan.txt
+main.py
+run_test.py
+/test_*.py
+/check_*.py
+/agent_schema_report.py
+/run_tier_d.ps1
+diagram_to_base64.py
+/session-*.md
+
+# --- out of scope for the current phase -------------------------------------
+src/algorithm/
+src/backend/
+src/frontend/
+
+# --- other agent harnesses (local working memory, like .claude/) ------------
+.claude/
+.agents/
+.agent-data/
+.gemini/
+
+# --- paper build outputs ----------------------------------------------------
+paper_latex/
+poster/
+presentation/
+demo_paper/
 *.aux
 *.log
 *.out
@@ -64,8 +91,3 @@ LLM4DBdesign/
 *.fls
 *.fdb_latexmk
 *.synctex.gz
-
-# Prototype / throwaway experiments (not part of the artifact)
-/prototype/
-
-/API costing/
