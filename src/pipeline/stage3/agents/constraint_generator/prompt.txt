@@ -239,6 +239,16 @@ known, separately tracked follow-up.
   R-AST cannot express it (see the uniqueness section above).
 - Do NOT compare a column to a literal that describes a PROPERTY rather than a value.
   `status = 'Completed'` is a real comparison; `mrn = 'unique'` is not.
+- Do NOT emit a bound that is trivially true for the quantity being bounded. A fanout's
+  `child_count` is a count, so `child_count >= 0` asserts nothing -- a real run emitted
+  exactly that. "Parent has MULTIPLE children" means `child_count > 1`; "at least one"
+  means `child_count >= 1`. If a fact implies no actual numeric bound, emit no constraint
+  for it rather than a vacuous one.
+- A fact saying a parent has MULTIPLE children ("Patients are associated with multiple
+  Appointments", "Procedures require multiple pieces of Equipment") IS a fanout
+  constraint -- extract every one of them, not just the first you notice. Where the
+  relationship runs through a junction table, the fanout's child_table is that junction
+  table.
 - Do NOT emit any constraint with empty fact_references.
 - Do NOT reference tables that don't exist in the schema shard or stub tables.
 - Do NOT use Constraint for derived columns, correlations, or state-sequence facts -- use
