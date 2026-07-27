@@ -23,11 +23,17 @@ import argparse
 import json
 import os
 import sys
-sys.stdout.reconfigure(encoding='utf-8')
 import time
 import types
 from pathlib import Path
 from typing import Any, List, Optional
+
+# Sat in the middle of the import block, which made every import below it an
+# E402. Same effect here, at the end, and guarded the way the other runners
+# do it (typeshed types sys.stdout as TextIO, which has no reconfigure).
+_reconfigure = getattr(sys.stdout, "reconfigure", None)
+if _reconfigure:
+    _reconfigure(encoding="utf-8")
 
 PROJECT_ROOT = Path(__file__).parent
 # LLM4DBdesign modules use bare imports (no package prefix) -- add its dir to path first.

@@ -1,8 +1,6 @@
 from typing import List, Optional, Tuple
 import logging
 
-logger = logging.getLogger(__name__)
-
 from src.orchestration.stage1.loop_config import (
     make_enrichment_loop_config,
     make_stage1_loop_config,
@@ -35,6 +33,7 @@ from src.util.observability.llm_trace import (
 from src.util.core.search_tool import clear_search_cache
 from src.util.orchestration.loop import AgentLoop
 
+logger = logging.getLogger(__name__)
 
 NL_MAX_CHARS = 4000
 
@@ -76,7 +75,9 @@ async def _orchestrate_impl(
     logger.info("[Stage 1] Initializing extraction agent loop...")
     loop_config = make_stage1_loop_config(nl_description, model=model)
     result = await AgentLoop(loop_config).run(nl_description)
-    logger.info(f"[Stage 1] Extraction loop completed in {result.iteration_count} iterations. Total tokens so far: {result.total_tokens}")
+    logger.info(
+        f"[Stage 1] Extraction loop completed in {result.iteration_count} iterations. Total tokens so far: {result.total_tokens}"
+    )
 
     raw_extraction = result.node_outputs.get("extractor")
     extraction_output: RephrasedOutput = (

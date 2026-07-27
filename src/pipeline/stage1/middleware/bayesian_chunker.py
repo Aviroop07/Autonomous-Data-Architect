@@ -13,7 +13,10 @@ logger = logging.getLogger(__name__)
 
 # ── segment grouping ──────────────────────────────────────────────────────
 
-def _group_into_segments(facts: List[AtomicFact]) -> Tuple[List[List[AtomicFact]], np.ndarray, List[int]]:
+
+def _group_into_segments(
+    facts: List[AtomicFact],
+) -> Tuple[List[List[AtomicFact]], np.ndarray, List[int]]:
     """
     Group facts by (start_char, end_char) into segments.
     Enrichment facts (start_char=-1) each form their own segment.
@@ -42,6 +45,7 @@ def _group_into_segments(facts: List[AtomicFact]) -> Tuple[List[List[AtomicFact]
 
 # ── similarity matrices (segment-level) ───────────────────────────────────
 
+
 def _segment_embeddings(segments: List[List[AtomicFact]]) -> np.ndarray:
     texts: List[str] = []
     for seg in segments:
@@ -53,7 +57,9 @@ def _segment_embeddings(segments: List[List[AtomicFact]]) -> np.ndarray:
     return emb / norms
 
 
-def _build_similarities(segments: List[List[AtomicFact]]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _build_similarities(
+    segments: List[List[AtomicFact]],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Returns (sim, adj, ref):
       sim[i,j] = cosine similarity of segment centroids in [0, 1]
@@ -66,10 +72,13 @@ def _build_similarities(segments: List[List[AtomicFact]]) -> Tuple[np.ndarray, n
 
     # Position
     first_fact = [seg[0] for seg in segments]
-    positions = np.array([
-        (f.start_char + f.end_char) // 2 if f.start_char >= 0 else -1
-        for f in first_fact
-    ], dtype=np.float64)
+    positions = np.array(
+        [
+            (f.start_char + f.end_char) // 2 if f.start_char >= 0 else -1
+            for f in first_fact
+        ],
+        dtype=np.float64,
+    )
     adj = np.ones((S, S))
     for i in range(S):
         for j in range(S):
@@ -96,6 +105,7 @@ def _build_similarities(segments: List[List[AtomicFact]]) -> Tuple[np.ndarray, n
 
 # ── Beta MoM ──────────────────────────────────────────────────────────────
 
+
 def _beta_mom(values: np.ndarray) -> Tuple[float, float]:
     if len(values) == 0:
         return 1.0, 1.0
@@ -110,6 +120,7 @@ def _beta_mom(values: np.ndarray) -> Tuple[float, float]:
 
 
 # ── Bayesian Partition Sampler ────────────────────────────────────────────
+
 
 class BayesianChunker:
     """
@@ -193,7 +204,15 @@ class BayesianChunker:
         diff_logpdf = beta_dist.logpdf(w_clip, a_diff, b_diff)
 
         for sweep in range(total_sweeps):
-            self._sweep(z, cluster_members, valid_clusters, same_logpdf, diff_logpdf, ref_log_boost, S)
+            self._sweep(
+                z,
+                cluster_members,
+                valid_clusters,
+                same_logpdf,
+                diff_logpdf,
+                ref_log_boost,
+                S,
+            )
 
             # Re-estimate parameters
             if sweep > 0 and sweep % self.re_estimate_every == 0:
@@ -202,7 +221,7 @@ class BayesianChunker:
                 )
                 w = lam * adj + (1.0 - lam) * sim
                 np.fill_diagonal(w, 1.0)
-                
+
                 w_clip = np.clip(w, 1e-9, 1.0 - 1e-9)
                 same_logpdf = beta_dist.logpdf(w_clip, a_same, b_same)
                 diff_logpdf = beta_dist.logpdf(w_clip, a_diff, b_diff)
@@ -230,16 +249,15 @@ class BayesianChunker:
                 chunk.extend(segments[seg_idx])
             final_chunks.append(chunk)
 
-        logger.info(f"[BayesianChunker] Extracted {len(final_chunks)} final chunks "
-                     f"(recorded {n_recorded} posterior samples).")
+        logger.info(
+            f"[BayesianChunker] Extracted {len(final_chunks)} final chunks "
+            f"(recorded {n_recorded} posterior samples)."
+        )
         return ChunkedPlan(core_modeling_facts=facts, chunks=final_chunks)
 
     # ── helpers ──────────────────────────────────────────────────────────
 
-    def _log_state(
-        self, sim, adj, ref, w,
-        lam, a_same, b_same, a_diff, b_diff
-    ):
+    def _log_state(self, sim, adj, ref, w, lam, a_same, b_same, a_diff, b_diff):
         same_edges = w[(w >= 0.3) & (w < 1.0)]
         diff_edges = w[(w < 0.3) & (w > 0.0)]
         mean_same = f"{np.mean(same_edges):.3f}" if len(same_edges) else "N/A"
@@ -254,9 +272,14 @@ class BayesianChunker:
         )
 
     def _sweep(
-        self, z: List[int], cluster_members: Dict[int, List[int]],
-        valid_clusters: set, same_logpdf: np.ndarray, diff_logpdf: np.ndarray,
-        ref_log_boost: np.ndarray, S: int,
+        self,
+        z: List[int],
+        cluster_members: Dict[int, List[int]],
+        valid_clusters: set,
+        same_logpdf: np.ndarray,
+        diff_logpdf: np.ndarray,
+        ref_log_boost: np.ndarray,
+        S: int,
     ):
         order = self.rng.permutation(S)
         for s in order:
@@ -301,9 +324,16 @@ class BayesianChunker:
             cluster_members[z[s]].append(s)
 
     def _re_estimate(
-        self, z: List[int], valid_clusters: set,
-        sim: np.ndarray, adj: np.ndarray, w: np.ndarray,
-        a_same: float, b_same: float, a_diff: float, b_diff: float,
+        self,
+        z: List[int],
+        valid_clusters: set,
+        sim: np.ndarray,
+        adj: np.ndarray,
+        w: np.ndarray,
+        a_same: float,
+        b_same: float,
+        a_diff: float,
+        b_diff: float,
     ) -> Tuple[float, float, float, float, float]:
         S = len(z)
         within_vals: List[float] = []
@@ -326,23 +356,40 @@ class BayesianChunker:
                     between_sim.append(sim[i, j])
 
         # Update λ: fraction of total separation from adjacency
-        d_adj = float(np.mean(within_adj)) - float(np.mean(between_adj)) if within_adj and between_adj else 0.0
-        d_sim = float(np.mean(within_sim)) - float(np.mean(between_sim)) if within_sim and between_sim else 0.0
+        d_adj = (
+            float(np.mean(within_adj)) - float(np.mean(between_adj))
+            if within_adj and between_adj
+            else 0.0
+        )
+        d_sim = (
+            float(np.mean(within_sim)) - float(np.mean(between_sim))
+            if within_sim and between_sim
+            else 0.0
+        )
         lam_new = d_adj / (d_adj + d_sim + 1e-9)
         lam_new = float(np.clip(lam_new, 0.1, 0.9))
 
         # Update Beta parameters via MoM
-        a_same_new, b_same_new = _beta_mom(np.array(within_vals)) if len(within_vals) >= 2 else (a_same, b_same)
-        a_diff_new, b_diff_new = _beta_mom(np.array(between_vals)) if len(between_vals) >= 2 else (a_diff, b_diff)
+        a_same_new, b_same_new = (
+            _beta_mom(np.array(within_vals))
+            if len(within_vals) >= 2
+            else (a_same, b_same)
+        )
+        a_diff_new, b_diff_new = (
+            _beta_mom(np.array(between_vals))
+            if len(between_vals) >= 2
+            else (a_diff, b_diff)
+        )
 
         return lam_new, a_same_new, b_same_new, a_diff_new, b_diff_new
 
     def _extract_partition(self, coassoc: np.ndarray, S: int) -> List[List[int]]:
         if S == 0:
             return []
-        # Hierarchical clustering on co-association distance
-        dist = np.clip(1.0 - coassoc, 0.0, 1.0)
-        # Extract clusters by thresholding
+        # Extract clusters by thresholding the co-association matrix directly.
+        # A `dist = np.clip(1.0 - coassoc, 0, 1)` line used to sit here under a
+        # "hierarchical clustering" comment; nothing consumed it -- the method
+        # below is plain thresholding, not hierarchical clustering.
         # Use 0.5 as the threshold — pairs that co-occur more than half the time
         threshold = 0.5
         remaining = set(range(S))

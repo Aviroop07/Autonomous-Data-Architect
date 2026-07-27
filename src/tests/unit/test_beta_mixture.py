@@ -204,7 +204,7 @@ class TestRunConfig:
         assert ok or not ok
 
     def test_posteriors_monotonic_for_two_clusters(self):
-        rng = np.random.default_rng(42)
+        np.random.default_rng(42)
         low = np.array([0.10, 0.12, 0.15, 0.18, 0.20, 0.22, 0.25, 0.28])
         high = np.array([0.85, 0.88, 0.90, 0.92])
         x = np.concatenate([low, high])
@@ -285,7 +285,7 @@ class TestFitBetaMixture:
         assert a0 == 1.0
 
     def test_dominant_same_cluster_returns_pi_above_zero(self):
-        rng = np.random.default_rng(42)
+        np.random.default_rng(42)
         low = np.array([0.10, 0.12, 0.15, 0.18])
         high = np.array([0.85, 0.88, 0.90, 0.92, 0.95, 0.96])
         x = np.concatenate([low, high])
