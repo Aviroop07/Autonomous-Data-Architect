@@ -13,16 +13,14 @@ relation/schema.py to run at all.
 
 from __future__ import annotations
 
-import re
 from typing import Annotated, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, model_validator
 
 from src.util.constraint_model.condition.expressions import RExprUnion
 from src.util.constraint_model.condition.predicates import RPredicateUnion
-
-_UPPER_SNAKE_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
-_LOWER_SNAKE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+from src.util.naming import is_lower_snake as _is_lower_snake
+from src.util.naming import is_upper_snake as _is_upper_snake
 
 # The locked aggregate-function catalogue (Section 3.3).
 AggregateFn = Literal[
@@ -45,14 +43,6 @@ AggregateFn = Literal[
 # column's real type from the source's synthesized schema -- external context
 # nodes.py's self-contained _validate() doesn't have. That check belongs in
 # relation/validate.py (task #27), which runs after relation/schema.py exists.
-
-
-def _is_upper_snake(name: str) -> bool:
-    return bool(_UPPER_SNAKE_RE.fullmatch(name))
-
-
-def _is_lower_snake(name: str) -> bool:
-    return bool(_LOWER_SNAKE_RE.fullmatch(name))
 
 
 class JoinCondition(BaseModel):

@@ -26,16 +26,11 @@ appear as the sole, top-level Condition of their own Constraint
 from __future__ import annotations
 
 import math
-import re
 from typing import Annotated, Dict, List, Literal, Union
 
 from pydantic import BaseModel, Field
 
-_LOWER_SNAKE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
-
-
-def _is_lower_snake(name: str) -> bool:
-    return bool(_LOWER_SNAKE_RE.fullmatch(name))
+from src.util.naming import is_lower_snake as _is_lower_snake
 
 
 def _as_float(value: Union[float, List[str], List[float]]) -> Union[float, None]:

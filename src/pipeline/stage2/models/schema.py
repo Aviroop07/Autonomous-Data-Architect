@@ -6,24 +6,18 @@ from pydantic import BaseModel, Field, model_validator, computed_field
 from src.util.orchestration.loop_types import LoopOutputModel
 from src.pipeline.stage2.models.data_types import DataType
 
+# Re-exported: `is_upper_snake`/`is_lower_snake` have long been imported from
+# this module by other Stage 2 code, so the names stay available here even
+# though the rules themselves now live in src/util/naming.py.
+from src.util.naming import is_lower_snake, is_upper_snake
+
 if TYPE_CHECKING:
     from src.pipeline.stage2.models.registry import TableFactRegistry
-
-UPPER_SNAKE = re.compile(r"^[A-Z][A-Z0-9_]*$")
-LOWER_SNAKE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 FORBIDDEN_TABLE_SUFFIXES = {"FACT", "DIM", "ID", "ATTR", "TABLE"}
 
 SINGULAR_S_SUFFIXES = ("SS", "IS", "US")
 SINGULAR_S_EXCEPTIONS = {"NEWS", "SERIES", "SPECIES"}
-
-
-def is_upper_snake(value: str) -> bool:
-    return bool(UPPER_SNAKE.fullmatch(value))
-
-
-def is_lower_snake(value: str) -> bool:
-    return bool(LOWER_SNAKE.fullmatch(value))
 
 
 def to_snake_case(s: str) -> str:
