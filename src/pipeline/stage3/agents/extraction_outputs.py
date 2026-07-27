@@ -99,10 +99,7 @@ class UnifiedOutput(LoopOutputModel, UnifiedExtractionOutput):
 
 
 class AuditReport(LoopOutputModel):
-    """Shared output shape for the 3 family-specific auditor agents
-    (statistical/structural/logic). Each auditor gets its own tailored
-    prompt (different semantic failure modes per family), but the
-    structured output they produce is the same shape -- a second,
+    """Output shape for the constraint auditor -- a second,
     independently-prompted LLM re-reading the original NL facts against
     the extractor's structured output, catching what canonicalize()
     structurally can't (a dropped condition, wrong-table attribution, a
