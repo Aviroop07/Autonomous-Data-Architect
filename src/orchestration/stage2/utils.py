@@ -16,6 +16,7 @@ from src.util.orchestration.loop_types import (
     LoopConfig,
     LoopContext,
     LoopOutputModel,
+    NodeOutputRecord,
 )
 
 from src.pipeline.stage2.agents.er_extractor.agent import (
@@ -54,10 +55,15 @@ class ERExtractorLoopAgent(LoopAgent):
     def build_context(self, ctx: LoopContext) -> str:
         current_round_feedback = []
 
-        # Harvest deterministic errors from the Filter
+        # Harvest deterministic errors from the Filter. Advisories are harvested
+        # unconditionally: they never fail a model, so waiting for is_valid=False
+        # to surface them would mean a correct-but-improvable draft never heard
+        # about them at all.
         filter_report = ctx.node_outputs.get("filter")
-        if filter_report and not filter_report.is_valid:
-            current_round_feedback.extend(getattr(filter_report, "det_errors", []))
+        if filter_report is not None:
+            if not filter_report.is_valid:
+                current_round_feedback.extend(getattr(filter_report, "det_errors", []))
+            current_round_feedback.extend(getattr(filter_report, "advisories", []))
 
         # Harvest semantic critique from the Auditor
         auditor_report = ctx.node_outputs.get("auditor")
@@ -149,12 +155,78 @@ class ERAuditorLoopAgent(LoopAgent):
 # plus two nodes of a second -- the extractor got the auditor's fixes once, but
 # nothing ever re-checked the corrected model. Same defect class as Stage 3's
 # Phase 1 loop, which had exactly this and could not retry at all.
+#
+# rounds * 3 is exact only while every pass reaches the auditor. A HARD filter
+# rejection still routes back to the extractor and makes that pass two nodes
+# long, so the conversion remains an upper bound on rounds rather than a promise
+# of them. It used to be a much weaker bound: soft FK-naming advice also failed
+# the model, so passes that had nothing structurally wrong with them ended at
+# the filter too. Those no longer cost a round, which is why the audit is now
+# reached in the common case at all.
 SHARD_GRAPH_NODE_COUNT = 3
 
 
 def shard_rounds_to_max_iter(rounds: int) -> int:
     """Convert "N audited rounds" into the raw per-node budget AgentLoop counts."""
     return max(1, rounds) * SHARD_GRAPH_NODE_COUNT
+
+
+def select_best_shard_model(
+    trace: List[NodeOutputRecord],
+) -> Tuple[Optional[ConceptualModel], str]:
+    """Pick the extractor draft with the best MEASURED verdict, not the last one.
+
+    The loop returns whatever the extractor produced most recently, and when the
+    budget runs out mid-round that draft is by construction one no reviewer ever
+    saw. A live run made the cost of that concrete: the auditor's finding count
+    went 5 -> 8 -> 5 across three audits, so the drafts were not monotonically
+    improving, and the model that shipped was a fourth draft with no verdict at
+    all. Returning the last draft is then strictly a gamble.
+
+    So score each draft by the reviews that actually followed it:
+      - a draft the deterministic filter rejected is disqualified outright, since
+        those errors are structural rather than advisory;
+      - otherwise rank by how many findings the next audit raised, fewest first;
+      - break ties toward the later draft, which has seen more feedback.
+    A draft no reviewer reached scores as unmeasured and is used only when no
+    measured draft exists at all -- which is also the single-round case, where
+    this reduces to the previous behavior.
+    """
+    best: Optional[ConceptualModel] = None
+    best_findings: Optional[int] = None
+    last_unmeasured: Optional[ConceptualModel] = None
+
+    for idx, record in enumerate(trace):
+        if record.node != "extractor" or not isinstance(record.output, ConceptualModel):
+            continue
+        candidate = record.output
+
+        findings: Optional[int] = None
+        disqualified = False
+        # Reviews that belong to this draft are the ones before the extractor runs again.
+        for later in trace[idx + 1 :]:
+            if later.node == "extractor":
+                break
+            if later.node == "filter" and not getattr(later.output, "is_valid", True):
+                disqualified = True
+                break
+            if isinstance(later.output, ConceptualCritiqueReport):
+                findings = 0 if later.output.is_valid else len(later.output.fixes)
+                break
+
+        if disqualified:
+            continue
+        if findings is None:
+            last_unmeasured = candidate
+            continue
+        if best_findings is None or findings <= best_findings:
+            best, best_findings = candidate, findings
+
+    if best is not None:
+        return best, f"best audited draft, {best_findings} finding(s)"
+    if last_unmeasured is not None:
+        return last_unmeasured, "no draft was ever audited; using the last one"
+    return None, "no usable draft was produced"
 
 
 async def run_er_extractor_loop(
@@ -169,7 +241,7 @@ async def run_er_extractor_loop(
 
     extractor = ERExtractorLoopAgent(facts, nl_query, model)
     auditor = ERAuditorLoopAgent(facts, model)
-    filter_node = ConceptualFilterLoopAgent()
+    filter_node = ConceptualFilterLoopAgent([f.id for f in facts])
 
     config = LoopConfig(
         agents={
@@ -237,8 +309,9 @@ async def run_er_extractor_loop(
             result.iteration_count,
         )
 
-    output = result.node_outputs.get("extractor")
-    if not isinstance(output, ConceptualModel):
+    output, reason = select_best_shard_model(result.output_trace)
+    logger.info("  [Stage 2] shard model selected: %s", reason)
+    if output is None:
         output = ConceptualModel(
             entities=[], relationships=[], functional_dependencies=[]
         )

@@ -311,6 +311,25 @@ class RetryBudget:
         self.remaining += amount
 
 
+class NodeOutputRecord(BaseModel):
+    """One node execution's output, kept in the order it was produced.
+
+    `LoopResult.node_outputs` keeps only the LAST output per node, which is
+    lossy in a way that matters when a loop exhausts its budget: a
+    generator/critic graph then returns the generator's most recent draft,
+    which by construction no critic has seen. Callers that want to return
+    their best MEASURED candidate rather than their last unmeasured one need
+    the full sequence, so the loop records it and lets the caller define
+    "best" -- the loop itself has no notion of output quality.
+    """
+
+    iteration: int
+    node: str
+    output: LoopOutputModel
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+
 class LoopResult(BaseModel):
     final_output: Optional[LoopOutputModel]
     final_node: str
@@ -323,6 +342,11 @@ class LoopResult(BaseModel):
     node_outputs: dict[str, LoopOutputModel] = Field(
         default_factory=dict,
         description="Last output per named node -- use this to retrieve any node's final artifact",
+    )
+    output_trace: list[NodeOutputRecord] = Field(
+        default_factory=list,
+        description="Every node execution's output in production order, so a caller "
+        "can pick its best-measured candidate instead of the last one",
     )
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -338,6 +362,7 @@ class _LoopState:
     initial_context: str
     node_outputs: dict[str, LoopOutputModel] = field(default_factory=dict)
     node_prev: dict[str, LoopOutputModel] = field(default_factory=dict)
+    output_trace: list[NodeOutputRecord] = field(default_factory=list)
     history: list[HistoryEntry] = field(default_factory=list)
     det_errors: dict[str, list[str]] = field(default_factory=dict)
     error_accumulator: list[str] = field(default_factory=list)

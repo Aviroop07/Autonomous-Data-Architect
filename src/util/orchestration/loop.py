@@ -25,6 +25,7 @@ from src.util.orchestration.loop_types import (
     LoopContext,
     LoopOutputModel,
     LoopResult,
+    NodeOutputRecord,
     RetryBudget,
     _LoopState,
 )
@@ -191,6 +192,9 @@ class AgentLoop:
 
             # 5. Advance state.
             state.node_outputs[current_node] = output
+            state.output_trace.append(
+                NodeOutputRecord(iteration=iteration, node=current_node, output=output)
+            )
             final_output = output
             final_node = current_node
 
@@ -236,6 +240,7 @@ class AgentLoop:
                 else bool(state.det_errors.get(final_node))
             ),
             node_outputs=dict(state.node_outputs),
+            output_trace=list(state.output_trace),
         )
 
     # ------------------------------------------------------------------

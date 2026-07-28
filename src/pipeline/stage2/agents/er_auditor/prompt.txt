@@ -54,17 +54,29 @@ You will receive:
     attribute clearly intended to hold another entity's key). Such attributes become plain
     unconstrained columns with no foreign key, silently losing the linkage -- critique them
     strongly and state which relationship should replace them.
-11. **Provenance completeness.** For every statistical, distributional, conditional, or
-    correlational fact, verify its ID appears in the `source_fact_ids` of EVERY attribute
-    and entity it actually references -- not only the ones it originally created, and
-    including references that span different entities. A fact that mentions an existing
-    attribute without creating it must still be listed on that attribute. When one is
-    missing, name the fact ID and the exact element(s) it must be added to.
-12. **Time-varying properties.** When the facts imply a property's value changes over time
+11. **Time-varying properties.** When the facts imply a property's value changes over time
     -- transition, sequencing/ordering, lifecycle or status progression, or historical
     reference language -- the model must contain a dedicated event entity (weak, with the
     parent as `owner`, holding the tracked value and a temporal attribute, linked 1:N to
     the parent). If instead only a single scalar attribute exists, flag it.
+
+### What counts as worth reporting
+Report only defects that would change the database generated from this model -- a
+different table, a different column, a different key, a foreign key on a different side,
+a different nullability. Everything you report costs a full regeneration of the model, and
+a long list of minor findings crowds out the structural ones and stops the model
+converging: the generator, given many fixes at once, tends to apply some and regress
+others. Prefer a short list you are confident in over an exhaustive one.
+
+Before emitting a fix, confirm all three:
+- The defect is real. Re-read the model JSON and check the element is actually absent or
+  actually wrong -- not merely named differently from what you expected, and not present
+  under another entity you overlooked. A fix that asks for something the model already
+  contains is worse than silence, because it wastes a whole round.
+- It is actionable. State a specific change to a specific named element. If you cannot
+  name what to change, you do not yet have a finding.
+- It contradicts the facts. An improvement you would prefer stylistically, or extra
+  modelling the facts do not require, is not a defect.
 
 ### How to report
 - Set `is_valid=true` and return an EMPTY `fixes` list when you find no defect. Set
@@ -78,7 +90,7 @@ You will receive:
     inconsistency that proves the current state is wrong.
 - One defect per fix. Do not bundle unrelated corrections into a single entry.
 - Order fixes by severity: structural errors (wrong cardinality direction, missing entity,
-  invalid owner reference) before cosmetic or provenance-completeness ones.
+  invalid owner reference) first, since a truncated list must keep those.
 
 ## RESTRICTIONS
 - Do NOT critique the absence of surrogate keys -- the downstream mapper supplies them.
@@ -88,3 +100,6 @@ You will receive:
   to the input, not to enrich the model with domain knowledge of your own.
 - Do NOT restate correct parts of the model back as fixes, and do not emit a fix whose
   content is "this is fine".
+- Do NOT critique `source_fact_ids` coverage. A deterministic check already reports exactly
+  which fact IDs the model cites nowhere, and it does so without guessing; your reading it
+  again adds no information and displaces findings only you can make.
