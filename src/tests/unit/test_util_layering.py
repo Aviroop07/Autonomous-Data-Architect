@@ -20,12 +20,12 @@ import pytest
 
 UTIL = pathlib.Path("src/util")
 
-# The one documented exception. bridge/from_cross_shard.py wraps Stage 3's four
-# extraction shapes into constraint-model terms, so it necessarily names Stage 3
-# types. The audit's own conclusion was that this file belongs under
-# src/pipeline/stage3/ rather than in util/; until it moves, it is exempted here
-# explicitly rather than silently.
-ALLOWED = {pathlib.Path("src/util/constraint_model/bridge/from_cross_shard.py")}
+# There are no exceptions any more. The last one was bridge/from_cross_shard.py,
+# which wraps Stage 3's four extraction shapes into constraint-model terms and so
+# necessarily names Stage 3 types -- the audit's conclusion was that it therefore
+# belongs under src/pipeline/stage3/, and it has now moved there. The set is kept
+# rather than deleted so that re-exempting a module is a visible, deliberate act.
+ALLOWED: set[pathlib.Path] = set()
 
 
 def _util_modules() -> list[pathlib.Path]:

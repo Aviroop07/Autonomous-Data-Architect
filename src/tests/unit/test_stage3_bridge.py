@@ -1,4 +1,4 @@
-"""Tests for src/util/constraint_model/bridge/from_cross_shard.py."""
+"""Tests for src/pipeline/stage3/bridge/from_cross_shard.py."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from src.util.constraint_model.relation.nodes import (
     RawSQL,
 )
 from src.util.constraint_model.relation.nodes import JoinCondition as CSJoinCondition
-from src.util.constraint_model.bridge.from_cross_shard import bridge_constraints
+from src.pipeline.stage3.bridge.from_cross_shard import bridge_constraints
 from src.util.constraint_model.condition.cohesive import Correlated, Distributed
 from src.util.constraint_model.condition.cohesive import StateSequence as MStateSequence
 from src.util.constraint_model.relation.nodes import (

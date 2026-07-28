@@ -38,7 +38,7 @@ from src.orchestration.stage3.context import (
 from src.util.schema_model.render import schema_to_prompt_text
 from src.orchestration.stage3.extraction import _rerun_shard
 from src.orchestration.stage3.state import _ShardState, _merge_all
-from src.util.constraint_model.bridge.from_cross_shard import bridge_constraints
+from src.pipeline.stage3.bridge.from_cross_shard import bridge_constraints
 from src.util.constraint_model.conflicts.evaluate import evaluate_constraints
 from src.util.constraint_model.conflicts.models import Conflict
 from src.util.constraint_model.relation.nodes import extract_base_tables
