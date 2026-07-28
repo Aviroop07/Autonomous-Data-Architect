@@ -31,15 +31,23 @@ def test_three_rounds_affords_two_genuine_retries():
 
 
 def test_two_rounds_affords_one_genuine_retry():
-    """The default, as of the 2-vs-3 cost/recall tradeoff: one initial pass
-    plus one retry. Measured on the hospital spec (experiments/
-    stage3_recall_rate.py), 3 rounds took fanout recall 92% -> 100% but cost
-    ~2.5x the tokens/time of the old always-one-pass behaviour; recall was
-    already saturated by the second round in every run that needed a retry at
-    all. 2 rounds is a considered default trading some of that headroom back
-    for ~1.7x instead of ~2.5x -- not a re-measured one, so revisit with a
-    direct 2-vs-3 comparison before an eval campaign if the budget allows."""
     assert rounds_to_max_iter(2) == 2 * GENERATOR_GRAPH_NODE_COUNT
+
+
+def test_the_default_is_three_rounds_because_two_measurably_loses_recall():
+    """Pins the empirically-chosen default so it is not re-argued downward.
+
+    This was briefly set to 2 on the reasoning that recall looked saturated by
+    the second round. A direct 2-vs-3 measurement on the hospital spec's fixed
+    fact set (5 runs each, experiments/stage3_recall_rate.py) disproved it:
+    3 rounds gives 25/25 fanout recall, 2 rounds gives 24/25 -- one run in five
+    dropping a fanout, i.e. exactly the variance the retry budget exists to
+    remove. The saving was also only ~21% of tokens, not the ~1.7x-vs-2.5x the
+    round count suggests, because the dominant cost is the first full pass and a
+    retry only re-sends what the auditor flagged."""
+    from src.orchestration.stage3 import entry
+
+    assert entry._DEFAULT_PHASE1_ROUNDS == 3
 
 
 def test_rounds_below_one_still_yields_a_usable_budget():

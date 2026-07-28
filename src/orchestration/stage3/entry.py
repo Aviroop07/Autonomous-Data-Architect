@@ -93,7 +93,7 @@ logger = logging.getLogger(__name__)
 # max_retries. Module-level so a test can pin it directly rather than via
 # inspect.getsource -- see its use in orchestrate() for the cost/recall
 # tradeoff this value encodes.
-_DEFAULT_PHASE1_ROUNDS = 2
+_DEFAULT_PHASE1_ROUNDS = 3
 
 
 async def orchestrate(
@@ -193,17 +193,23 @@ async def orchestrate(
     # every validation error and audit finding was computed and then thrown
     # away.
     #
-    # _DEFAULT_PHASE1_ROUNDS (module-level, above) is 2 rounds -- one initial
-    # pass plus one genuine retry -- not 3. Measured on the hospital spec's
-    # fixed fact set (experiments/stage3_recall_rate.py): 3 rounds took fanout
-    # recall from 92% to 100% (25/25) but cost ~2.5x the tokens/time of the old
-    # always-one-pass behaviour (56-119s/~42k tok per shard vs ~28s/~17k).
-    # Recall was already saturated by the SECOND round in every run that
-    # needed a retry at all -- the auditor's fix-and-recheck loop is what
-    # closed the gap, not a third attempt -- so 2 rounds should retain most of
-    # the accuracy gain at roughly 1.7x rather than 2.5x. Revisit with a direct
-    # 2-vs-3 measurement before an eval campaign if token budget allows; this
-    # is a considered default, not a re-measured one.
+    # _DEFAULT_PHASE1_ROUNDS (module-level, above) is 3: one initial pass plus
+    # two genuine retries. This was briefly set to 2 on the reasoning that
+    # recall looked saturated by the second round; a direct 2-vs-3 measurement
+    # on the hospital spec's fixed fact set disproved that, so the value is
+    # empirical rather than argued. Five runs each, via
+    # experiments/stage3_recall_rate.py:
+    #
+    #   3 rounds -> 25/25 fanout recall (100%), ~41.9k tok/run
+    #   2 rounds -> 24/25 fanout recall  (96%), ~33.1k tok/run
+    #
+    # The dropped target under 2 rounds was a fanout that one run in five
+    # missed, i.e. dropping the third round reintroduced exactly the run-to-run
+    # variance the retry budget exists to remove. And the saving is only ~21%,
+    # not the ~1.7x-vs-2.5x that the round count naively suggests, because the
+    # dominant cost is the FIRST pass over the whole fact set -- a retry only
+    # re-sends what the auditor flagged. Paying ~21% more tokens for
+    # deterministic recall is the right trade for a reproducibility artifact.
     resolved_rerun_max_retries = max_retries if max_retries is not None else 5
     phase1_max_iter = rounds_to_max_iter(
         max_retries if max_retries is not None else _DEFAULT_PHASE1_ROUNDS
