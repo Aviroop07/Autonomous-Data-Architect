@@ -9,7 +9,10 @@ and was dropped along with the facts only it represented.
 
 from __future__ import annotations
 
+import logging
 from typing import List
+
+import pytest
 
 from src.pipeline.stage1.models.rephrased_nl import AtomicFact
 from src.util.schema_model.data_types import DataType
@@ -90,7 +93,9 @@ def test_owner_is_remapped_when_the_parent_merges_under_another_name() -> None:
     assert package.owner != "Package"
 
 
-def test_an_unresolvable_owner_is_demoted_and_flagged_not_left_dangling() -> None:
+def test_an_unresolvable_owner_is_demoted_and_warned_not_left_dangling(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     shard = ConceptualModel(
         entities=[
             _entity("Package", "package_code", weak=True, owner="NoSuchEntity"),
@@ -98,14 +103,19 @@ def test_an_unresolvable_owner_is_demoted_and_flagged_not_left_dangling() -> Non
         relationships=[],
         functional_dependencies=[],
     )
-    merged, flags = merge_all_shards([shard], _facts(2))
+    with caplog.at_level(logging.WARNING):
+        merged, flags = merge_all_shards([shard], _facts(2))
 
     package = _find(merged, "Package")
     assert not package.is_weak, "a dangling owner must not reach schema validation"
     assert package.owner is None
-    assert any(f.flag_type == "UNRESOLVED_WEAK_OWNER" for f in flags), (
+    assert any("Demoted to a strong entity" in r.message for r in caplog.records), (
         "demotion loses the parent key, so it must not happen silently"
     )
+    # Deliberately NOT a ConflictFlag: every flag-graph component, singletons
+    # included, costs an adjudicator LLM call, and there is nothing here for a
+    # merge/rename resolver to decide.
+    assert not any(f.flag_type == "UNRESOLVED_WEAK_OWNER" for f in flags)
 
 
 def test_a_strong_entity_is_not_made_weak() -> None:

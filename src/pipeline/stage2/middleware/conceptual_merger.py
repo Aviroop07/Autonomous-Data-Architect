@@ -1,3 +1,5 @@
+import logging
+
 import numpy as np
 from collections import Counter
 from typing import List, Optional, Tuple
@@ -16,6 +18,10 @@ from src.util.algorithms.beta_mixture import (
     compute_flag_posteriors,
 )
 from src.pipeline.stage2.models.conflicts import ConflictFlag
+
+# The verbose `log()` inside merge_all_shards is `print if verbose`, so it is
+# invisible on a normal run. Consequential events need a real logger.
+logger = logging.getLogger(__name__)
 
 
 def merge_all_shards(
@@ -264,16 +270,21 @@ def merge_all_shards(
             # A dangling or self-referential owner is rejected downstream by
             # Schema validation, so demote rather than emit a broken model --
             # but say so, because the entity has just lost its parent link.
-            flags.append(
-                ConflictFlag(
-                    flag_type="UNRESOLVED_WEAK_OWNER",
-                    entities=[e.name],
-                    message=(
-                        f"Weak entity {e.name} named owner '{e.owner}', which does "
-                        "not resolve to a merged entity. Demoted to a strong "
-                        "entity, so it no longer inherits a key from its parent."
-                    ),
-                )
+            #
+            # Reported as a WARNING rather than a ConflictFlag on purpose. Every
+            # connected component of the flag graph -- including a singleton, and
+            # a one-entity flag is always a singleton -- becomes an adjudicator
+            # LLM call. That is right for IDENTIFIER_DISAGREEMENT, where an
+            # adjudicator genuinely picks between candidate keys, and wrong here:
+            # the owner does not exist, so there is nothing to adjudicate, and
+            # handing it to a merge/rename resolver invites a spurious action at
+            # the cost of a call per demoted entity.
+            logger.warning(
+                "[Merger] Weak entity %s named owner '%s', which does not resolve "
+                "to a merged entity. Demoted to a strong entity, so it no longer "
+                "inherits a key from its parent and that linkage is lost.",
+                e.name,
+                e.owner,
             )
             e.is_weak = False
             e.owner = None
