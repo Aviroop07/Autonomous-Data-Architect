@@ -652,6 +652,32 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
             # as "hollow" even if they only have a PK (dropping orphans referencing FKs).
             referred = {r.referred_table for r in (schema.relationships or [])}
 
+            # Facts that some OTHER table also carries. A hollow table whose facts
+            # all appear elsewhere is genuinely redundant; one holding the only
+            # copy of a fact is not, and dropping it deletes that fact from the
+            # schema entirely.
+            #
+            # Measured on a live run: the extractor emitted a PACKAGE entity with
+            # no attributes and no identifier, from two facts -- one asserting the
+            # entity exists, one asserting a parent contains several of them --
+            # but did NOT emit the containing relationship, so nothing referenced
+            # PACKAGE and the FK-target exemption above did not apply. PACKAGE was
+            # dropped, and Stage 3 then could not extract the fanout that second
+            # fact states. A Stage 2 cleanup silently cost a Stage 3 constraint.
+            #
+            # The root cause is upstream (the relationship should have been
+            # extracted), but this is the deterministic backstop for the whole
+            # class: never let a cleanup step be the reason a fact vanishes.
+            facts_held_elsewhere: Dict[str, Set[int]] = {}
+            for t in schema.tables:
+                own = set(t.source_fact_ids or [])
+                for c in t.columns:
+                    own.update(c.source_fact_ids or [])
+                facts_held_elsewhere[t.name] = own
+            all_fact_ids: Set[int] = set()
+            for ids in facts_held_elsewhere.values():
+                all_fact_ids |= ids
+
             seen_t = set()
             unique_tables = []
             for t in schema.tables:
@@ -678,11 +704,42 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                     and not non_pk_cols
                     and len(schema.tables) > 1
                 ):
-                    logger.warning(
-                        "  [Mapper] Dropping hollow table '%s': primary key only, no "
-                        "other columns, and nothing references it.",
-                        t.name,
-                    )
+                    own_facts = facts_held_elsewhere.get(t.name, set())
+                    elsewhere: Set[int] = set()
+                    for other_name, ids in facts_held_elsewhere.items():
+                        if other_name != t.name:
+                            elsewhere |= ids
+                    exclusive = own_facts - elsewhere
+                    if exclusive:
+                        # Deliberately still dropped, and deliberately noisy about
+                        # it. KEEPING it was tried and is worse: Schema._validate()
+                        # rejects a primary-key-only table outright, so this drop
+                        # is what SATISFIES validation -- retaining the table turns
+                        # a silent constraint loss into a hard mapper failure.
+                        # Fixing it here is the wrong layer; the real fix is
+                        # upstream, where the relationship that would have given
+                        # this table a foreign-key column should have been
+                        # extracted. Until then, say exactly which facts are being
+                        # deleted so the loss is diagnosable in one log line
+                        # instead of surfacing as a missing Stage 3 constraint.
+                        logger.warning(
+                            "  [Mapper] Dropping hollow table '%s' DESTROYS the only "
+                            "representation of fact(s) %s -- no other table carries "
+                            "them, and no constraint referencing this table can be "
+                            "extracted downstream. It has only a primary key because "
+                            "the extraction gave it neither attributes nor a "
+                            "relationship.",
+                            t.name,
+                            sorted(exclusive),
+                        )
+                    else:
+                        logger.warning(
+                            "  [Mapper] Dropping hollow table '%s': primary key only, "
+                            "no other columns, nothing references it, and its fact(s) "
+                            "%s are carried by other tables.",
+                            t.name,
+                            sorted(own_facts) or "[]",
+                        )
                     continue
 
                 if t.name in seen_t:

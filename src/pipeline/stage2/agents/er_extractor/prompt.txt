@@ -57,6 +57,18 @@ and expected answer.
 ### 4. Relationships
 Capture how entities interact.
 
+- **A fact that links two entities MUST produce a relationship.** Listing that fact in an
+  entity's `source_fact_ids` does NOT capture it -- provenance records which facts informed
+  an entity, it does not express linkage. Any fact stating that one entity contains,
+  comprises, holds, includes, is composed of, is assigned to, belongs to, or has some
+  number of another entity is asserting a relationship, and must appear in
+  `relationships` with the cardinality it states.
+  This is load-bearing, not stylistic. An entity that ends up with no attributes and no
+  relationship carries nothing but its name, and downstream mapping removes it entirely --
+  taking with it every fact that only that entity represented, and every constraint that
+  would have referenced it. If a fact tells you an entity exists and another tells you how
+  many of them relate to something else, the second fact is exactly the relationship that
+  keeps the first one alive.
 - `kind` -- one of `"1:1"`, `"1:N"`, `"M:N"`.
 - `degree` -- `"binary"` for two participants, `"n-ary"` for three or more.
 - **Naming**: name each relationship as a SINGULAR NOUN describing the association, never

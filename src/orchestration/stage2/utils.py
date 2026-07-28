@@ -1,3 +1,4 @@
+import logging
 from typing import List, Optional, Tuple
 
 
@@ -25,6 +26,8 @@ from src.pipeline.stage2.agents.er_auditor.agent import (
 )
 from src.pipeline.stage2.mapper.conceptual_model import ConceptualModel
 from src.pipeline.stage2.models.conceptual_critique import ConceptualCritiqueReport
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -139,10 +142,25 @@ class ERAuditorLoopAgent(LoopAgent):
 # ---------------------------------------------------------------------------
 
 
+# The shard graph is extractor -> filter -> auditor, and AgentLoop spends its
+# budget once per NODE EXECUTION rather than once per pass. So a raw max_iter
+# must be a multiple of this or the loop stops PART WAY through a round, leaving
+# the returned model unaudited. Callers were passing 5, which buys one full pass
+# plus two nodes of a second -- the extractor got the auditor's fixes once, but
+# nothing ever re-checked the corrected model. Same defect class as Stage 3's
+# Phase 1 loop, which had exactly this and could not retry at all.
+SHARD_GRAPH_NODE_COUNT = 3
+
+
+def shard_rounds_to_max_iter(rounds: int) -> int:
+    """Convert "N audited rounds" into the raw per-node budget AgentLoop counts."""
+    return max(1, rounds) * SHARD_GRAPH_NODE_COUNT
+
+
 async def run_er_extractor_loop(
     facts: List[AtomicFact],
     nl_query: str,
-    max_retries: int = 12,
+    max_retries: int = 4,
     model: Optional[str] = None,
 ) -> Tuple[ConceptualModel, List[FixHistoryStep], int]:
     from src.pipeline.stage2.middleware.conceptual_filter_node import (
@@ -179,11 +197,46 @@ async def run_er_extractor_loop(
             ]
         },
         start_node="extractor",
-        max_iter=max_retries,
+        max_iter=shard_rounds_to_max_iter(max_retries),
         error_refresh=ErrorRefreshConfig(trigger_node="extractor"),
     )
 
     result = await AgentLoop(config).run("")
+
+    # The shard loop used to run completely silently: no record of what the
+    # auditor said, how many rounds happened, or whether the returned model had
+    # ever passed an audit. That made an ineffective audit indistinguishable from
+    # a clean one -- and a live investigation into a lost entity stalled for
+    # exactly that reason, since nothing on disk or in the log said whether the
+    # auditor had flagged it.
+    for entry in result.history:
+        logger.info(
+            "  [Stage 2] shard round %s: %s -> %s",
+            entry.round,
+            entry.node,
+            entry.changes_summary,
+        )
+    final_audit = result.node_outputs.get("auditor")
+    if isinstance(final_audit, ConceptualCritiqueReport):
+        if not final_audit.is_valid:
+            logger.warning(
+                "  [Stage 2] shard model returned with %d UNRESOLVED auditor "
+                "finding(s) after %d node execution(s); the loop ran out of budget "
+                "before they were fixed. First: %s",
+                len(final_audit.fixes),
+                result.iteration_count,
+                (final_audit.fixes[0].description[:200] if final_audit.fixes else "-"),
+            )
+        for fix in final_audit.fixes:
+            logger.info("  [Stage 2] auditor finding: %s", fix.description[:220])
+    else:
+        logger.warning(
+            "  [Stage 2] shard model was returned WITHOUT a final audit -- the loop "
+            "ended on '%s' after %d node execution(s), so nothing verified it.",
+            result.final_node,
+            result.iteration_count,
+        )
+
     output = result.node_outputs.get("extractor")
     if not isinstance(output, ConceptualModel):
         output = ConceptualModel(
