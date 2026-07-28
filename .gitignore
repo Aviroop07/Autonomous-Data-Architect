@@ -43,11 +43,20 @@ generated_generator.py
 
 # --- large external assets (not part of the artifact) -----------------------
 /models/
-dataset/
 baselines/
 LLM4DBdesign/
 SchemaAgent/
 /API costing/
+
+# The benchmark itself IS part of the artifact -- this repo is a reproducibility
+# artifact, and a clone that cannot see the cases cannot reproduce the paper's
+# numbers. dataset/ was excluded here as a "large external asset", which measured
+# 1.26 MB across 16 files. The genuinely large things above stay excluded.
+# RSchema is third-party input data rather than something authored here, so it
+# stays out; scratch and generated run output stay out too.
+dataset/RSchema/
+dataset/**/incoming/
+dataset/**/cases_archive_*.jsonl
 
 # --- scratch / throwaway ----------------------------------------------------
 experiments/

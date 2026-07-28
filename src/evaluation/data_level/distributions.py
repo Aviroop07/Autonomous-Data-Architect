@@ -21,6 +21,29 @@ from scipy import stats
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+
+def canon_label(value: Any) -> str:
+    """Render a categorical label so both sides of a comparison agree on it.
+
+    Categorical parameters are carried as `p_<label>` keys and compared BY NAME
+    in _mre, so the estimator and the ground truth must spell a label
+    identically. They did not: the estimator built keys with str() over a float
+    array, giving "p_1.0", while ground truth is authored as "p_1". The two sets
+    were always disjoint, so categorical MRE was pinned at 1.0 whatever the data
+    -- and a pinned worst score is indistinguishable from a real one.
+
+    An integral numeric label renders without its decimal part ("1", not "1.0");
+    any other numeric renders as a plain float; a non-numeric label is returned
+    unchanged, since nominal categories are legitimate even though the
+    data-level metrics cannot yet score them.
+    """
+    try:
+        f = float(value)
+    except TypeError, ValueError:
+        return str(value)
+    return str(int(f)) if f.is_integer() else str(f)
+
+
 def _clean(data: np.ndarray) -> np.ndarray:
     """Remove NaN / Inf values and return a 1-D float64 array."""
     arr = np.asarray(data, dtype=float).ravel()
@@ -54,6 +77,7 @@ def _require_unit_interval(data: np.ndarray, name: str) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def estimate_params(data: np.ndarray, family: str) -> Dict[str, float]:
     """
@@ -118,8 +142,12 @@ def estimate_params(data: np.ndarray, family: str) -> Dict[str, float]:
         # Return empirical probability mass function
         unique, counts = np.unique(arr, return_counts=True)
         total = counts.sum()
-        pmf = {str(v): float(c / total) for v, c in zip(unique, counts)}
-        # Flatten into a serialisable dict; keys become "p_<value>"
+        # canon_label, not str(): these keys are compared against the ground
+        # truth's keys by name in _mre, and str() on a float array element gives
+        # "1.0" where ground truth authored "1". The two sets were therefore
+        # always disjoint, so categorical MRE was always exactly 1.0 -- a
+        # perfect score and a worthless one look identical when no key matches.
+        pmf = {canon_label(v): float(c / total) for v, c in zip(unique, counts)}
         result: Dict[str, float] = {f"p_{k}": v for k, v in pmf.items()}
         result["n_categories"] = float(len(unique))
         return result
@@ -266,10 +294,14 @@ def log_pdf(x: np.ndarray, family: str, params: Dict[str, float]) -> np.ndarray:
         return stats.expon.logpdf(arr, scale=1.0 / rate)
 
     if fam == "uniform":
-        return stats.uniform.logpdf(arr, loc=params["low"], scale=params["high"] - params["low"])
+        return stats.uniform.logpdf(
+            arr, loc=params["low"], scale=params["high"] - params["low"]
+        )
 
     if fam == "beta":
-        return stats.beta.logpdf(arr, a=params["alpha"], b=params["beta"], loc=0, scale=1)
+        return stats.beta.logpdf(
+            arr, a=params["alpha"], b=params["beta"], loc=0, scale=1
+        )
 
     if fam == "gamma":
         shape = params["shape"]

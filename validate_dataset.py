@@ -1,0 +1,642 @@
+"""ScribbleDB -- deterministic validator and coverage report for a cases file.
+
+Every check here is mechanical. Authoring benchmark ground truth by hand (or by
+agent) produces exactly the class of error a machine should catch: a foreign key
+pointing at a table that was renamed, a distribution parameter named for the
+wrong family, a constraint referencing a column that does not exist. None of
+those raise anywhere in the pipeline -- the data-level evaluator turns an
+unreadable ground-truth spec into a WORST-CASE SCORE rather than an error, so a
+malformed case silently reports as a terrible one.
+
+Usage
+-----
+  python validate_dataset.py                          # validate the default cases file
+  python validate_dataset.py --cases path/to.jsonl    # a specific file
+  python validate_dataset.py --coverage               # also print the coverage report
+  python validate_dataset.py --quiet                  # errors only
+
+Exit code is non-zero when any ERROR is found, so this works as a gate.
+Warnings never fail the run: they flag things worth a human look (a nominal
+categorical that cannot be scored at the data level, a table with no foreign
+keys) that are not necessarily wrong.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from collections import Counter
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+
+PROJECT_ROOT = Path(__file__).parent
+DEFAULT_CASES = PROJECT_ROOT / "dataset" / "handcrafted" / "cases.jsonl"
+
+# The pipeline's own type vocabulary -- see src/util/schema_model/data_types.py.
+# Duplicated as a literal rather than imported so this script stays runnable
+# without the package installed, and mismatches are caught by a unit test.
+DATA_TYPES: Set[str] = {
+    "INTEGER",
+    "VARCHAR",
+    "FLOAT",
+    "DECIMAL",
+    "BOOLEAN",
+    "DATE",
+    "DATETIME",
+    "TIMESTAMP",
+    "TIME",
+    "TEXT",
+    "UUID",
+}
+
+NUMERIC_TYPES: Set[str] = {"INTEGER", "FLOAT", "DECIMAL"}
+
+# Required parameter names per distribution family, in the vocabulary
+# cases.jsonl is authored in (data_eval._parse_gt_dist translates these).
+DIST_PARAMS: Dict[str, Set[str]] = {
+    "normal": {"mean", "std"},
+    "lognormal": {"mean", "variance"},
+    "uniform": {"min", "max"},
+    "poisson": {"lambda"},
+    "exponential": {"lambda"},
+    "zipf": {"a"},
+    "categorical": {"weights"},
+}
+
+CONSTRAINT_TYPES: Set[str] = {"ifthen", "range"}
+
+UPPER_SNAKE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+LOWER_SNAKE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+REQUIRED_CASE_FIELDS = (
+    "id",
+    "domain",
+    "profile",
+    "nl_description",
+    "ground_truth_schema",
+    "ground_truth_distributions",
+    "ground_truth_constraints",
+)
+
+
+class Findings:
+    """Errors fail the run; warnings are reported and do not."""
+
+    def __init__(self) -> None:
+        self.errors: List[str] = []
+        self.warnings: List[str] = []
+
+    def error(self, where: str, message: str) -> None:
+        self.errors.append(f"{where}: {message}")
+
+    def warn(self, where: str, message: str) -> None:
+        self.warnings.append(f"{where}: {message}")
+
+
+# ---------------------------------------------------------------------------
+# Schema
+# ---------------------------------------------------------------------------
+
+
+def _check_schema(where: str, schema: Any, f: Findings) -> Dict[str, Dict[str, str]]:
+    """Validate ground_truth_schema; return {table: {column: data_type}}."""
+    resolved: Dict[str, Dict[str, str]] = {}
+    if not isinstance(schema, dict):
+        f.error(where, "ground_truth_schema is not an object")
+        return resolved
+
+    tables = schema.get("tables")
+    if not isinstance(tables, list) or not tables:
+        f.error(where, "ground_truth_schema.tables is missing or empty")
+        return resolved
+
+    seen_tables: Counter = Counter()
+    for t in tables:
+        if not isinstance(t, dict):
+            f.error(where, "a table entry is not an object")
+            continue
+        name = t.get("name")
+        if not isinstance(name, str) or not name:
+            f.error(where, "a table has no name")
+            continue
+        seen_tables[name] += 1
+        if not UPPER_SNAKE.fullmatch(name):
+            f.error(where, f"table '{name}' is not UPPER_SNAKE_CASE")
+
+        cols = t.get("columns")
+        if not isinstance(cols, list) or not cols:
+            f.error(where, f"table '{name}' has no columns")
+            continue
+
+        col_types: Dict[str, str] = {}
+        seen_cols: Counter = Counter()
+        for c in cols:
+            if not isinstance(c, dict):
+                f.error(where, f"table '{name}' has a non-object column")
+                continue
+            cname = c.get("name")
+            ctype = c.get("data_type")
+            if not isinstance(cname, str) or not cname:
+                f.error(where, f"table '{name}' has an unnamed column")
+                continue
+            seen_cols[cname] += 1
+            if not LOWER_SNAKE.fullmatch(cname):
+                f.error(where, f"column '{name}.{cname}' is not lower_snake_case")
+            if ctype not in DATA_TYPES:
+                f.error(
+                    where,
+                    f"column '{name}.{cname}' has data_type {ctype!r}, "
+                    f"not one of {sorted(DATA_TYPES)}",
+                )
+            col_types[cname] = ctype if isinstance(ctype, str) else ""
+        for cname, n in seen_cols.items():
+            if n > 1:
+                f.error(where, f"table '{name}' declares column '{cname}' {n} times")
+
+        pk = t.get("pk")
+        if pk is None:
+            f.error(where, f"table '{name}' has no pk")
+        else:
+            pk_cols = pk if isinstance(pk, list) else [pk]
+            for p in pk_cols:
+                if p not in col_types:
+                    f.error(
+                        where,
+                        f"table '{name}' pk names '{p}', which is not one of its columns",
+                    )
+        resolved[name] = col_types
+
+    for name, n in seen_tables.items():
+        if n > 1:
+            f.error(where, f"table name '{name}' is used {n} times")
+
+    _check_relationships(where, schema, resolved, f)
+    return resolved
+
+
+def _check_relationships(
+    where: str, schema: Dict[str, Any], tables: Dict[str, Dict[str, str]], f: Findings
+) -> None:
+    rels = schema.get("relationships")
+    if rels is None:
+        if len(tables) > 1:
+            f.warn(where, f"{len(tables)} tables but no relationships declared")
+        return
+    if not isinstance(rels, list):
+        f.error(where, "ground_truth_schema.relationships is not a list")
+        return
+
+    for r in rels:
+        if not isinstance(r, dict):
+            f.error(where, "a relationship entry is not an object")
+            continue
+        rt, rc = r.get("referencing_table"), r.get("referencing_column")
+        dt, dc = r.get("referred_table"), r.get("referred_column")
+        for label, tbl, col in (
+            ("referencing", rt, rc),
+            ("referred", dt, dc),
+        ):
+            if tbl not in tables:
+                f.error(
+                    where, f"FK {label}_table '{tbl}' is not a table in this schema"
+                )
+            elif col not in tables[tbl]:
+                f.error(where, f"FK {label} column '{tbl}.{col}' does not exist")
+
+
+# ---------------------------------------------------------------------------
+# Distributions
+# ---------------------------------------------------------------------------
+
+
+def _is_nominal(weights: Any) -> bool:
+    if not isinstance(weights, dict):
+        return False
+    for label in weights:
+        try:
+            float(label)
+        except TypeError, ValueError:
+            return True
+    return False
+
+
+def _check_distributions(
+    where: str, dists: Any, tables: Dict[str, Dict[str, str]], f: Findings
+) -> None:
+    if dists is None:
+        return
+    if not isinstance(dists, dict):
+        f.error(where, "ground_truth_distributions is not an object")
+        return
+
+    for key, spec in dists.items():
+        if not isinstance(key, str) or key.count(".") != 1:
+            f.error(where, f"distribution key {key!r} is not 'TABLE.column'")
+            continue
+        tname, cname = key.split(".", 1)
+        if tname not in tables:
+            f.error(where, f"distribution on '{key}': no such table")
+            continue
+        if cname not in tables[tname]:
+            f.error(where, f"distribution on '{key}': no such column")
+            continue
+
+        if not isinstance(spec, dict):
+            f.error(where, f"distribution on '{key}' is not an object")
+            continue
+        family = spec.get("distribution", spec.get("family"))
+        if family not in DIST_PARAMS:
+            f.error(
+                where,
+                f"distribution on '{key}' names family {family!r}, "
+                f"not one of {sorted(DIST_PARAMS)}",
+            )
+            continue
+
+        params = spec.get("params")
+        if not isinstance(params, dict):
+            f.error(where, f"distribution on '{key}' has no params object")
+            continue
+        required = DIST_PARAMS[family]
+        missing = required - set(params)
+        extra = set(params) - required
+        if missing:
+            f.error(
+                where,
+                f"distribution on '{key}' ({family}) is missing params {sorted(missing)}",
+            )
+        if extra:
+            f.error(
+                where,
+                f"distribution on '{key}' ({family}) has unexpected params "
+                f"{sorted(extra)}; {family} takes {sorted(required)}",
+            )
+        if missing or extra:
+            continue
+
+        _check_dist_values(where, key, family, params, tables[tname][cname], f)
+
+
+def _check_dist_values(
+    where: str,
+    key: str,
+    family: str,
+    params: Dict[str, Any],
+    col_type: str,
+    f: Findings,
+) -> None:
+    def num(name: str) -> Optional[float]:
+        try:
+            return float(params[name])
+        except TypeError, ValueError:
+            f.error(where, f"distribution on '{key}': param '{name}' is not a number")
+            return None
+
+    if family == "categorical":
+        weights = params.get("weights")
+        if not isinstance(weights, dict) or not weights:
+            f.error(where, f"distribution on '{key}': weights must be a non-empty map")
+            return
+        total = 0.0
+        for label, w in weights.items():
+            try:
+                wf = float(w)
+            except TypeError, ValueError:
+                f.error(
+                    where,
+                    f"distribution on '{key}': weight for {label!r} is not a number",
+                )
+                return
+            if wf < 0:
+                f.error(
+                    where, f"distribution on '{key}': negative weight for {label!r}"
+                )
+            total += wf
+        if abs(total - 1.0) > 0.01:
+            f.error(
+                where,
+                f"distribution on '{key}': weights sum to {total:.4f}, expected 1.0",
+            )
+        if _is_nominal(weights):
+            f.warn(
+                where,
+                f"distribution on '{key}' is a NOMINAL categorical. The data-level "
+                "evaluator coerces category keys with float(), so this column cannot "
+                "be scored on MRE/NLL/KS as things stand.",
+            )
+        return
+
+    # Numeric families on a non-numeric column is almost always an authoring slip.
+    if col_type and col_type not in NUMERIC_TYPES:
+        f.warn(
+            where,
+            f"distribution on '{key}' is {family} but the column is {col_type}",
+        )
+
+    if family == "normal":
+        std = num("std")
+        if std is not None and std <= 0:
+            f.error(where, f"distribution on '{key}': std must be > 0, got {std}")
+    elif family == "lognormal":
+        var = num("variance")
+        if var is not None and var <= 0:
+            f.error(where, f"distribution on '{key}': variance must be > 0, got {var}")
+    elif family == "uniform":
+        lo, hi = num("min"), num("max")
+        if lo is not None and hi is not None and hi <= lo:
+            f.error(
+                where, f"distribution on '{key}': max ({hi}) must exceed min ({lo})"
+            )
+    elif family in ("poisson", "exponential"):
+        lam = num("lambda")
+        if lam is not None and lam <= 0:
+            f.error(where, f"distribution on '{key}': lambda must be > 0, got {lam}")
+    elif family == "zipf":
+        a = num("a")
+        if a is not None and a <= 1.0:
+            f.error(
+                where,
+                f"distribution on '{key}': zipf 'a' must be > 1 for a finite mean, got {a}",
+            )
+
+
+# ---------------------------------------------------------------------------
+# Constraints
+# ---------------------------------------------------------------------------
+
+
+def _walk_condition(
+    where: str,
+    label: str,
+    node: Any,
+    home_table: str,
+    tables: Dict[str, Dict[str, str]],
+    f: Findings,
+) -> None:
+    """Resolve every column a condition tree mentions."""
+    if not isinstance(node, dict):
+        f.error(where, f"{label}: condition node is not an object")
+        return
+
+    ntype = node.get("type")
+    if ntype in ("and", "or"):
+        subs = node.get("conditions")
+        if not isinstance(subs, list) or not subs:
+            f.error(where, f"{label}: '{ntype}' node has no conditions list")
+            return
+        for sub in subs:
+            _walk_condition(where, label, sub, home_table, tables, f)
+        return
+    if ntype == "not":
+        inner = node.get("condition")
+        if inner is None:
+            f.error(where, f"{label}: 'not' node has no condition")
+            return
+        _walk_condition(where, label, inner, home_table, tables, f)
+        return
+
+    col = node.get("column")
+    if col is None:
+        f.error(where, f"{label}: leaf node of type {ntype!r} names no column")
+        return
+    tbl = node.get("table_ref") or home_table
+    if tbl not in tables:
+        f.error(where, f"{label}: references table '{tbl}', which is not in the schema")
+        return
+    if col not in tables[tbl]:
+        f.error(
+            where, f"{label}: references column '{tbl}.{col}', which does not exist"
+        )
+
+    join = node.get("join")
+    if join is not None:
+        if not isinstance(join, dict):
+            f.error(where, f"{label}: join is not an object")
+            return
+        for side in ("from", "to"):
+            ref = join.get(side)
+            if not isinstance(ref, str) or ref.count(".") != 1:
+                f.error(where, f"{label}: join.{side} {ref!r} is not 'TABLE.column'")
+                continue
+            jt, jc = ref.split(".", 1)
+            if jt not in tables:
+                f.error(where, f"{label}: join.{side} names unknown table '{jt}'")
+            elif jc not in tables[jt]:
+                f.error(where, f"{label}: join.{side} names unknown column '{jt}.{jc}'")
+
+
+def _check_constraints(
+    where: str, constraints: Any, tables: Dict[str, Dict[str, str]], f: Findings
+) -> None:
+    if constraints is None:
+        return
+    if not isinstance(constraints, list):
+        f.error(where, "ground_truth_constraints is not a list")
+        return
+
+    for i, c in enumerate(constraints):
+        label = f"constraint[{i}]"
+        if not isinstance(c, dict):
+            f.error(where, f"{label} is not an object")
+            continue
+        ctype = c.get("type")
+        if ctype not in CONSTRAINT_TYPES:
+            f.error(
+                where,
+                f"{label} has type {ctype!r}, not one of {sorted(CONSTRAINT_TYPES)}",
+            )
+            continue
+        table = c.get("table")
+        if table not in tables:
+            f.error(where, f"{label} names table {table!r}, which is not in the schema")
+            continue
+
+        if ctype == "range":
+            col = c.get("column")
+            if col not in tables[table]:
+                f.error(where, f"{label}: column '{table}.{col}' does not exist")
+            lo, hi = c.get("min"), c.get("max")
+            if lo is None and hi is None:
+                f.error(where, f"{label}: a range needs at least one of min/max")
+            if lo is not None and hi is not None:
+                try:
+                    if float(hi) < float(lo):
+                        f.error(where, f"{label}: max ({hi}) is below min ({lo})")
+                except TypeError, ValueError:
+                    f.error(where, f"{label}: min/max are not numbers")
+            if c.get("condition") is not None:
+                _walk_condition(where, label, c["condition"], table, tables, f)
+        else:  # ifthen
+            cond, result = c.get("condition"), c.get("result")
+            if cond is None:
+                f.error(where, f"{label}: ifthen has no condition")
+            else:
+                _walk_condition(where, f"{label}.condition", cond, table, tables, f)
+            if result is None:
+                f.error(where, f"{label}: ifthen has no result")
+            else:
+                _walk_condition(where, f"{label}.result", result, table, tables, f)
+
+
+# ---------------------------------------------------------------------------
+# Driver
+# ---------------------------------------------------------------------------
+
+
+def load_cases(path: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
+    errors: List[str] = []
+    cases: List[Dict[str, Any]] = []
+    if not path.exists():
+        return cases, [f"{path} does not exist"]
+    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as exc:
+            errors.append(f"line {lineno}: invalid JSON: {exc}")
+            continue
+        if not isinstance(obj, dict):
+            errors.append(f"line {lineno}: top-level value is not an object")
+            continue
+        cases.append(obj)
+    return cases, errors
+
+
+def validate(cases: Iterable[Dict[str, Any]]) -> Findings:
+    f = Findings()
+    ids: Counter = Counter()
+
+    for case in cases:
+        cid = case.get("id", "?")
+        where = f"case {cid}"
+        ids[cid] += 1
+
+        for field in REQUIRED_CASE_FIELDS:
+            if field not in case:
+                f.error(where, f"missing required field '{field}'")
+
+        nl = case.get("nl_description")
+        if not isinstance(nl, str) or len(nl.strip()) < 80:
+            f.error(where, "nl_description is missing or implausibly short")
+
+        for field in ("domain", "profile"):
+            if not isinstance(case.get(field), str) or not case.get(field):
+                f.error(where, f"'{field}' must be a non-empty string")
+
+        tables = _check_schema(where, case.get("ground_truth_schema"), f)
+        if tables:
+            _check_distributions(
+                where, case.get("ground_truth_distributions"), tables, f
+            )
+            _check_constraints(where, case.get("ground_truth_constraints"), tables, f)
+
+    for cid, n in ids.items():
+        if n > 1:
+            f.error("dataset", f"id {cid} appears {n} times")
+    return f
+
+
+def coverage(cases: List[Dict[str, Any]]) -> str:
+    families: Counter = Counter()
+    ctypes: Counter = Counter()
+    profiles: Counter = Counter()
+    domains: Counter = Counter()
+    tbl_sizes: List[int] = []
+    nl_lens: List[int] = []
+    per_case: List[Tuple[Any, int, int, int, int]] = []
+    nominal = 0
+
+    for c in cases:
+        schema = c.get("ground_truth_schema") or {}
+        tables = schema.get("tables") or []
+        tbl_sizes.append(len(tables))
+        nl_lens.append(len(c.get("nl_description") or ""))
+        profiles[c.get("profile", "?")] += 1
+        domains[c.get("domain", "?")] += 1
+        dists = c.get("ground_truth_distributions") or {}
+        for spec in dists.values():
+            fam = (spec or {}).get("distribution", (spec or {}).get("family"))
+            families[fam] += 1
+            if fam == "categorical" and _is_nominal(
+                (spec.get("params") or {}).get("weights")
+            ):
+                nominal += 1
+        cons = c.get("ground_truth_constraints") or []
+        for con in cons:
+            ctypes[(con or {}).get("type")] += 1
+        per_case.append(
+            (
+                c.get("id"),
+                len(tables),
+                len(schema.get("relationships") or []),
+                len(dists),
+                len(cons),
+            )
+        )
+
+    def hist(counter: Counter, title: str) -> List[str]:
+        out = [f"  {title}"]
+        for k, v in counter.most_common():
+            out.append(f"    {str(k):28} {v}")
+        return out
+
+    lines = ["", "=" * 70, "COVERAGE", "=" * 70, f"  cases: {len(cases)}"]
+    if tbl_sizes:
+        lines.append(
+            f"  tables per case: min={min(tbl_sizes)} max={max(tbl_sizes)} "
+            f"mean={sum(tbl_sizes) / len(tbl_sizes):.1f}"
+        )
+    if nl_lens:
+        lines.append(
+            f"  nl_description chars: min={min(nl_lens)} max={max(nl_lens)} "
+            f"mean={sum(nl_lens) / len(nl_lens):.0f}"
+        )
+    lines += hist(families, "distribution families:")
+    if nominal:
+        lines.append(
+            f"    (of which NOMINAL categorical, not data-scorable: {nominal})"
+        )
+    lines += hist(ctypes, "constraint types:")
+    lines += hist(profiles, "profiles:")
+    lines.append(f"  distinct domains: {len(domains)}")
+    dupes = {d: n for d, n in domains.items() if n > 1}
+    if dupes:
+        lines.append(f"    repeated domains: {dupes}")
+    return "\n".join(lines)
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--cases", type=Path, default=DEFAULT_CASES)
+    ap.add_argument("--coverage", action="store_true", help="print the coverage report")
+    ap.add_argument("--quiet", action="store_true", help="suppress warnings")
+    args = ap.parse_args(argv)
+
+    cases, load_errors = load_cases(args.cases)
+    f = validate(cases)
+    f.errors = load_errors + f.errors
+
+    print(f"{args.cases}: {len(cases)} case(s) loaded")
+    if f.errors:
+        print(f"\nERRORS ({len(f.errors)}):")
+        for e in f.errors:
+            print(f"  - {e}")
+    if f.warnings and not args.quiet:
+        print(f"\nWARNINGS ({len(f.warnings)}):")
+        for w in f.warnings:
+            print(f"  - {w}")
+    if args.coverage:
+        print(coverage(cases))
+
+    if f.errors:
+        print(f"\nFAILED: {len(f.errors)} error(s)")
+        return 1
+    print(f"\nOK: no errors ({len(f.warnings)} warning(s))")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
