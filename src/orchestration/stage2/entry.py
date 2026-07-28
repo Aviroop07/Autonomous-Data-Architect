@@ -38,6 +38,25 @@ def _compute_uncovered_facts(
     covered: set = set()
     for table in final_schema.tables:
         covered.update(registry.get_facts_for_tables([table.name]))
+        # Also count the schema's OWN provenance, which is authoritative: the
+        # relational mapper stamps source_fact_ids onto every table, column and
+        # foreign key as it creates them. The registry is populated afterwards by
+        # matching table names back to conceptual entities/relationships, and
+        # that reverse-engineering cannot see tables the MAPPER invented --
+        # junction tables for M:N and n-ary relationships have no conceptual
+        # entity of their own to match against.
+        #
+        # The consequence was a metric that scaled with junction count rather
+        # than with real coverage. A live run reported "37 of 52 required facts
+        # not represented" purely because it produced more M:N relationships than
+        # its predecessors, while its actual provenance covered MORE facts (49
+        # distinct ids against 46) and every one of its 52 facts named a real
+        # table in the final schema.
+        covered.update(table.source_fact_ids or [])
+        for column in table.columns:
+            covered.update(column.source_fact_ids or [])
+    for fk in final_schema.relationships or []:
+        covered.update(fk.source_fact_ids or [])
     uncovered = sorted(required_ids - covered)
     if uncovered:
         logger.warning(
@@ -385,13 +404,34 @@ async def orchestrate(
                     matched_rel = r
                     break
 
+        # Seed from the schema's own provenance FIRST, unconditionally. The
+        # mapper stamped these on as it built the table, so they are authoritative
+        # and available even for tables no conceptual entity corresponds to --
+        # notably the junction tables the mapper synthesizes for M:N and n-ary
+        # relationships, which the name/FK matching below structurally cannot
+        # find. Stage 3's sharding reads this registry, so leaving junctions
+        # unregistered under-reported their facts downstream too, not just in the
+        # coverage warning.
+        own_provenance: set[int] = set(table.source_fact_ids or [])
+        for column in table.columns:
+            own_provenance.update(column.source_fact_ids or [])
+        for fk in global_schema.relationships or []:
+            if fk.referencing_table == table.name:
+                own_provenance.update(fk.source_fact_ids or [])
+        if own_provenance:
+            registry.register_table_facts(table.name, sorted(own_provenance))
+
+        # The conceptual-model match then ADDS anything the mapper did not stamp
+        # directly onto the table (e.g. facts attached to the entity as a whole).
         if matched_entity:
             registry.register_table_facts(table.name, matched_entity.source_fact_ids)
         elif matched_rel:
             registry.register_table_facts(table.name, matched_rel.source_fact_ids)
-        else:
-            logger.debug(
-                f"[Stage 2] Could not directly map table '{table.name}' to CM source for provenance."
+        elif not own_provenance:
+            logger.warning(
+                f"[Stage 2] Table '{table.name}' has NO fact provenance from either "
+                f"the schema itself or a conceptual-model match; facts contributing "
+                f"to it will be reported as uncovered."
             )
 
     uncovered = _compute_uncovered_facts(facts, global_schema, registry)
@@ -417,9 +457,15 @@ async def orchestrate(
             apply_patches(global_schema, cert_report.patches, registry=registry)
             logger.info(f"[Stage 2] Applied {len(cert_report.patches)} patches.")
 
+            # Patches can add tables the provenance pass above never saw, since
+            # it ran before certification. Report them rather than leaving the
+            # empty `if ...: pass` that used to stand here.
             for table in global_schema.tables:
                 if not registry.get_facts_for_tables([table.name]):
-                    pass
+                    logger.warning(
+                        f"[Stage 2] Table '{table.name}' exists after certifier "
+                        f"patches but has no registered fact provenance."
+                    )
         else:
             logger.info("[Stage 2] Schema Certifier: PERFECT compliance.")
     else:

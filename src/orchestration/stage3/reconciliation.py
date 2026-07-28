@@ -154,7 +154,7 @@ async def _reconcile_and_apply(
     shard_states: List[_ShardState],
     analysis_schema: Schema,
     facts_map: Dict[int, AtomicFact],
-    fact_to_shard: Dict[int, int],
+    fact_to_shards: Dict[int, List[int]],
     model: Optional[str],
     max_retries: int,
     max_rounds: int,
@@ -310,14 +310,26 @@ async def _reconcile_and_apply(
                     continue
                 if verdict.verdict == ReconciliationVerdict.MISEXTRACTION:
                     for fix in verdict.fixes:
-                        shard_idx = fact_to_shard.get(fix.fact_id)
-                        if shard_idx is None:
+                        # Dispatch to EVERY shard holding this fact, not one.
+                        # A fact allocated to several shards was extracted
+                        # several times, so a fix that re-ran only one of them
+                        # left the others with the extraction the reconciler
+                        # just judged wrong.
+                        shard_indices = fact_to_shards.get(fix.fact_id) or []
+                        if not shard_indices:
                             logger.warning(
                                 f"[Stage 3] MisextractionFix references unknown "
                                 f"fact_id {fix.fact_id} -- skipping."
                             )
                             continue
-                        fixes_by_shard.setdefault(shard_idx, []).append(fix)
+                        if len(shard_indices) > 1:
+                            logger.info(
+                                f"[Stage 3] fact {fix.fact_id} is allocated to "
+                                f"{len(shard_indices)} shards {shard_indices}; "
+                                f"re-extracting all of them."
+                            )
+                        for shard_idx in shard_indices:
+                            fixes_by_shard.setdefault(shard_idx, []).append(fix)
                 elif verdict.verdict == ReconciliationVerdict.FALSE_POSITIVE:
                     dismissed.append(
                         DismissedConflict(

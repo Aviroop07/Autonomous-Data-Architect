@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -81,6 +82,26 @@ def resolve_spec(value: str) -> str:
     )
 
 
+def _load_stage_artifact(resume_dir: Path, filename: str, model_cls, label: str):
+    """Load a previously-written stage artifact instead of recomputing it.
+
+    Stage artifacts were always WRITTEN and never read back, so `--stages 3` still
+    re-ran Stage 1 from scratch and a Stage 3 crash re-paid the full Stage 1+2
+    LLM cost -- the most expensive part of the pipeline, to reproduce output that
+    was already sitting on disk.
+    """
+    path = resume_dir / filename
+    if not path.exists():
+        raise SystemExit(
+            f"--resume-from {resume_dir} has no {filename}, which is needed to skip "
+            f"{label}. Either point at a run that got that far, or include {label} "
+            f"in --stages so it is recomputed."
+        )
+    data = json.loads(path.read_text(encoding="utf-8"))
+    logger.info("Resumed %s from %s", label, path)
+    return model_cls(**data)
+
+
 async def run(args: argparse.Namespace) -> int:
     from src.orchestration.stage1.entry import orchestrate as stage1
     from src.orchestration.stage2.entry import orchestrate as stage2
@@ -99,43 +120,71 @@ async def run(args: argparse.Namespace) -> int:
     total_tokens = 0
     t_start = time.time()
 
+    resume_dir = Path(args.resume_from) if args.resume_from else None
+
     # ---- Stage 1 ----------------------------------------------------------
-    banner("STAGE 1 -- Fact Extraction")
-    t0 = time.time()
-    s1_out, s1_tokens = await stage1(nl_description=nl, model=args.model)
-    total_tokens += s1_tokens
-    logger.info("Stage 1 done in %.1fs | tokens=%d", time.time() - t0, s1_tokens)
+    if 1 in stages:
+        banner("STAGE 1 -- Fact Extraction")
+        t0 = time.time()
+        s1_out, s1_tokens = await stage1(nl_description=nl, model=args.model)
+        total_tokens += s1_tokens
+        logger.info("Stage 1 done in %.1fs | tokens=%d", time.time() - t0, s1_tokens)
+        write_json(out_dir / "stage1.json", s1_out, label="Stage 1")
+    else:
+        if resume_dir is None:
+            raise SystemExit(
+                "--stages excludes Stage 1, so its output must come from somewhere: "
+                "pass --resume-from <previous run dir>."
+            )
+        from src.orchestration.stage1.models import Output as Stage1Output
+
+        s1_out = _load_stage_artifact(
+            resume_dir, "stage1.json", Stage1Output, "Stage 1"
+        )
     logger.info("Domain: %s", s1_out.domain)
     logger.info("Analytical goal: %s", s1_out.analytical_goal)
     report_facts(s1_out.final_facts)
     report_chunks(s1_out.plan)
-    write_json(out_dir / "stage1.json", s1_out, label="Stage 1")
 
-    if 2 not in stages:
+    if 2 not in stages and 3 not in stages:
         logger.info("Stopping after Stage 1 (--stages %s)", args.stages)
         return total_tokens
 
     # ---- Stage 2 ----------------------------------------------------------
-    banner("STAGE 2 -- Schema Generation")
-    t0 = time.time()
-    s2_out, s2_tokens, registry = await stage2(
-        plan=s1_out.plan,
-        facts=s1_out.final_facts,
-        domain=s1_out.domain,
-        analytical_goal=s1_out.analytical_goal,
-        nl_query=nl,
-        model=args.model,
-        artifact_dir=out_dir if args.dump_artifacts else None,
-    )
-    total_tokens += s2_tokens
-    logger.info("Stage 2 done in %.1fs | tokens=%d", time.time() - t0, s2_tokens)
-    logger.info("ER shards: %d", len(s2_out.segments))
+    if 2 in stages:
+        banner("STAGE 2 -- Schema Generation")
+        t0 = time.time()
+        s2_out, s2_tokens, registry = await stage2(
+            plan=s1_out.plan,
+            facts=s1_out.final_facts,
+            domain=s1_out.domain,
+            analytical_goal=s1_out.analytical_goal,
+            nl_query=nl,
+            model=args.model,
+            artifact_dir=out_dir if args.dump_artifacts else None,
+        )
+        total_tokens += s2_tokens
+        logger.info("Stage 2 done in %.1fs | tokens=%d", time.time() - t0, s2_tokens)
+        logger.info("ER shards: %d", len(s2_out.segments))
+        for table_name, fact_ids in registry.table_to_facts.items():
+            logger.info("  provenance %s <- %s", table_name, fact_ids)
+        write_json(out_dir / "stage2.json", s2_out, label="Stage 2")
+    else:
+        if resume_dir is None:
+            raise SystemExit(
+                "--stages excludes Stage 2, so its schema must come from somewhere: "
+                "pass --resume-from <previous run dir>."
+            )
+        from src.orchestration.stage2.models import Output as Stage2Output
+
+        s2_out = _load_stage_artifact(
+            resume_dir, "stage2.json", Stage2Output, "Stage 2"
+        )
+        # The fact registry is not persisted and Stage 3 does not need it -- it
+        # derives its own shards from the schema plus the fact set.
     schema = s2_out.final_global_schema
     report_schema(schema, label="Final schema")
     logger.info("Uncovered facts: %s", s2_out.uncovered_fact_ids)
-    for table_name, fact_ids in registry.table_to_facts.items():
-        logger.info("  provenance %s <- %s", table_name, fact_ids)
-    write_json(out_dir / "stage2.json", s2_out, label="Stage 2")
 
     if 3 not in stages:
         logger.info("Stopping after Stage 2 (--stages %s)", args.stages)
@@ -178,6 +227,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "--stages",
         default="1,2,3",
         help="Comma-separated stages to run, e.g. '1,2' (default: 1,2,3)",
+    )
+    p.add_argument(
+        "--resume-from",
+        default=None,
+        dest="resume_from",
+        metavar="RUN_DIR",
+        help="Reuse stage artifacts from a previous run directory instead of "
+        "recomputing them. Combine with --stages to say what to recompute: "
+        "'--resume-from artifacts/runs/pipeline_X --stages 3' loads that run's "
+        "stage1.json and stage2.json and runs only Stage 3. Output still goes to "
+        "a fresh --out directory, so the resumed run is never overwritten.",
     )
     p.add_argument(
         "--out", default=None, help="Output dir (default: artifacts/runs/pipeline_<ts>)"

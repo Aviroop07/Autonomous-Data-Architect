@@ -88,14 +88,55 @@ def _derive_junction_name(
     if candidate not in used_names:
         return candidate
 
-    # Collision: append the relationship name, then a numeric suffix, until unique.
+    # Collision. A SELF-REFERENTIAL relationship reaches here by construction:
+    # its participants dedupe to one table, so the composed name IS that table's
+    # name, which already exists. Participant roles are the right
+    # disambiguator -- they are what distinguishes the two ends of a
+    # self-reference, and the extractor is instructed to supply them precisely
+    # for this case.
+    role_parts = sorted(
+        {to_snake_case(p.role).upper() for p in rel.participants if p.role}
+    )
+    for suffix in ("_".join(role_parts), *role_parts):
+        if suffix and _is_new_token(suffix, candidate):
+            proposed = f"{candidate}_{suffix}"
+            if proposed not in used_names:
+                return proposed
+
+    # Then the relationship's own name -- but only if it contributes a token the
+    # candidate does not already have. Without that guard a relationship named
+    # after its own participant produced a doubled name (an observed live run
+    # emitted a junction called <TABLE>_<TABLE>), which says nothing about what
+    # the table is for.
     rel_suffix = to_snake_case(rel.name).upper()
-    if rel_suffix and f"{candidate}_{rel_suffix}" not in used_names:
+    if (
+        rel_suffix
+        and _is_new_token(rel_suffix, candidate)
+        and f"{candidate}_{rel_suffix}" not in used_names
+    ):
         return f"{candidate}_{rel_suffix}"
+
     i = 2
     while f"{candidate}_{i}" in used_names:
         i += 1
+    logger.info(
+        "  [Mapper] Junction table for relationship '%s' fell back to the "
+        "numeric name '%s_%d'; neither participant roles nor the relationship "
+        "name added anything distinguishing.",
+        rel.name,
+        candidate,
+        i,
+    )
     return f"{candidate}_{i}"
+
+
+def _is_new_token(suffix: str, candidate: str) -> bool:
+    """Does `suffix` contribute at least one token `candidate` lacks?
+
+    Guards against appending a word the name already contains, which produces
+    duplicated names like <TABLE>_<TABLE> that carry no information.
+    """
+    return bool(set(suffix.split("_")) - set(candidate.split("_")))
 
 
 def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
@@ -354,7 +395,7 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                         )
                     )
 
-            for p in rel.participants:
+            for position, p in enumerate(rel.participants, start=1):
                 p_t = entity_tables.get(p.entity.lower())
                 if not p_t:
                     continue
@@ -362,6 +403,34 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
 
                 for pk_c in p_t.primary_key:
                     fk_col_name = f"{role_prefix}{pk_c}"
+                    # A SELF-REFERENTIAL relationship without roles sends both
+                    # ends through here with the identical column name, so the
+                    # dedup check below collapsed them into ONE foreign key. The
+                    # resulting single-FK junction was then classified hollow and
+                    # dropped, deleting the relationship outright -- verified on a
+                    # self-referencing M:N, which produced zero foreign keys.
+                    # These are common (prerequisite, supersedes, manager-of,
+                    # part-of), so losing them silently is expensive.
+                    #
+                    # Roles are the proper disambiguator and are used when
+                    # present. Falling back to the participant's position is
+                    # deterministic and domain-free; it keeps both ends, which
+                    # matters far more than the column being prettily named.
+                    # Participants are the outer loop and this table's primary-key
+                    # members the inner one, so a name already present can only
+                    # have come from a DIFFERENT participant -- i.e. exactly the
+                    # self-reference case.
+                    if any(c.name == fk_col_name for c in columns):
+                        fk_col_name = f"{pk_c}_{position}"
+                        logger.info(
+                            "  [Mapper] Junction '%s' has two participants resolving "
+                            "to table '%s' with no distinguishing roles; naming this "
+                            "end's foreign key '%s' by position. Supplying roles on "
+                            "the relationship would give it a meaningful name.",
+                            t_name,
+                            p_t.name,
+                            fk_col_name,
+                        )
                     parent_col = _resolve_pk_column(
                         p_t.columns,
                         pk_c,

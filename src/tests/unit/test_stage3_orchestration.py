@@ -223,7 +223,7 @@ class TestReconcileAndApplyRouting:
         )
 
         conflicts, dismissed, unsupported, tokens, _dof = await _reconcile_and_apply(
-            [ss], schema, facts_map, {1: 0}, None, 5, 5, 3
+            [ss], schema, facts_map, {1: [0]}, None, 5, 5, 3
         )
         assert conflicts == []
         assert len(dismissed) == 1
@@ -276,7 +276,7 @@ class TestReconcileAndApplyRouting:
         )
 
         conflicts, dismissed, unsupported, tokens, _dof = await _reconcile_and_apply(
-            [ss], schema, facts_map, {1: 0}, None, 5, 2, 3
+            [ss], schema, facts_map, {1: [0]}, None, 5, 2, 3
         )
         assert len(conflicts) == 1
         assert dismissed == []
@@ -349,10 +349,121 @@ class TestReconcileAndApplyRouting:
         monkeypatch.setattr(stage3_reconciliation, "_rerun_shard", fake_rerun_shard)
 
         conflicts, dismissed, unsupported, tokens, _dof = await _reconcile_and_apply(
-            [ss], schema, facts_map, {1: 0}, None, 5, 5, 3
+            [ss], schema, facts_map, {1: [0]}, None, 5, 5, 3
         )
         assert len(rerun_calls) == 1
         assert "fact 1" in rerun_calls[0]
+        assert conflicts == []
+
+    @pytest.mark.asyncio
+    async def test_misextraction_reruns_every_shard_holding_the_fact(
+        self, monkeypatch, facts_map
+    ):
+        """fact_to_shards is one-to-many for a reason.
+
+        fact_allocation's similarity expansion and orphan recovery both add a
+        fact to any shard whose tables it touches, and its own docstring calls
+        cross-shard facts the normal case. The map used to be built as
+        `{fid: ss.index for ...}` -- last shard wins -- so a MISEXTRACTION fix
+        re-ran ONE arbitrary shard while every other copy kept the extraction the
+        reconciler had just judged wrong.
+        """
+        schema = _schema()
+        shard_a = _ShardState(index=0, schema=schema, fact_ids=[1], stub_tables=[])
+        shard_b = _ShardState(index=1, schema=schema, fact_ids=[1], stub_tables=[])
+        for ss_ in (shard_a, shard_b):
+            ss_.output = UnifiedExtractionOutput()
+
+        conflict = Conflict(
+            kind="moment_value_mismatch",
+            summary="s",
+            involved_fact_references=[1],
+            detail="d",
+            softenable=True,
+        )
+        calls = {"n": 0}
+
+        def fake_evaluate(bridged, sch):
+            from src.util.constraint_model.conflicts.models import ConflictReport
+
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return ConflictReport(conflicts=[conflict])
+            return ConflictReport()
+
+        monkeypatch.setattr(
+            stage3_reconciliation, "analyze_cross_shard_constraints", _empty_report
+        )
+        monkeypatch.setattr(
+            stage3_reconciliation, "evaluate_constraints", fake_evaluate
+        )
+        monkeypatch.setattr(
+            stage3_reconciliation,
+            "reconcile_conflict_group",
+            AsyncMock(
+                return_value=(
+                    GroupReconciliation(
+                        verdicts=[
+                            ConflictReconciliation(
+                                conflict_ref="moment_value_mismatch::1",
+                                verdict=ReconciliationVerdict.MISEXTRACTION,
+                                reasoning="Generator dropped a condition.",
+                                fixes=[
+                                    MisextractionFix(
+                                        fact_id=1, guidance="Re-check fact 1."
+                                    )
+                                ],
+                            )
+                        ]
+                    ),
+                    0,
+                )
+            ),
+        )
+
+        rerun_calls = []
+
+        async def fake_rerun_shard(
+            schema_, fact_ids, facts_map_, stub_tables, guidance, model, max_retries
+        ):
+            rerun_calls.append(guidance)
+            return UnifiedExtractionOutput(), 0
+
+        monkeypatch.setattr(stage3_reconciliation, "_rerun_shard", fake_rerun_shard)
+
+        await _reconcile_and_apply(
+            [shard_a, shard_b], schema, facts_map, {1: [0, 1]}, None, 5, 5, 3
+        )
+        assert len(rerun_calls) == 2, (
+            f"fact 1 sits in both shards, so both must be re-extracted; "
+            f"got {len(rerun_calls)} rerun(s)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_unknown_fact_id_in_a_fix_is_skipped_not_crashed(
+        self, monkeypatch, facts_map
+    ):
+        schema = _schema()
+        ss = _ShardState(index=0, schema=schema, fact_ids=[1], stub_tables=[])
+        ss.output = UnifiedExtractionOutput()
+        assert stage3_reconciliation is not None
+        # An empty allocation for the referenced fact must degrade, not raise.
+        from src.orchestration.stage3.reconciliation import _reconcile_and_apply as ra
+
+        monkeypatch.setattr(
+            stage3_reconciliation, "analyze_cross_shard_constraints", _empty_report
+        )
+        monkeypatch.setattr(
+            stage3_reconciliation,
+            "evaluate_constraints",
+            lambda bridged, sch: __import__(
+                "src.util.constraint_model.conflicts.models",
+                fromlist=["ConflictReport"],
+            ).ConflictReport(),
+        )
+        conflicts, dismissed, unsupported, tokens, _dof = await ra(
+            [ss], schema, facts_map, {}, None, 5, 5, 3
+        )
         assert conflicts == []
 
     @pytest.mark.asyncio
@@ -414,7 +525,7 @@ class TestReconcileAndApplyRouting:
         monkeypatch.setattr(stage3_reconciliation, "_rerun_shard", fake_rerun_shard)
 
         conflicts, dismissed, unsupported, tokens, _dof = await _reconcile_and_apply(
-            [ss], schema, facts_map, {1: 0}, None, 5, 10, 2
+            [ss], schema, facts_map, {1: [0]}, None, 5, 10, 2
         )
         # After max_constraint_retries=2 reconciler calls with no resolution,
         # the conflict is auto-dismissed rather than looping to max_rounds=10.

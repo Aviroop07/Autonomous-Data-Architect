@@ -64,7 +64,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from src.pipeline.stage1.models.rephrased_nl import AtomicFact
 from src.util.schema_model.schema import Schema
@@ -248,7 +248,17 @@ async def orchestrate(
         [ss.output for ss in shard_states],
     )
 
-    fact_to_shard = {fid: ss.index for ss in shard_states for fid in ss.fact_ids}
+    # One fact can legitimately land in SEVERAL shards -- fact_allocation's
+    # similarity expansion and orphan recovery both add a fact to any shard whose
+    # tables it touches, and the module's own docstring calls cross-shard facts
+    # the normal case. This used to be `{fid: ss.index for ...}`, i.e. last shard
+    # wins, so a MISEXTRACTION fix re-ran ONE arbitrary shard and every other
+    # copy kept the bad extraction -- silently defeating the reconciliation the
+    # fix was requested for.
+    fact_to_shards: Dict[int, List[int]] = {}
+    for ss in shard_states:
+        for fid in ss.fact_ids:
+            fact_to_shards.setdefault(fid, []).append(ss.index)
 
     (
         conflicts,
@@ -260,7 +270,7 @@ async def orchestrate(
         shard_states,
         schema,
         facts_map,
-        fact_to_shard,
+        fact_to_shards,
         model,
         resolved_rerun_max_retries,
         max_reconciliation_rounds,
