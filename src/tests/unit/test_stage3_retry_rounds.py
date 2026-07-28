@@ -27,8 +27,19 @@ def test_one_round_is_one_pass_through_every_node():
 
 
 def test_three_rounds_affords_two_genuine_retries():
-    """The default. One initial pass plus two retries."""
     assert rounds_to_max_iter(3) == 3 * GENERATOR_GRAPH_NODE_COUNT
+
+
+def test_two_rounds_affords_one_genuine_retry():
+    """The default, as of the 2-vs-3 cost/recall tradeoff: one initial pass
+    plus one retry. Measured on the hospital spec (experiments/
+    stage3_recall_rate.py), 3 rounds took fanout recall 92% -> 100% but cost
+    ~2.5x the tokens/time of the old always-one-pass behaviour; recall was
+    already saturated by the second round in every run that needed a retry at
+    all. 2 rounds is a considered default trading some of that headroom back
+    for ~1.7x instead of ~2.5x -- not a re-measured one, so revisit with a
+    direct 2-vs-3 comparison before an eval campaign if the budget allows."""
+    assert rounds_to_max_iter(2) == 2 * GENERATOR_GRAPH_NODE_COUNT
 
 
 def test_rounds_below_one_still_yields_a_usable_budget():
@@ -50,5 +61,7 @@ def test_default_phase1_budget_permits_a_retry_edge_to_fire():
         "Phase 1 must convert rounds to raw iterations through the shared "
         "helper, not with an inline multiplier"
     )
-    # Default is 3 rounds; anything > one pass proves a retry is reachable.
-    assert rounds_to_max_iter(3) > GENERATOR_GRAPH_NODE_COUNT
+    assert entry._DEFAULT_PHASE1_ROUNDS >= 2, (
+        "the default must afford at least one retry beyond the first pass"
+    )
+    assert rounds_to_max_iter(entry._DEFAULT_PHASE1_ROUNDS) > GENERATOR_GRAPH_NODE_COUNT
