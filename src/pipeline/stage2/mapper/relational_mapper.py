@@ -7,6 +7,7 @@ from src.util.schema_model.schema import (
     ForeignKey,
     Schema,
     Table,
+    looks_singular_noun,
     to_snake_case,
 )
 from src.pipeline.stage2.mapper.conceptual_model import ConceptualModel, Relationship
@@ -44,18 +45,17 @@ def _resolve_pk_column(
     return column
 
 
-def looks_singular_noun(name: str) -> bool:
-    """Basic heuristic to avoid verb/plural relationships."""
-    candidate = name.upper()
-    if candidate.endswith("S") and candidate not in {
-        "STATUS",
-        "ACCESS",
-        "PROCESS",
-        "DIAGNOSIS",
-        "TV_SERIES",
-    }:
-        return False
-    return True
+# looks_singular_noun is imported from util.schema_model.schema, which has always
+# claimed in its own docstring to be "shared by ... the mapper's junction-name
+# acceptability check" -- while this module shadowed it with a weaker copy that
+# matched a hardcoded domain word set against the WHOLE name instead of
+# tokenizing. The two disagreed on half the names tested, and always in the same
+# direction: the local copy called a singular noun plural (ORDER_STATUS,
+# PATIENT_DIAGNOSIS, ADDRESS, ANALYSIS, CAMPUS, BONUS), so the mapper rejected
+# perfectly good relationship names for junction tables and fell back to
+# composing one from the participants. The canonical version also carries no
+# domain vocabulary -- its exceptions are English morphology (NEWS/SERIES/
+# SPECIES) plus the SS/IS/US suffixes.
 
 
 def _derive_junction_name(

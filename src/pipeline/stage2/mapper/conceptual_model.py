@@ -69,6 +69,40 @@ class ConceptualModel(LoopOutputModel):  # participates in the self-correction l
         errors = []
         entity_names = {e.name.lower() for e in self.entities}
 
+        # Two entities sharing a name silently destroy one of them. Nothing else
+        # in the pipeline catches it: the merger refuses to merge entities from
+        # the SAME shard by construction, so both survive to the mapper, which
+        # maps them onto one table name; the duplicate is discarded and the
+        # final schema validates clean, having lost an entity's attributes and
+        # every fact only it carried. Compared case-insensitively because table
+        # names are upper-cased downstream, so two spellings collide as well.
+        seen_entities: dict[str, int] = {}
+        for e in self.entities:
+            key = e.name.lower()
+            seen_entities[key] = seen_entities.get(key, 0) + 1
+        for name, count in seen_entities.items():
+            if count > 1:
+                errors.append(
+                    f"Entity name '{name}' is used by {count} entities. Each concept "
+                    "must appear exactly once: merge them into a single entity holding "
+                    "the union of their attributes and source_fact_ids, or rename them "
+                    "to the distinct concepts the facts actually describe."
+                )
+
+        # Same failure one level down: duplicate attributes collapse into one
+        # column, so the survivor's type and nullability silently win.
+        for e in self.entities:
+            seen_attrs: dict[str, int] = {}
+            for a in e.attributes:
+                seen_attrs[a.name.lower()] = seen_attrs.get(a.name.lower(), 0) + 1
+            for attr_name, count in seen_attrs.items():
+                if count > 1:
+                    errors.append(
+                        f"Entity '{e.name}' declares the attribute '{attr_name}' "
+                        f"{count} times. Keep one, carrying the union of its "
+                        "source_fact_ids."
+                    )
+
         for e in self.entities:
             if e.is_weak and e.owner and e.owner.lower() not in entity_names:
                 errors.append(f"Weak entity '{e.name}' has unknown owner '{e.owner}'.")

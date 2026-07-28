@@ -15,30 +15,13 @@ from src.util.schema_model.schema import Schema
 from src.orchestration.stage3.state import _Merged
 
 
-def _schema_to_text(schema: Schema, stub_tables: Optional[List[str]] = None) -> str:
-    lines: List[str] = ["## SCHEMA SHARD"]
-    for table in schema.tables:
-        lines.append(f"### {table.name}")
-        lines.append(f"  Primary key: {', '.join(table.primary_key)}")
-        for col in table.columns:
-            nullable = "NULL" if col.is_nullable else "NOT NULL"
-            lines.append(f"  {col.name}: {col.data_type} {nullable}")
-        for fk in schema.relationships or []:
-            if fk.referencing_table == table.name:
-                lines.append(
-                    f"  FK: {fk.referencing_column} -> "
-                    f"{fk.referred_table} (its primary key)"
-                )
-
-    if stub_tables:
-        lines.append("\n## STUB TABLES (cross-shard, schema-only)")
-        for stub in stub_tables:
-            lines.append(f"### {stub} (stub)")
-            lines.append("  (columns not available -- use for ON-tree references only)")
-
-    return "\n".join(lines)
-
-
+# NOTE: the constraint_generator agent has its own _facts_to_text and the two are
+# NOT interchangeable, so they are deliberately not consolidated the way
+# schema_to_prompt_text was. That one takes facts_map keyed by int with AtomicFact
+# values; the agent's sees the same map after a JSON round-trip through
+# initial_context, so its keys are strings and its values plain dicts. Sharing one
+# implementation would silently miss every entry on one of the two paths -- a bug
+# the agent-side comment records having already been hit once.
 def _facts_to_text(fact_ids: List[int], facts_map: Dict[int, AtomicFact]) -> str:
     lines: List[str] = ["## FACTS"]
     for fid in sorted(fact_ids):

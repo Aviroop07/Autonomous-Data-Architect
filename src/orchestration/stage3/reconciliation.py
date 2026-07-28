@@ -34,8 +34,8 @@ from src.pipeline.stage3.models.probe import (
 from src.orchestration.stage3.context import (
     _facts_to_text,
     _render_involved_constraints,
-    _schema_to_text,
 )
+from src.util.schema_model.render import schema_to_prompt_text
 from src.orchestration.stage3.extraction import _rerun_shard
 from src.orchestration.stage3.state import _ShardState, _merge_all
 from src.util.constraint_model.bridge.from_cross_shard import bridge_constraints
@@ -261,7 +261,7 @@ async def _reconcile_and_apply(
         async def _reconcile_one_group(
             group: List[_ConflictItem],
         ) -> Tuple[List[_ConflictItem], GroupReconciliation, int]:
-            schema_text = _schema_to_text(analysis_schema)
+            schema_text = schema_to_prompt_text(analysis_schema)
             request_items = [
                 ConflictItemForReconciliation(
                     conflict_ref=it.conflict_ref,

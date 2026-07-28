@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 from src.pipeline.stage3.agents.extraction_outputs import AuditReport, UnifiedOutput
 from src.pipeline.stage3.models.cross_shard import UnifiedExtractionOutput
 from src.util.schema_model.schema import Schema
+from src.util.schema_model.render import schema_to_prompt_text
 from src.util.core.agent import AgentType, get_agent_
 from src.util.core.invoke import get_response
 from src.util.orchestration.loop_types import (
@@ -29,30 +30,6 @@ from src.util.orchestration.loop_types import (
 logger = logging.getLogger(__name__)
 
 PROMPT_PATH = Path(__file__).parent / "prompt.txt"
-
-
-def _schema_to_text(schema: Schema, stub_tables: Optional[List[str]] = None) -> str:
-    lines: List[str] = ["## SCHEMA SHARD"]
-    for table in schema.tables:
-        lines.append(f"### {table.name}")
-        lines.append(f"  Primary key: {', '.join(table.primary_key)}")
-        for col in table.columns:
-            nullable = "NULL" if col.is_nullable else "NOT NULL"
-            lines.append(f"  {col.name}: {col.data_type} {nullable}")
-        for fk in schema.relationships or []:
-            if fk.referencing_table == table.name:
-                lines.append(
-                    f"  FK: {fk.referencing_column} -> "
-                    f"{fk.referred_table} (its primary key)"
-                )
-
-    if stub_tables:
-        lines.append("\n## STUB TABLES (cross-shard, schema-only)")
-        for stub in stub_tables:
-            lines.append(f"### {stub} (stub)")
-            lines.append("  (columns not available -- use for ON-tree references only)")
-
-    return "\n".join(lines)
 
 
 def _facts_to_text(fact_ids: List[int], facts_map: dict) -> str:
@@ -134,7 +111,7 @@ class ConstraintGeneratorLoopAgent(LoopAgent):
 
         parts: List[str] = []
         if schema is not None:
-            parts.append(_schema_to_text(schema, stub_tables))
+            parts.append(schema_to_prompt_text(schema, stub_tables))
         if fact_ids and facts_map:
             parts.append(_facts_to_text(fact_ids, facts_map))
 
