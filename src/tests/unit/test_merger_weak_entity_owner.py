@@ -17,6 +17,7 @@ from src.pipeline.stage2.mapper.conceptual_model import (
     CMAttribute,
     ConceptualModel,
     Entity,
+    FunctionalDependency,
 )
 from src.pipeline.stage2.middleware.conceptual_merger import merge_all_shards
 
@@ -117,3 +118,59 @@ def test_a_strong_entity_is_not_made_weak() -> None:
     shipment = _find(merged, "Shipment")
     assert not shipment.is_weak
     assert shipment.owner is None
+
+
+def test_functional_dependencies_survive_the_merge() -> None:
+    """The merged model was built without the field, so every FD was discarded --
+    which silently disabled the mapper's only natural-key inference path."""
+    shard = ConceptualModel(
+        entities=[_entity("Shipment", "shipment_code")],
+        relationships=[],
+        functional_dependencies=[
+            FunctionalDependency(
+                determinant=["Shipment.shipment_code"],
+                dependent=["Shipment.dispatched_at"],
+            )
+        ],
+    )
+    merged, _flags = merge_all_shards([shard], _facts(2))
+
+    assert merged.functional_dependencies, "FDs were dropped"
+    fd = merged.functional_dependencies[0]
+    assert fd.determinant[0].endswith(".shipment_code")
+    # The entity half must name a real merged entity, not a shard-local name.
+    assert fd.determinant[0].split(".")[0] in {e.name for e in merged.entities}
+
+
+def test_an_fd_naming_a_vanished_entity_is_dropped_not_half_remapped() -> None:
+    shard = ConceptualModel(
+        entities=[_entity("Shipment", "shipment_code")],
+        relationships=[],
+        functional_dependencies=[
+            FunctionalDependency(
+                determinant=["Shipment.shipment_code"],
+                dependent=["Ghost.whatever"],
+            )
+        ],
+    )
+    merged, _flags = merge_all_shards([shard], _facts(2))
+    assert merged.functional_dependencies == [], (
+        "a partially resolvable FD changes meaning; it must be dropped whole"
+    )
+
+
+def test_identical_fds_from_two_shards_are_deduplicated() -> None:
+    def _shard() -> ConceptualModel:
+        return ConceptualModel(
+            entities=[_entity("Shipment", "shipment_code")],
+            relationships=[],
+            functional_dependencies=[
+                FunctionalDependency(
+                    determinant=["Shipment.shipment_code"],
+                    dependent=["Shipment.dispatched_at"],
+                )
+            ],
+        )
+
+    merged, _flags = merge_all_shards([_shard(), _shard()], _facts(2))
+    assert len(merged.functional_dependencies) == 1

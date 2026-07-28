@@ -1,10 +1,11 @@
 import numpy as np
 from collections import Counter
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from src.pipeline.stage2.mapper.conceptual_model import (
     ConceptualModel,
     Entity,
+    FunctionalDependency,
     Relationship,
     Participant,
 )
@@ -336,6 +337,49 @@ def merge_all_shards(
 
     unified_rels = list(unified_rels_dict.values())
 
+    # 7b. Merge functional dependencies.
+    #
+    # These were dropped outright: the merged ConceptualModel was built without
+    # the field, so every FD the extractor produced was discarded. That silently
+    # disabled the mapper's only natural-key inference path -- it consults
+    # cm.functional_dependencies when an entity declares no identifier_attributes,
+    # and with the list always empty that branch could never fire, so such
+    # entities always received a synthesized surrogate key instead of the natural
+    # one the facts described.
+    #
+    # Determinants and dependents are qualified "ENTITY.attribute", so the entity
+    # half needs the same remap participants and weak-entity owners go through.
+    unified_fds: List[FunctionalDependency] = []
+    seen_fds: set[Tuple[Tuple[str, ...], Tuple[str, ...]]] = set()
+    for s_idx, shard in enumerate(shards):
+
+        def remap_qualified(ref: str) -> Optional[str]:
+            if "." not in ref:
+                return None
+            e_name, a_name = ref.split(".", 1)
+            merged = entity_remap.get(f"SHARD_{s_idx}_{e_name}")
+            if merged is None:
+                merged = e_name if e_name in merged_names else None
+            return f"{merged}.{a_name}" if merged else None
+
+        for fd in shard.functional_dependencies:
+            raw_det = [remap_qualified(d) for d in fd.determinant]
+            raw_dep = [remap_qualified(d) for d in fd.dependent]
+            # An FD whose entity no longer exists cannot be enforced, and a
+            # partially remapped one would silently change meaning, so require
+            # every reference to resolve rather than keeping a subset.
+            if not raw_det or not raw_dep:
+                continue
+            if any(x is None for x in raw_det) or any(x is None for x in raw_dep):
+                continue
+            det: List[str] = [x for x in raw_det if x is not None]
+            dep: List[str] = [x for x in raw_dep if x is not None]
+            key = (tuple(det), tuple(dep))
+            if key in seen_fds:
+                continue
+            seen_fds.add(key)
+            unified_fds.append(FunctionalDependency(determinant=det, dependent=dep))
+
     # 8. Extract Semantic Flags (Attribute Synonyms & Cross-Category)
     # Uses the same Beta mixture approach: P(high-component | sim) > 0.5 → flag.
     # Near-0.5 posteriors → uncertain → LLM adjudicator decides.
@@ -398,6 +442,10 @@ def merge_all_shards(
                     )
                 )
 
-    final_cm = ConceptualModel(entities=unified_entities, relationships=unified_rels)
+    final_cm = ConceptualModel(
+        entities=unified_entities,
+        relationships=unified_rels,
+        functional_dependencies=unified_fds,
+    )
 
     return final_cm, flags

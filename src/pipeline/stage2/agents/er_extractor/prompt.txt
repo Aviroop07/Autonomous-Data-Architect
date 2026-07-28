@@ -135,6 +135,31 @@ Model such a property as a dedicated event entity:
 The downstream mapper synthesizes the foreign key from the relationship and the weak-entity
 ownership. Never add a reference column by hand.
 
+### 9. Subtype and Supertype Statements
+When the source material says one concept is a kind, type, category, variety or
+specialization of another -- or that one is a general class the other falls under -- that
+is a statement about structure and must be modelled, not merely recorded as provenance.
+This model has no dedicated inheritance construct, so express it with the constructs it
+does have:
+
+- emit BOTH concepts as entities, keeping the vocabulary the text uses for each;
+- connect them with a `kind="1:1"` relationship named as a singular noun for the
+  specialization;
+- on the SUBTYPE participant set `cardinality_min=1` (every instance of the subtype is
+  necessarily an instance of the supertype);
+- on the SUPERTYPE participant set `cardinality_min=0` and `cardinality_max=1` (an
+  instance of the general class need not be an instance of that particular specialization,
+  and corresponds to at most one).
+
+This yields a subtype table carrying a foreign key to its supertype, which is the standard
+relational rendering of a specialization. Omitting the relationship and listing the fact
+only in the subtype entity's `source_fact_ids` leaves the subtype with no linkage at all,
+and the statement is then lost from the schema entirely.
+
+Do not invent a hierarchy the text does not state, and do not collapse the two concepts
+into one entity with a type/category attribute unless the source material itself describes
+the distinction as a property value rather than as a kind of thing.
+
 ## RESTRICTIONS
 - Do NOT emit reference/foreign-key columns as attributes. Any attribute whose name encodes
   a pointer to another entity (a name formed from another entity's name plus an identifier
