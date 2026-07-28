@@ -4,9 +4,6 @@ from __future__ import annotations
 
 from src.util.constraint_model.condition.expressions import (
     RAggregateRef,
-    RArithmetic,
-    RColumnRef,
-    RLiteral,
 )
 from src.util.constraint_model.condition.predicates import (
     RAnd,
@@ -22,67 +19,18 @@ from src.util.constraint_model.relation.nodes import (
     Fanout,
     Filter,
     Join,
-    JoinCondition,
     Project,
-    ProjectEntry,
 )
-from src.util.constraint_model.relation.sql_bridge import (
-    condition_to_sql,
-    expr_to_sql,
-    from_sql,
-    to_sql,
-)
+from src.util.constraint_model.relation.sql_bridge import from_sql
 
 
 def _order() -> BaseTable:
     return BaseTable(name="ORDER")
 
 
-class TestExprToSql:
-    def test_literal_numeric(self):
-        assert expr_to_sql(RLiteral(value=5)) == "5"
-
-    def test_literal_string_escapes_quotes(self):
-        assert expr_to_sql(RLiteral(value="it's")) == "'it''s'"
-
-    def test_literal_bool(self):
-        assert expr_to_sql(RLiteral(value=True)) == "TRUE"
-
-    def test_column_ref(self):
-        assert expr_to_sql(RColumnRef(name="total")) == "total"
-
-    def test_aggregate_ref(self):
-        assert expr_to_sql(RAggregateRef(alias="total_sum")) == "total_sum"
-
-    def test_arithmetic(self):
-        expr = RArithmetic(
-            op="+", left=RColumnRef(name="a"), right=RColumnRef(name="b")
-        )
-        assert expr_to_sql(expr) == "(a + b)"
-
-
-class TestConditionToSql:
-    def test_comparison(self):
-        c = RComparison(
-            op=">", left=RColumnRef(name="total"), right=RLiteral(value=100)
-        )
-        assert condition_to_sql(c) == "total > 100"
-
-    def test_and(self):
-        c = RAnd(
-            operands=[
-                RComparison(op=">", left=RColumnRef(name="a"), right=RLiteral(value=1)),
-                RComparison(op="<", left=RColumnRef(name="b"), right=RLiteral(value=2)),
-            ]
-        )
-        assert condition_to_sql(c) == "(a > 1) AND (b < 2)"
-
-
 class TestBaseTableRoundTrip:
     def test_valid_base_table(self):
-        sql = to_sql(_order())
-        assert sql == "SELECT * FROM ORDER"
-        obj, errors = from_sql(sql)
+        obj, errors = from_sql('SELECT * FROM ORDER')
         assert errors == []
         assert isinstance(obj, BaseTable)
         assert obj.name == "ORDER"
@@ -95,13 +43,7 @@ class TestBaseTableRoundTrip:
 
 class TestJoinRoundTrip:
     def test_single_condition_join(self):
-        j = Join(
-            left=BaseTable(name="ORDER_ITEM"),
-            right=_order(),
-            on=[JoinCondition(left="ORDER_ITEM.order_id", right="ORDER.id")],
-        )
-        sql = to_sql(j)
-        obj, errors = from_sql(sql)
+        obj, errors = from_sql('SELECT * FROM ORDER_ITEM INNER JOIN ORDER ON ORDER_ITEM.order_id = ORDER.id')
         assert errors == []
         assert isinstance(obj, Join)
         assert obj.on[0].left == "ORDER_ITEM.order_id"
@@ -125,83 +67,38 @@ class TestJoinRoundTrip:
 
 class TestFilterRoundTrip:
     def test_simple_comparison(self):
-        f = Filter(
-            source=_order(),
-            condition=RComparison(
-                op=">", left=RColumnRef(name="total"), right=RLiteral(value=100)
-            ),
-        )
-        obj, errors = from_sql(to_sql(f))
+        obj, errors = from_sql('SELECT * FROM ORDER WHERE total > 100')
         assert errors == []
         assert isinstance(obj, Filter)
         assert isinstance(obj.condition, RComparison)
 
     def test_between(self):
-        f = Filter(
-            source=_order(),
-            condition=RBetween(
-                expr=RColumnRef(name="total"),
-                low=RLiteral(value=1),
-                high=RLiteral(value=10),
-            ),
-        )
-        obj, errors = from_sql(to_sql(f))
+        obj, errors = from_sql('SELECT * FROM ORDER WHERE total BETWEEN 1 AND 10')
         assert errors == []
         assert isinstance(obj, Filter)
         assert isinstance(obj.condition, RBetween)
 
     def test_in_set(self):
-        f = Filter(
-            source=_order(),
-            condition=RInSet(expr=RColumnRef(name="status"), values=["a", "b"]),
-        )
-        obj, errors = from_sql(to_sql(f))
+        obj, errors = from_sql("SELECT * FROM ORDER WHERE status IN ('a', 'b')")
         assert errors == []
         assert isinstance(obj, Filter)
         assert isinstance(obj.condition, RInSet)
         assert set(obj.condition.values) == {"a", "b"}
 
     def test_not_in_set(self):
-        f = Filter(
-            source=_order(),
-            condition=RNotInSet(expr=RColumnRef(name="status"), values=["a", "b"]),
-        )
-        obj, errors = from_sql(to_sql(f))
+        obj, errors = from_sql("SELECT * FROM ORDER WHERE NOT status IN ('a', 'b')")
         assert errors == []
         assert isinstance(obj, Filter)
         assert isinstance(obj.condition, RNotInSet)
 
     def test_not(self):
-        f = Filter(
-            source=_order(),
-            condition=RNot(
-                operand=RComparison(
-                    op="=", left=RColumnRef(name="x"), right=RLiteral(value=1)
-                )
-            ),
-        )
-        obj, errors = from_sql(to_sql(f))
+        obj, errors = from_sql('SELECT * FROM ORDER WHERE NOT (x = 1)')
         assert errors == []
         assert isinstance(obj, Filter)
         assert isinstance(obj.condition, RNot)
 
     def test_compound_and(self):
-        f = Filter(
-            source=_order(),
-            condition=RAnd(
-                operands=[
-                    RComparison(
-                        op=">", left=RColumnRef(name="total"), right=RLiteral(value=1)
-                    ),
-                    RComparison(
-                        op="=",
-                        left=RColumnRef(name="status"),
-                        right=RLiteral(value="shipped"),
-                    ),
-                ]
-            ),
-        )
-        obj, errors = from_sql(to_sql(f))
+        obj, errors = from_sql("SELECT * FROM ORDER WHERE (total > 1) AND (status = 'shipped')")
         assert errors == []
         assert isinstance(obj, Filter)
         assert isinstance(obj.condition, RAnd)
@@ -210,14 +107,7 @@ class TestFilterRoundTrip:
 
 class TestProjectRoundTrip:
     def test_passthrough_and_rename(self):
-        p = Project(
-            source=_order(),
-            columns=[
-                ProjectEntry(expr=RColumnRef(name="id")),
-                ProjectEntry(expr=RColumnRef(name="total"), alias="amount"),
-            ],
-        )
-        obj, errors = from_sql(to_sql(p))
+        obj, errors = from_sql('SELECT id, total AS amount FROM ORDER')
         assert errors == []
         assert isinstance(obj, Project)
         assert [c.output_name() for c in obj.columns] == ["id", "amount"]
@@ -230,14 +120,7 @@ class TestProjectRoundTrip:
 
 class TestAggregateAndHavingRoundTrip:
     def test_grouped_sum(self):
-        agg = Aggregate(
-            source=BaseTable(name="PAYMENT"),
-            fn="SUM",
-            column="amount",
-            group_by=["order_id"],
-            alias="total_paid",
-        )
-        obj, errors = from_sql(to_sql(agg))
+        obj, errors = from_sql('SELECT order_id, SUM(amount) AS total_paid FROM PAYMENT GROUP BY order_id')
         assert errors == []
         assert isinstance(obj, Aggregate)
         assert obj.fn == "SUM"
@@ -245,32 +128,14 @@ class TestAggregateAndHavingRoundTrip:
         assert obj.alias == "total_paid"
 
     def test_count_distinct(self):
-        agg = Aggregate(
-            source=_order(), fn="COUNT_DISTINCT", column="customer_id", alias="n"
-        )
-        obj, errors = from_sql(to_sql(agg))
+        obj, errors = from_sql('SELECT COUNT(DISTINCT customer_id) AS n FROM ORDER')
         assert errors == []
         assert isinstance(obj, Aggregate)
         assert obj.fn == "COUNT_DISTINCT"
         assert obj.column == "customer_id"
 
     def test_having_over_aggregate_round_trips_to_aggregate_ref(self):
-        agg = Aggregate(
-            source=BaseTable(name="PAYMENT"),
-            fn="SUM",
-            column="amount",
-            group_by=["order_id"],
-            alias="total_paid",
-        )
-        having = Filter(
-            source=agg,
-            condition=RComparison(
-                op=">",
-                left=RAggregateRef(alias="total_paid"),
-                right=RLiteral(value=1000),
-            ),
-        )
-        obj, errors = from_sql(to_sql(having))
+        obj, errors = from_sql('SELECT * FROM (SELECT order_id, SUM(amount) AS total_paid FROM PAYMENT GROUP BY order_id) AS sub_1 WHERE total_paid > 1000')
         assert errors == []
         assert isinstance(obj, Filter)
         assert isinstance(obj.source, Aggregate)
@@ -291,17 +156,6 @@ class TestAggregateAndHavingRoundTrip:
         obj, errors = from_sql(sql)
         assert obj is None
         assert len(errors) == 1
-
-
-class TestFanoutSerializationOnly:
-    def test_fanout_serializes_to_left_join_count(self):
-        fan = Fanout(
-            parent_table="CUSTOMER", child_table="ORDER", fk_column="customer_id"
-        )
-        sql = to_sql(fan)
-        assert "LEFT JOIN" in sql
-        assert "COUNT(*)" in sql
-        assert "GROUP BY" in sql
 
 
 class TestOutOfScopeRejections:
@@ -334,3 +188,26 @@ class TestOutOfScopeRejections:
         obj, errors = from_sql("SELEC * FORM T")
         assert obj is None
         assert len(errors) == 1
+
+
+class TestFanoutIsNotRecoverableFromSql:
+    """The zero-preserving guarantee has no SQL spelling.
+
+    A fanout serializes to a LEFT JOIN plus COUNT(*) GROUP BY, but parsing that
+    shape back yields an ordinary Aggregate -- the "count parents with zero
+    children" semantics is not recoverable from the SQL. This is exactly why the
+    constraint_generator prompt tells the model to emit a `fanout` node directly
+    rather than compose one, so it is worth pinning as a parser property rather
+    than leaving it as prose in a prompt.
+    """
+
+    def test_left_join_count_parses_as_aggregate_not_fanout(self):
+        sql = (
+            "SELECT CUSTOMER.*, COUNT(*) AS child_count FROM CUSTOMER "
+            "LEFT JOIN ORDER ON ORDER.customer_id = CUSTOMER.id GROUP BY CUSTOMER.id"
+        )
+        obj, errors = from_sql(sql)
+        assert not isinstance(obj, Fanout), (
+            "if the parser ever learns to recover a Fanout from this shape, the "
+            "generator prompt's 'never compose a fanout' rule can be relaxed"
+        )

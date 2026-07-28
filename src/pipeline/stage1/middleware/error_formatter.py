@@ -1,5 +1,5 @@
 from typing import List
-from src.util.orchestration.retry_loop import ErrorRecord, ErrorType
+from src.util.orchestration.error_records import ErrorRecord, ErrorType
 from src.pipeline.stage1.models.raw_fact import RawFact
 
 def format_errors_for_stage1(

@@ -74,13 +74,11 @@ from src.util.constraint_model.relation.nodes import (
     Aggregate,
     AggregateFn,
     BaseTable,
-    Fanout,
     Filter,
     Join,
     JoinCondition,
     Project,
     ProjectEntry,
-    RawSQL,
     RelationUnion,
 )
 
@@ -121,82 +119,9 @@ _ARITHMETIC_OPS: Dict[type, _ArithmeticOp] = {
 }
 
 
-class _SqlNamer:
-    """Assigns deterministic, unique subquery aliases for anonymous
-    (alias-less) derived Relation nodes during serialization -- mirrors
-    relation/schema.py's _NodeNamer, but scoped to this module (sql
-    rendering needs its own alias namespace, distinct from row-count
-    variable naming)."""
-
-    def __init__(self) -> None:
-        self._counter = 0
-        self._cache: dict[int, str] = {}
-
-    def name_for(self, node: "RelationUnion") -> str:
-        # Aggregate.alias is its own RESULT-COLUMN alias (e.g. the "total_
-        # paid" in SUM(amount) AS total_paid), not a relation/subquery
-        # alias -- reusing it here would collide the subquery's name with
-        # its own output column's name. Only node types with a genuine
-        # relation-alias field are consulted.
-        alias = None if isinstance(node, Aggregate) else getattr(node, "alias", None)
-        if alias:
-            return alias
-        if isinstance(node, BaseTable):
-            return node.name
-        key = id(node)
-        if key in self._cache:
-            return self._cache[key]
-        self._counter += 1
-        name = f"sub_{self._counter}"
-        self._cache[key] = name
-        return name
-
-
 # ---------------------------------------------------------------------------
 # Expression / predicate -> SQL text (serialization)
 # ---------------------------------------------------------------------------
-
-
-def expr_to_sql(node: "RExprUnion") -> str:
-    if isinstance(node, RLiteral):
-        if isinstance(node.value, bool):
-            return "TRUE" if node.value else "FALSE"
-        if isinstance(node.value, str):
-            escaped = node.value.replace("'", "''")
-            return f"'{escaped}'"
-        return str(node.value)
-    if isinstance(node, RColumnRef):
-        return node.name
-    if isinstance(node, RAggregateRef):
-        return node.alias
-    if isinstance(node, RArithmetic):
-        return f"({expr_to_sql(node.left)} {node.op} {expr_to_sql(node.right)})"
-    raise ValueError(f"Unknown expression node type: {type(node).__name__}")
-
-
-def condition_to_sql(node: "RPredicateUnion") -> str:
-    if isinstance(node, RComparison):
-        return f"{expr_to_sql(node.left)} {node.op} {expr_to_sql(node.right)}"
-    if isinstance(node, RAnd):
-        return " AND ".join(f"({condition_to_sql(op)})" for op in node.operands)
-    if isinstance(node, ROr):
-        return " OR ".join(f"({condition_to_sql(op)})" for op in node.operands)
-    if isinstance(node, RNot):
-        return f"NOT ({condition_to_sql(node.operand)})"
-    if isinstance(node, RBetween):
-        return (
-            f"{expr_to_sql(node.expr)} BETWEEN {expr_to_sql(node.low)} "
-            f"AND {expr_to_sql(node.high)}"
-        )
-    if isinstance(node, (RInSet, RNotInSet)):
-        values_sql = ", ".join(expr_to_sql(RLiteral(value=v)) for v in node.values)
-        keyword = "NOT IN" if isinstance(node, RNotInSet) else "IN"
-        return f"{expr_to_sql(node.expr)} {keyword} ({values_sql})"
-    if isinstance(node, RIfThen):
-        # Logical-implication rewrite: P -> Q  ==  NOT P OR Q. One-way only
-        # (see module docstring) -- this never round-trips back to RIfThen.
-        return f"(NOT ({condition_to_sql(node.antecedent)}) OR ({condition_to_sql(node.consequent)}))"
-    raise ValueError(f"Unknown predicate node type: {type(node).__name__}")
 
 
 # ---------------------------------------------------------------------------
@@ -381,95 +306,6 @@ def _substitute_aggregate_ref_expr(node: "RExprUnion", alias: str) -> "RExprUnio
 # ---------------------------------------------------------------------------
 # Relation -> SQL (serialization)
 # ---------------------------------------------------------------------------
-
-
-def to_sql(node: "RelationUnion", dialect: str = DEFAULT_DIALECT) -> str:
-    """Serializes `node` to a complete, valid SELECT statement. Every
-    level is independently a full SELECT (homogenization rule) -- nested
-    operands become subqueries rather than flattened clauses, trading
-    prettiness for guaranteed round-trippable correctness."""
-    select = _to_select(node, _SqlNamer())
-    return select.sql(dialect=dialect)
-
-
-def _from_source(node: "RelationUnion", namer: _SqlNamer) -> SqlExpr:
-    if isinstance(node, BaseTable):
-        table = exp.table_(node.name)
-        return cast(SqlExpr, table.as_(node.alias)) if node.alias else table
-    name = namer.name_for(node)
-    return _to_select(node, namer).subquery(name)
-
-
-def _to_select(node: "RelationUnion", namer: _SqlNamer) -> exp.Select:
-    if isinstance(node, BaseTable):
-        table = exp.table_(node.name)
-        if node.alias:
-            table = table.as_(node.alias)
-        return exp.select("*").from_(table)
-
-    if isinstance(node, Join):
-        cond = node.on[0]
-        on_expr = sqlglot.condition(f"{cond.left} = {cond.right}")
-        return (
-            exp.select("*")
-            .from_(_from_source(node.left, namer))
-            .join(_from_source(node.right, namer), on=on_expr, join_type="inner")
-        )
-
-    if isinstance(node, Filter):
-        return (
-            exp.select("*")
-            .from_(_from_source(node.source, namer))
-            .where(sqlglot.condition(condition_to_sql(node.condition)))
-        )
-
-    if isinstance(node, Project):
-        select_exprs = []
-        for entry in node.columns:
-            col_sql = expr_to_sql(entry.expr)
-            select_exprs.append(
-                f"{col_sql} AS {entry.alias}" if entry.alias else col_sql
-            )
-        return exp.select(*select_exprs).from_(_from_source(node.source, namer))
-
-    if isinstance(node, Aggregate):
-        fn_sql = _aggregate_fn_to_sql(node)
-        select_exprs = list(node.group_by or []) + [f"{fn_sql} AS {node.alias}"]
-        select = exp.select(*select_exprs).from_(_from_source(node.source, namer))
-        if node.group_by:
-            select = select.group_by(*node.group_by)
-        return select
-
-    if isinstance(node, Fanout):
-        parent = exp.table_(node.parent_table)
-        child = exp.table_(node.child_table)
-        on_expr = sqlglot.condition(
-            f"{node.child_table}.{node.fk_column} = {node.parent_table}.id"
-        )
-        return (
-            exp.select(f"{node.parent_table}.*", "COUNT(*) AS child_count")
-            .from_(parent)
-            .join(child, on=on_expr, join_type="left")
-            .group_by(f"{node.parent_table}.id")
-        )
-
-    if isinstance(node, RawSQL):
-        return cast(exp.Select, sqlglot.parse_one(node.sql, read=DEFAULT_DIALECT))
-
-    raise ValueError(f"Unknown Relation node type: {type(node).__name__}")
-
-
-def _aggregate_fn_to_sql(node: Aggregate) -> str:
-    if node.fn == "COUNT_DISTINCT":
-        return f"COUNT(DISTINCT {node.column})"
-    if node.fn == "MEDIAN":
-        return f"PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {node.column})"
-    if node.fn == "PERCENTILE":
-        p = (node.fn_param or 0) / 100.0
-        return f"PERCENTILE_CONT({p}) WITHIN GROUP (ORDER BY {node.column})"
-    if node.fn == "MODE":
-        return f"MODE() WITHIN GROUP (ORDER BY {node.column})"
-    return f"{node.fn}({node.column})"
 
 
 # ---------------------------------------------------------------------------

@@ -9,7 +9,7 @@ from src.util.orchestration.loop_types import (
     LoopContext,
     LoopOutputModel,
 )
-from src.util.orchestration.retry_loop import ErrorRecord, ErrorType, Severity
+from src.util.orchestration.error_records import ErrorRecord, ErrorType, Severity
 from src.pipeline.stage1.middleware.error_formatter import format_errors_for_stage1
 from src.pipeline.stage1.models.rephrased_nl import RephrasedOutput
 from src.pipeline.stage1.models.integrity_report import IntegrityReport

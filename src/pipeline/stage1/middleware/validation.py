@@ -1,5 +1,5 @@
 from typing import List
-from src.util.orchestration.retry_loop import ErrorRecord, ErrorType, Severity
+from src.util.orchestration.error_records import ErrorRecord, ErrorType, Severity
 from src.util.algorithms.semantic_match import FactOriginMatcher
 
 
