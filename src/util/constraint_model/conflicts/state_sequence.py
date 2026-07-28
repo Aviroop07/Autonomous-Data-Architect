@@ -28,7 +28,7 @@ from src.util.constraint_model.condition.cohesive import StateSequence
 from src.util.constraint_model.conflicts.models import Conflict
 from src.util.constraint_model.constraint import Constraint
 from src.util.constraint_model.population import Population, compute_population
-from src.pipeline.stage2.models.schema import Schema
+from src.util.schema_model.schema import Schema
 
 _Edge = Tuple[str, str]
 

@@ -20,7 +20,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-from src.pipeline.stage2.models.schema import Schema
+from src.util.schema_model.schema import Schema
 from src.pipeline.stage3.agents.extraction_outputs import UnifiedOutput
 from src.util.constraint_model.condition.expressions import RColumnRef, RLiteral
 from src.util.constraint_model.condition.predicates import (

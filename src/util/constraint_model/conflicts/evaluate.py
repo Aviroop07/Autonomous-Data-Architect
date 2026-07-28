@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import List
 
-from src.pipeline.stage2.models.schema import Schema
+from src.util.schema_model.schema import Schema
 from src.util.constraint_model.conflicts.correlated import check_correlated_conflicts
 from src.util.constraint_model.conflicts.distributed import check_distributed_conflicts
 from src.util.constraint_model.conflicts.grouping import (

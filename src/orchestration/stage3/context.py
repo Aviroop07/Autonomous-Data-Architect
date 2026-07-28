@@ -11,7 +11,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 from src.pipeline.stage1.models.rephrased_nl import AtomicFact
-from src.pipeline.stage2.models.schema import Schema
+from src.util.schema_model.schema import Schema
 from src.orchestration.stage3.state import _Merged
 
 

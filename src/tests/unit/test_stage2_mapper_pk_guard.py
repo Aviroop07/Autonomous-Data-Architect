@@ -14,8 +14,8 @@ from __future__ import annotations
 import logging
 
 from src.pipeline.stage2.mapper.relational_mapper import _resolve_pk_column
-from src.pipeline.stage2.models.data_types import DataType
-from src.pipeline.stage2.models.schema import Column
+from src.util.schema_model.data_types import DataType
+from src.util.schema_model.schema import Column
 
 
 def _cols() -> list[Column]:

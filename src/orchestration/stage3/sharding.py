@@ -11,8 +11,8 @@ import logging
 from typing import Dict, List, Optional, Tuple
 
 from src.pipeline.stage1.models.rephrased_nl import AtomicFact
-from src.pipeline.stage2.models.registry import TableFactRegistry
-from src.pipeline.stage2.models.schema import Schema, Table
+from src.util.schema_model.registry import TableFactRegistry
+from src.util.schema_model.schema import Schema, Table
 from src.pipeline.stage3.middleware.fact_allocation import find_mentioned_tables
 from src.pipeline.stage3.middleware.fact_column_mapping import build_fact_column_map
 from src.util.algorithms.sharding_ilp import shard_schema_auto

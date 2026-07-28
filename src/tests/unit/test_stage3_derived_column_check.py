@@ -13,8 +13,8 @@ from src.pipeline.stage3.middleware.deterministic_checker import (
     DeterministicCheckerLoopAgent,
 )
 from src.pipeline.stage3.models.grain import _SchemaView
-from src.pipeline.stage2.models.data_types import DataType
-from src.pipeline.stage2.models.schema import Column, Schema, Table
+from src.util.schema_model.data_types import DataType
+from src.util.schema_model.schema import Column, Schema, Table
 
 
 class _Derived:

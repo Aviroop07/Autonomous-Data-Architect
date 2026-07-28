@@ -15,7 +15,7 @@ from typing import Annotated, List, Literal, Union
 
 from pydantic import BaseModel, Field
 
-from src.pipeline.stage2.models.data_types import DataType
+from src.util.schema_model.data_types import DataType
 
 # ---------------------------------------------------------------------------
 # Type classification (Section 7.2's comparison type-compatibility rules)

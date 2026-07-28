@@ -10,8 +10,8 @@ both sides, not every column of ORDER.
 from __future__ import annotations
 
 from src.pipeline.stage1.models.atomic_fact import AtomicFact
-from src.pipeline.stage2.models.data_types import DataType
-from src.pipeline.stage2.models.schema import Column, ForeignKey, Schema, Table
+from src.util.schema_model.data_types import DataType
+from src.util.schema_model.schema import Column, ForeignKey, Schema, Table
 from src.pipeline.stage3.middleware.fact_column_mapping import build_fact_column_map
 
 

@@ -1,5 +1,5 @@
 from typing import List, Optional
-from src.pipeline.stage2.models.schema import (
+from src.util.schema_model.schema import (
     Schema,
     Table,
     Column,
@@ -21,7 +21,7 @@ from src.util.schema_ops.schema_patch import (
     RenameTablePatch,
     UpdateColumnTypePatch,
 )
-from src.pipeline.stage2.models.registry import TableFactRegistry
+from src.util.schema_model.registry import TableFactRegistry
 
 
 def apply_patches(

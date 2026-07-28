@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
 
-from src.pipeline.stage2.models.schema import Schema
+from src.util.schema_model.schema import Schema
 from src.pipeline.stage3.middleware.cycles import detect_derived_cycles
 from src.pipeline.stage3.middleware.fork_registry import (
     BranchCondition,

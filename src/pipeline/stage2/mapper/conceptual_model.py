@@ -2,7 +2,7 @@ from typing import List, Literal, Optional
 from pydantic import BaseModel
 from src.util.orchestration.loop_types import LoopOutputModel
 
-from src.pipeline.stage2.models.data_types import DataType
+from src.util.schema_model.data_types import DataType
 
 
 class CMAttribute(BaseModel):

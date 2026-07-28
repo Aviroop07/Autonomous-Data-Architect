@@ -44,7 +44,7 @@ from collections import defaultdict, deque
 from typing import Dict, List, Set, Tuple
 
 from src.pipeline.stage1.models.rephrased_nl import AtomicFact
-from src.pipeline.stage2.models.schema import Schema, Table
+from src.util.schema_model.schema import Schema, Table
 from src.pipeline.stage3.middleware.fact_allocation import find_mentioned_tables
 
 

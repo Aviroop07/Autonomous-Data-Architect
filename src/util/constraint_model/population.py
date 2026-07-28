@@ -21,7 +21,7 @@ from typing import Any, FrozenSet, List, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict
 
-from src.pipeline.stage2.models.schema import Schema
+from src.util.schema_model.schema import Schema
 from src.util.constraint_model.condition.predicates import RPredicateUnion
 from src.util.constraint_model.relation.nodes import (
     Aggregate,

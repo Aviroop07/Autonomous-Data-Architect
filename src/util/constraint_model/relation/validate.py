@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import List
 
-from src.pipeline.stage2.models.schema import Schema
+from src.util.schema_model.schema import Schema
 from src.util.constraint_model.condition.expressions import is_numeric, is_orderable
 from src.util.constraint_model.relation.nodes import Aggregate, Join, RelationUnion
 from src.util.constraint_model.relation.schema import (

@@ -1,5 +1,5 @@
 from pathlib import Path
-from src.pipeline.stage2.models.schema import Schema
+from src.util.schema_model.schema import Schema
 from src.util.schema_ops.schema_patch import CritiqueReport
 from src.pipeline.stage1.models.rephrased_nl import AtomicFact
 from src.util.core.agent import get_agent_, AgentType

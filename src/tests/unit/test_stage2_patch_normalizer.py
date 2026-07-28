@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any, Type, TypeVar
 
-from src.pipeline.stage2.models.schema import Column, Schema, Table
+from src.util.schema_model.schema import Column, Schema, Table
 from src.util.schema_ops.patching_engine import apply_patches
 from src.util.schema_ops.schema_patch import (
     _TABLE_NAME_ACTIONS,

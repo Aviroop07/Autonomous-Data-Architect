@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Dict, FrozenSet, List, Tuple
 
-from src.pipeline.stage2.models.schema import Schema
+from src.util.schema_model.schema import Schema
 from src.util.constraint_model.constraint import Constraint
 from src.util.constraint_model.population import FKEdge, Population, compute_population
 

@@ -25,7 +25,7 @@ from src.pipeline.stage2.models.conflicts import (
     ActionType,
     ResolutionAction,
 )
-from src.pipeline.stage2.models.data_types import DataType
+from src.util.schema_model.data_types import DataType
 
 
 def _model() -> ConceptualModel:

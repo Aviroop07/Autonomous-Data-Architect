@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 
 from src.orchestration.stage2.models import Output
-from src.pipeline.stage2.models.schema import Schema, Table, Column, DataType
+from src.util.schema_model.schema import Schema, Table, Column, DataType
 from src.pipeline.stage2.models.chunk import ChunkedPlan
 from src.pipeline.stage2.models.conflicts import (
     ActionType,
@@ -33,7 +33,7 @@ from src.pipeline.stage2.mapper.conceptual_model import (
     Relationship,
     Participant,
 )
-from src.pipeline.stage2.models.registry import TableFactRegistry
+from src.util.schema_model.registry import TableFactRegistry
 from src.pipeline.stage1.models.rephrased_nl import AtomicFact
 from src.pipeline.stage1.models.atomic_fact import FactTag
 from src.util.schema_ops.schema_patch import CritiqueReport

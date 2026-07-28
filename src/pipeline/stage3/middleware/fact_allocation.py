@@ -20,7 +20,7 @@ import re
 from pydantic import BaseModel, Field
 
 from src.pipeline.stage1.models.rephrased_nl import AtomicFact
-from src.pipeline.stage2.models.registry import TableFactRegistry
+from src.util.schema_model.registry import TableFactRegistry
 
 
 class SemanticSimilarity:

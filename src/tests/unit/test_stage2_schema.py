@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.pipeline.stage2.models.schema import (
+from src.util.schema_model.schema import (
     Column,
     CompositeUnique,
     Table,
@@ -21,7 +21,7 @@ from src.pipeline.stage2.models.schema import (
     is_upper_snake,
     is_lower_snake,
 )
-from src.pipeline.stage2.models.data_types import DataType
+from src.util.schema_model.data_types import DataType
 from src.tests.fixtures import sample_data
 
 

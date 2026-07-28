@@ -27,7 +27,7 @@ import logging
 from dataclasses import dataclass
 from typing import Dict, FrozenSet, Optional, Tuple, Union
 
-from src.pipeline.stage2.models.schema import Schema, Table, ForeignKey
+from src.util.schema_model.schema import Schema, Table, ForeignKey
 from src.util.constraint_model.relation.nodes import (
     Aggregate,
     BaseTable,

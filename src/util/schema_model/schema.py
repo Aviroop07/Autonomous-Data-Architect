@@ -1,18 +1,29 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, List, Optional, Dict, Set, Any
+from typing import List, Optional, Dict, Protocol, Set, Any
 from pydantic import BaseModel, Field, model_validator, computed_field
 from src.util.orchestration.loop_types import LoopOutputModel
-from src.pipeline.stage2.models.data_types import DataType
+from src.util.schema_model.data_types import DataType
 
 # Re-exported: `is_upper_snake`/`is_lower_snake` have long been imported from
 # this module by other Stage 2 code, so the names stay available here even
 # though the rules themselves now live in src/util/naming.py.
 from src.util.naming import is_lower_snake, is_upper_snake
 
-if TYPE_CHECKING:
-    from src.pipeline.stage2.models.registry import TableFactRegistry
+class TableRenameSink(Protocol):
+    """The only thing this module needs from a fact registry.
+
+    Was `if TYPE_CHECKING: from src.util.schema_model.registry import
+    TableFactRegistry` -- the last reference from this module back into
+    pipeline/. It was type-only and so never affected importability, but leaving
+    it would mean the schema model still names a Stage 2 class, which is the
+    coupling this move exists to remove. A structural type says exactly what is
+    required (be told when a table is renamed) without naming who provides it,
+    so TableFactRegistry continues to satisfy it with no change.
+    """
+
+    def rename_table(self, old_name: str, new_name: str) -> None: ...
 
 FORBIDDEN_TABLE_SUFFIXES = {"FACT", "DIM", "ID", "ATTR", "TABLE"}
 
@@ -157,7 +168,7 @@ class Table(BaseModel):
             for uq in self.unique:
                 uq.columns = [new_name if c == old_name else c for c in uq.columns]
 
-    def normalize(self, registry: Optional[TableFactRegistry] = None) -> None:
+    def normalize(self, registry: Optional[TableRenameSink] = None) -> None:
         """
         Normalizes table name and column names, and scrubs redundant unique constraints.
         """
@@ -437,7 +448,7 @@ class Schema(LoopOutputModel):
         return {t.name: t for t in self.tables}
 
     def rename_table(
-        self, old_name: str, new_name: str, registry: Optional[TableFactRegistry] = None
+        self, old_name: str, new_name: str, registry: Optional[TableRenameSink] = None
     ) -> None:
         """
         Renames a table and updates all its relationship occurrences.
@@ -474,7 +485,7 @@ class Schema(LoopOutputModel):
                 ):
                     rel.referencing_column = new_col_name
 
-    def normalize(self, registry: Optional[TableFactRegistry] = None) -> None:
+    def normalize(self, registry: Optional[TableRenameSink] = None) -> None:
         """
         Normalizes the entire schema.
         """

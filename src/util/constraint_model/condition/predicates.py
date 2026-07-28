@@ -16,7 +16,7 @@ from typing import Annotated, Dict, List, Literal, Union
 
 from pydantic import BaseModel, Field
 
-from src.pipeline.stage2.models.data_types import DataType
+from src.util.schema_model.data_types import DataType
 from src.util.constraint_model.condition.expressions import (
     RExprUnion,
     TypeMismatch,

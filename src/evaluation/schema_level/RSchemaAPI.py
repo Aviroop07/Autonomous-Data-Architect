@@ -6,7 +6,7 @@ from typing import Dict, Any, Tuple
 # Add src to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 
-from src.pipeline.stage2.models.schema import Schema, Table, Column, ForeignKey
+from src.util.schema_model.schema import Schema, Table, Column, ForeignKey
 
 
 def map_rschema_to_pydantic(rschema_dict: Dict[str, Any]) -> Schema:

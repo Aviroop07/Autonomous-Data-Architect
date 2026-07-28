@@ -7,7 +7,7 @@ delete_table, and get_facts_for_tables operations.
 from __future__ import annotations
 
 
-from src.pipeline.stage2.models.registry import TableFactRegistry
+from src.util.schema_model.registry import TableFactRegistry
 
 
 def make_registry() -> TableFactRegistry:

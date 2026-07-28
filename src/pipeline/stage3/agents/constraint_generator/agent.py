@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from src.pipeline.stage3.agents.extraction_outputs import AuditReport, UnifiedOutput
 from src.pipeline.stage3.models.cross_shard import UnifiedExtractionOutput
-from src.pipeline.stage2.models.schema import Schema
+from src.util.schema_model.schema import Schema
 from src.util.core.agent import AgentType, get_agent_
 from src.util.core.invoke import get_response
 from src.util.orchestration.loop_types import (

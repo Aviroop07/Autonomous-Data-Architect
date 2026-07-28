@@ -8,7 +8,7 @@ from nltk.corpus import wordnet
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 
-from src.pipeline.stage2.models.schema import Schema, Table
+from src.util.schema_model.schema import Schema, Table
 
 
 COARSE_DT_MAP: Dict[str, str] = {

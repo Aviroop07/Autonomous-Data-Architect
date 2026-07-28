@@ -11,7 +11,7 @@ import logging
 from typing import Optional, Tuple
 
 from src.pipeline.stage1.models.rephrased_nl import AtomicFact
-from src.pipeline.stage2.models.schema import Schema
+from src.util.schema_model.schema import Schema
 from src.pipeline.stage3.agents.constraint_auditor.agent import (
     ConstraintAuditorLoopAgent,
 )

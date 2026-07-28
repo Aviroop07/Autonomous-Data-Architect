@@ -11,7 +11,7 @@ from enum import Enum
 from src.util.orchestration.loop_types import LoopOutputModel
 
 if TYPE_CHECKING:
-    from src.pipeline.stage2.models.schema import Schema
+    from src.util.schema_model.schema import Schema
 
 
 class ActionTag(str, Enum):

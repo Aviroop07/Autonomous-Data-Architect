@@ -32,7 +32,7 @@ import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from src.pipeline.stage2.models.schema import Schema
+from src.util.schema_model.schema import Schema
 from src.util.constraint_model.condition.cohesive import Distributed
 from src.util.constraint_model.condition.expressions import RAggregateRef, RLiteral
 from src.util.constraint_model.condition.predicates import RComparison

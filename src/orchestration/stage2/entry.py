@@ -6,7 +6,7 @@ import networkx as nx
 
 from src.util.observability.artifact_dump import dump_artifact
 from src.orchestration.stage2.models import Output
-from src.pipeline.stage2.models.schema import Schema
+from src.util.schema_model.schema import Schema
 from src.pipeline.stage2.models.chunk import ChunkedPlan
 from src.pipeline.stage1.models.rephrased_nl import AtomicFact
 from src.pipeline.stage1.models.atomic_fact import FactTag
@@ -18,7 +18,7 @@ from src.util.orchestration.parallel_loop import run_parallel
 from src.pipeline.stage2.agents.compliance_certifier.agent import certify_compliance
 from src.pipeline.stage2.mapper.conceptual_model import ConceptualModel
 from src.pipeline.stage2.mapper.relational_mapper import map_conceptual_to_relational
-from src.pipeline.stage2.models.registry import TableFactRegistry
+from src.util.schema_model.registry import TableFactRegistry
 from src.util.config.ablation import AblationConfig
 from src.pipeline.stage2.models.conflicts import ActionType, ConflictFlag
 
@@ -336,7 +336,7 @@ async def orchestrate(
     dump_artifact(artifact_dir, "04_global_schema", global_schema)
 
     # ... (Rest of existing FK structural fallback code)
-    from src.pipeline.stage2.models.schema import to_snake_case
+    from src.util.schema_model.schema import to_snake_case
     import re
 
     for table in global_schema.tables:

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 from src.pipeline.stage1.models.rephrased_nl import AtomicFact
-from src.pipeline.stage2.models.schema import Schema
+from src.util.schema_model.schema import Schema
 from src.pipeline.stage3.agents.conflict_reconciler.agent import (
     ConflictItemForReconciliation,
     reconcile_conflict_group,

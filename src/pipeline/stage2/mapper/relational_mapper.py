@@ -1,6 +1,6 @@
 import logging
 from typing import Dict, List, Optional, Set
-from src.pipeline.stage2.models.schema import (
+from src.util.schema_model.schema import (
     Column,
     CompositeUnique,
     FORBIDDEN_TABLE_SUFFIXES,
@@ -10,7 +10,7 @@ from src.pipeline.stage2.models.schema import (
     to_snake_case,
 )
 from src.pipeline.stage2.mapper.conceptual_model import ConceptualModel, Relationship
-from src.pipeline.stage2.models.data_types import DataType
+from src.util.schema_model.data_types import DataType
 
 logger = logging.getLogger(__name__)
 

@@ -6,7 +6,7 @@ from src.pipeline.stage2.mapper.conceptual_model import (
     Relationship,
     FunctionalDependency,
 )
-from src.pipeline.stage2.models.data_types import DataType
+from src.util.schema_model.data_types import DataType
 from src.pipeline.stage2.mapper.relational_mapper import map_conceptual_to_relational
 
 

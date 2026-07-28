@@ -9,7 +9,7 @@ similarity allocation paths.
 from __future__ import annotations
 
 from src.pipeline.stage1.models.atomic_fact import AtomicFact
-from src.pipeline.stage2.models.registry import TableFactRegistry
+from src.util.schema_model.registry import TableFactRegistry
 from src.pipeline.stage3.middleware.fact_allocation import (
     allocate_facts_to_shards,
     find_mentioned_tables,

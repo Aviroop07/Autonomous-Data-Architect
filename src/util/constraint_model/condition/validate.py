@@ -32,7 +32,7 @@ from typing import Annotated, Dict, List, Union
 
 from pydantic import Field
 
-from src.pipeline.stage2.models.data_types import DataType
+from src.util.schema_model.data_types import DataType
 from src.util.constraint_model.condition.cohesive import (
     Correlated,
     Distributed,

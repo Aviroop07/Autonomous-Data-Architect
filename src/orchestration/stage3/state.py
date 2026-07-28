@@ -12,7 +12,7 @@ from typing import List
 
 from pydantic import BaseModel, Field
 
-from src.pipeline.stage2.models.schema import Schema
+from src.util.schema_model.schema import Schema
 from src.pipeline.stage3.models.cross_shard import (
     Constraint,
     CorrelatedConstraint,

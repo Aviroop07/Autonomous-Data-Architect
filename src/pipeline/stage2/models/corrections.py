@@ -1,7 +1,7 @@
 from pydantic import BaseModel
 from typing import List, Optional
 from enum import Enum
-from src.pipeline.stage2.models.schema import Schema
+from src.util.schema_model.schema import Schema
 
 class CorrectionStatus(str, Enum):
     FIXED = "fixed"

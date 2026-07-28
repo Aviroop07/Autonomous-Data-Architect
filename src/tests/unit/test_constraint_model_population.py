@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from src.pipeline.stage2.models.data_types import DataType
-from src.pipeline.stage2.models.schema import Column, ForeignKey, Schema, Table
+from src.util.schema_model.data_types import DataType
+from src.util.schema_model.schema import Column, ForeignKey, Schema, Table
 from src.util.constraint_model.condition.expressions import RColumnRef, RLiteral
 from src.util.constraint_model.condition.predicates import RComparison
 from src.util.constraint_model.population import compute_population

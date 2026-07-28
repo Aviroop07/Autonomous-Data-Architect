@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 
-from src.pipeline.stage2.models.schema import Schema
+from src.util.schema_model.schema import Schema
 from src.util.algorithms.dof_graph import Constraint as DOFConstraint
 from src.util.algorithms.dof_graph import DOFGraph
 from src.util.algorithms.dof_graph import Variable as DOFVariable

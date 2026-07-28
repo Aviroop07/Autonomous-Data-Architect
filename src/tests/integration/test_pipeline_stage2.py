@@ -27,8 +27,8 @@ import pytest
 from src.orchestration.stage2.entry import orchestrate
 from src.orchestration.stage2.models import Output
 from src.pipeline.stage2.models.chunk import ChunkedPlan
-from src.pipeline.stage2.models.registry import TableFactRegistry
-from src.pipeline.stage2.models.schema import Schema
+from src.util.schema_model.registry import TableFactRegistry
+from src.util.schema_model.schema import Schema
 from src.tests.fixtures import sample_data
 from src.util.config.ablation import AblationConfig
 

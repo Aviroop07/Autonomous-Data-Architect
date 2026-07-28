@@ -15,13 +15,13 @@ from __future__ import annotations
 from typing import List
 
 from src.pipeline.stage1.models.atomic_fact import AtomicFact, FactTag
-from src.pipeline.stage2.models.schema import (
+from src.util.schema_model.schema import (
     Schema,
     Table,
     Column,
     ForeignKey,
 )
-from src.pipeline.stage2.models.registry import TableFactRegistry
+from src.util.schema_model.registry import TableFactRegistry
 
 
 # --------------------------------------------------------------------------- #

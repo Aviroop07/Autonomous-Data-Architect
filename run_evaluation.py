@@ -221,8 +221,8 @@ async def run_case(
 def _schema_metrics(pred_schema: Any, gt_case: Dict[str, Any]) -> Dict[str, Any]:
     """Compute schema-level metrics for one case."""
     from src.evaluation.schema_level.schema_eval import SchemaEvaluator
-    from src.pipeline.stage2.models.data_types import DataType
-    from src.pipeline.stage2.models.schema import Schema, Table, Column, ForeignKey
+    from src.util.schema_model.data_types import DataType
+    from src.util.schema_model.schema import Schema, Table, Column, ForeignKey
 
     def _as_data_type(raw: Any) -> DataType:
         """Ground-truth JSON carries data types as free strings. Column.data_type
