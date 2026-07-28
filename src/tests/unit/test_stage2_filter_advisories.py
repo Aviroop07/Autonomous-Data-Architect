@@ -20,6 +20,7 @@ from src.pipeline.stage2.middleware.conceptual_filter_node import (
     ConceptualFilterReport,
 )
 from src.util.orchestration.loop_types import LoopContext
+from src.util.schema_model.data_types import DataType
 
 
 def _ctx(model: ConceptualModel | None) -> LoopContext:
@@ -39,7 +40,8 @@ def _entity(name: str, attrs: list[str], fact_ids: list[int]) -> Entity:
     return Entity(
         name=name,
         attributes=[
-            CMAttribute(name=a, type="VARCHAR", source_fact_ids=fact_ids) for a in attrs
+            CMAttribute(name=a, type=DataType.VARCHAR, source_fact_ids=fact_ids)
+            for a in attrs
         ],
         identifier_attributes=[],
         source_fact_ids=fact_ids,

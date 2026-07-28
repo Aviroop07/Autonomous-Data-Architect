@@ -177,6 +177,7 @@ def merge_all_shards(
         # randomised per process. Counting lets the pick be both deterministic
         # and meaningful: the identifier the most shards agreed on.
         id_votes: Counter = Counter()
+        owner_votes: Counter = Counter()
         all_facts_set = set()
 
         for m in members:
@@ -198,6 +199,11 @@ def merge_all_shards(
             if e.identifier_attributes:
                 id_votes[tuple(e.identifier_attributes)] += 1
 
+            # Weak-entity ownership, recorded shard-qualified because the owner's
+            # merged name is not known until every cluster has been formed.
+            if e.is_weak and e.owner:
+                owner_votes[f"SHARD_{shard_map[m]}_{e.owner}"] += 1
+
         all_ids = set(id_votes)
         # Check ID conflict
         if len(all_ids) > 1:
@@ -206,8 +212,7 @@ def merge_all_shards(
                     flag_type="IDENTIFIER_DISAGREEMENT",
                     entities=[new_name],
                     message=(
-                        f"Entity {new_name} has conflicting IDs: "
-                        f"{sorted(all_ids)}"
+                        f"Entity {new_name} has conflicting IDs: {sorted(all_ids)}"
                     ),
                 )
             )
@@ -217,13 +222,62 @@ def merge_all_shards(
         chosen_id: Tuple[str, ...] = ()
         if id_votes:
             chosen_id = min(id_votes, key=lambda k: (-id_votes[k], k))
+        # An entity is weak if any shard read it as identity-dependent. Weakness
+        # is a structural claim, and dropping it costs the entity its only link
+        # to its parent, so the merge must not lose it by disagreement. The owner
+        # stays shard-qualified for now and is resolved once entity_remap is
+        # complete, exactly as relationship participants are.
         merged_entity = Entity(
             name=new_name,
             attributes=list(all_attrs_dict.values()),
             identifier_attributes=list(chosen_id),
             source_fact_ids=sorted(all_facts_set),
+            is_weak=bool(owner_votes),
+            owner=(
+                min(owner_votes, key=lambda k: (-owner_votes[k], k))
+                if owner_votes
+                else None
+            ),
         )
         unified_entities.append(merged_entity)
+
+    # 6b. Resolve weak-entity owners now that every cluster has a merged name.
+    #
+    # This whole path was missing: the merged Entity was built without is_weak or
+    # owner at all, so every weak entity in the pipeline silently became strong.
+    # A live retail run showed what that costs -- a Package entity, correctly
+    # emitted as weak with Shipment as its owner, arrived at the mapper with no
+    # ownership and no relationship, which made it a single-column table and got
+    # it dropped, taking the facts only it represented with it.
+    merged_names = {e.name for e in unified_entities}
+    for e in unified_entities:
+        if not e.is_weak or not e.owner:
+            continue
+        resolved = entity_remap.get(e.owner)
+        if resolved is None and e.owner.startswith("SHARD_"):
+            # Owner named an entity that survived under its own name rather than
+            # in a cluster; recover the bare name from the shard-qualified key.
+            bare = e.owner.split("_", 2)[-1]
+            resolved = bare if bare in merged_names else None
+        if resolved is None or resolved not in merged_names or resolved == e.name:
+            # A dangling or self-referential owner is rejected downstream by
+            # Schema validation, so demote rather than emit a broken model --
+            # but say so, because the entity has just lost its parent link.
+            flags.append(
+                ConflictFlag(
+                    flag_type="UNRESOLVED_WEAK_OWNER",
+                    entities=[e.name],
+                    message=(
+                        f"Weak entity {e.name} named owner '{e.owner}', which does "
+                        "not resolve to a merged entity. Demoted to a strong "
+                        "entity, so it no longer inherits a key from its parent."
+                    ),
+                )
+            )
+            e.is_weak = False
+            e.owner = None
+        else:
+            e.owner = resolved
 
     # 7. Merge Relationships (Simple Overlay)
     all_rels = []

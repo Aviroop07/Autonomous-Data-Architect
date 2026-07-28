@@ -195,11 +195,13 @@ def select_best_shard_model(
     best: Optional[ConceptualModel] = None
     best_findings: Optional[int] = None
     last_unmeasured: Optional[ConceptualModel] = None
+    last_any: Optional[ConceptualModel] = None
 
     for idx, record in enumerate(trace):
         if record.node != "extractor" or not isinstance(record.output, ConceptualModel):
             continue
         candidate = record.output
+        last_any = candidate
 
         findings: Optional[int] = None
         disqualified = False
@@ -224,6 +226,12 @@ def select_best_shard_model(
 
     if best is not None:
         return best, f"best audited draft, {best_findings} finding(s)"
+    if last_unmeasured is None and last_any is not None:
+        # Every draft was rejected by the filter. Returning nothing here would
+        # lose the shard's whole contribution silently, which is worse than
+        # handing on a structurally flawed model: validation downstream reports
+        # the flaw loudly, and a caller can still see what was attempted.
+        return last_any, "every draft failed the structural filter; using the last one"
     if last_unmeasured is not None:
         return last_unmeasured, "no draft was ever audited; using the last one"
     return None, "no usable draft was produced"

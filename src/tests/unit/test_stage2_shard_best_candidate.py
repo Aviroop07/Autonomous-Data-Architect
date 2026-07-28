@@ -108,6 +108,20 @@ def test_falls_back_to_the_last_draft_when_nothing_was_reviewed() -> None:
     assert "no draft was ever audited" in reason
 
 
+def test_all_drafts_rejected_still_returns_one_rather_than_losing_the_shard() -> None:
+    """Silently returning nothing would drop the shard's entire contribution.
+    A structurally flawed model at least fails loudly downstream."""
+    trace = _trace(
+        ("extractor", _model("A")),
+        ("filter", _FilterReport(is_valid=False, det_errors=["dangling owner"])),
+        ("extractor", _model("B")),
+        ("filter", _FilterReport(is_valid=False, det_errors=["dangling owner"])),
+    )
+    best, reason = select_best_shard_model(trace)
+    assert best is not None and best.entities[0].name == "B"
+    assert "failed the structural filter" in reason
+
+
 def test_an_empty_trace_yields_no_model_rather_than_raising() -> None:
     best, reason = select_best_shard_model([])
     assert best is None
