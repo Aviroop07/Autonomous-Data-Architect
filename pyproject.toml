@@ -5,7 +5,6 @@ description = "Reproducibility artifact for generating relational databases from
 requires-python = ">=3.14"
 dependencies = [
     "ddgs",
-    "faiss-cpu",
     "graphviz",
     "langchain",
     "langchain-core",

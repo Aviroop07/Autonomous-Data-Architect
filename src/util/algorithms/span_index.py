@@ -6,8 +6,8 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-import faiss
 import numpy as np
+from scipy import sparse
 
 
 @dataclass(frozen=True)
@@ -37,9 +37,28 @@ def _terms(text: str) -> List[str]:
 
 
 class _TfidfIndex:
-    """
-    Minimal TF-IDF vectorizer + FAISS IndexFlatIP.
-    Pure numpy — no torch, no sklearn, no sentence_transformers.
+    """Minimal TF-IDF vectorizer + exact cosine search over a SPARSE matrix.
+
+    Rows are L2-normalized, so an inner product IS the cosine similarity and an
+    exact top-k needs nothing more than one sparse matmul.
+
+    This previously materialized a DENSE (n_spans x vocab) float32 array and
+    handed it to faiss.IndexFlatIP. Both halves of that were a problem:
+
+      Memory. Span counts grow as (windows x tokens) and vocabulary grows with
+      the document, so the dense array is quadratic in document size while being
+      ~99% zeros -- roughly 600 MB on a 10k-token specification, and the only
+      O(n^2)-MEMORY defect in the codebase. A TF-IDF matrix is intrinsically
+      sparse; storing the zeros was pure waste.
+
+      Dependency weight. faiss-cpu was a required dependency of this
+      reproducibility artifact for this single call site. IndexFlatIP performs a
+      brute-force exact inner product -- precisely what a sparse matmul does --
+      so there was no approximate-search capability being used to justify it.
+
+    Results are unchanged in weights and scores; ordering is strictly MORE
+    determined than before, since ties now break by ascending index rather than
+    by whatever order faiss produced.
     """
 
     def __init__(self, corpus: List[str]) -> None:
@@ -56,48 +75,87 @@ class _TfidfIndex:
             dtype="float32",
         )
 
-        mat = np.zeros((n, V), dtype="float32")
+        rows: List[int] = []
+        cols: List[int] = []
+        vals: List[float] = []
         for i, doc in enumerate(corpus):
-            counts = Counter(_terms(doc))
-            for term, cnt in counts.items():
-                if term in self._vocab:
-                    j = self._vocab[term]
-                    mat[i, j] = (1.0 + np.log(float(cnt))) * self._idf[j]
-            norm = np.linalg.norm(mat[i])
-            if norm > 1e-9:
-                mat[i] /= norm
+            entries = self._weights(doc)
+            for j, w in entries:
+                rows.append(i)
+                cols.append(j)
+                vals.append(w)
+        self._matrix = sparse.csr_matrix(
+            (
+                np.array(vals, dtype="float32"),
+                (np.array(rows, dtype="int64"), np.array(cols, dtype="int64")),
+            ),
+            shape=(n, V),
+            dtype="float32",
+        )
+        self._n = n
+        self._vocab_size = V
 
-        self._index = faiss.IndexFlatIP(V)
-        self._index.add(mat)
+    def _weights(self, text: str) -> List[Tuple[int, float]]:
+        """L2-normalized TF-IDF weights for one document, as (column, value).
+
+        Normalizing over just the present terms is identical to normalizing the
+        full dense row -- the absent terms contribute zero to the norm.
+        """
+        counts = Counter(_terms(text))
+        entries = [
+            (self._vocab[t], (1.0 + np.log(float(c))) * self._idf[self._vocab[t]])
+            for t, c in counts.items()
+            if t in self._vocab
+        ]
+        if not entries:
+            return []
+        norm = float(np.linalg.norm(np.array([w for _, w in entries], dtype="float32")))
+        if norm <= 1e-9:
+            return []
+        return [(j, float(w) / norm) for j, w in entries]
 
     def query(self, text: str, k: int) -> List[Tuple[int, float]]:
-        V = len(self._vocab)
-        vec = np.zeros((1, V), dtype="float32")
-        counts = Counter(_terms(text))
-        for term, cnt in counts.items():
-            if term in self._vocab:
-                j = self._vocab[term]
-                vec[0, j] = (1.0 + np.log(float(cnt))) * self._idf[j]
-        norm = np.linalg.norm(vec)
-        if norm > 1e-9:
-            vec /= norm
-        k_capped = min(k, self._index.ntotal)
-        if k_capped == 0:
+        k_capped = min(k, self._n)
+        if k_capped <= 0 or self._vocab_size == 0:
             return []
-        scores, indices = self._index.search(vec, k_capped)
-        return [
-            (int(idx), float(score))
-            for score, idx in zip(scores[0], indices[0])
-            if idx >= 0
-        ]
+
+        entries = self._weights(text)
+        if not entries:
+            return []
+        query_vec = sparse.csr_matrix(
+            (
+                np.array([w for _, w in entries], dtype="float32"),
+                (
+                    np.zeros(len(entries), dtype="int64"),
+                    np.array([j for j, _ in entries], dtype="int64"),
+                ),
+            ),
+            shape=(1, self._vocab_size),
+            dtype="float32",
+        )
+
+        scores = np.asarray((self._matrix @ query_vec.T).todense()).ravel()
+        # lexsort on (index, -score) orders by descending score and breaks ties
+        # by ascending index -- fully determined by the data, which faiss never
+        # guaranteed and which this project needs for reproducibility.
+        #
+        # Deliberately a full sort rather than argpartition + a partial sort.
+        # argpartition permutes arbitrarily within the selected block, so a
+        # later stable sort preserves THAT arbitrary order, not index order --
+        # equal-scoring spans came back in an order that depended on
+        # partitioning internals. The sparse matmul above dominates cost
+        # regardless, so O(n log n) here buys determinism for nothing.
+        order = np.lexsort((np.arange(scores.size), -scores))[:k_capped]
+        return [(int(i), float(scores[i])) for i in order]
 
 
 class TokenSpanIndex:
     """
-    Sliding-window span index over source text with TF-IDF + FAISS exact search.
+    Sliding-window span index over source text with exact TF-IDF cosine search.
 
-    Builds all word-window spans once, then serves semantic similarity queries
-    in sub-millisecond time via normalized inner-product (cosine) search.
+    Builds all word-window spans once, then serves similarity queries via a
+    sparse normalized inner product -- see _TfidfIndex for why this is sparse and
+    dependency-free rather than dense-plus-faiss.
     """
 
     DEFAULT_WINDOW_SIZES = [12, 24, 40, 64, 96]
