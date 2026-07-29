@@ -492,6 +492,7 @@ async def orchestrate(
             segments=segments_relational,
             plan=plan,
             final_global_schema=global_schema,
+            final_conceptual_model=combined_cm,
             uncovered_fact_ids=uncovered,
             cert_report=cert_report if enable_audit else None,
             token_usage=total_tokens,

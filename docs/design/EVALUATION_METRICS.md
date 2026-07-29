@@ -47,8 +47,7 @@ change any of them.
 `run_evaluation.py` (`capacity_eval.py`). RSC is partially implemented as the
 structural score in `structural_eval.py` -- table alignment and FK topology are
 live, but reversed-versus-missing are not yet counted separately and optionality
-is not checked. KDC is NOT implemented: it needs functional dependencies in the
-ground truth, which `cases.jsonl` does not currently carry. Nothing here is
+is not checked. KDC is implemented (`kdc_eval.py`) and wired in. Nothing here is
 reported as a number until it is actually computed.
 
 ### 1. Information Capacity Recall (IC-R)
@@ -87,7 +86,16 @@ number for schema content.
 ### 3. Key and Dependency Correctness (KDC)
 
 **Question:** do the declared keys actually determine the rows, and is every
-stated functional dependency enforced by the key structure?
+functional dependency enforced by the key structure?
+
+It needs dependencies, and it does NOT need them from the ground truth: Stage 2
+already derives `functional_dependencies` into the conceptual model, and they now
+survive the merge. So this asks a self-consistency question --
+*the extractor asserted these dependencies from the text; did the mapper then lay
+out keys such that they actually hold?* -- which is the same property that makes
+IC-Recall usable on any spec someone writes rather than only on authored cases.
+It is only possible at all because the merge stopped discarding FDs; before that
+fix the count was zero and this metric would have been vacuous.
 
 This is normalisation, checked deterministically rather than by eye:
 
@@ -96,8 +104,16 @@ This is normalisation, checked deterministically rather than by eye:
   dependency, i.e. 2NF);
 - no non-key attribute depends on another non-key attribute (no transitive
   dependency, i.e. 3NF);
-- a natural key stated in the specification is used, rather than a surrogate
-  silently replacing it.
+- a table with no key at all is reported.
+
+A dependency spanning two tables is reported but NOT counted as a defect: after
+decomposition those are normal, and penalising them would punish the schema for
+being normalised. A dependency naming a table that did not survive mapping is
+also not counted here -- that is a capacity failure, which IC reports, and
+counting it twice would double-penalise one defect.
+
+`n_checked` is always reported alongside, so a vacuous 1.0 on a schema with no
+dependencies is never mistaken for an earned one.
 
 A veteran weights this above everything else on this list, because a partial
 dependency is what produces update anomalies in production, long after the schema

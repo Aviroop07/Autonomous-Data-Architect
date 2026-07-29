@@ -3,7 +3,8 @@ ScribbleDB -- Evaluation Harness
 
 Runs the full pipeline on every case in a dataset and computes published metrics:
   Schema-level : IC F1 (recall/precision), Structural score (FK topology,
-                 table recall, column types) -- all name-blind.
+                 table recall, column types), KDC (normalisation) --
+                 all name-blind.
                  See docs/design/EVALUATION_METRICS.md
   Data-level   : MRE, NLL, KS, FA
   Smoke test   : pass rate
@@ -221,10 +222,14 @@ async def run_case(
 
 
 def _schema_metrics(
-    pred_schema: Any, gt_case: Dict[str, Any], facts: Any = None
+    pred_schema: Any,
+    gt_case: Dict[str, Any],
+    facts: Any = None,
+    conceptual: Any = None,
 ) -> Dict[str, Any]:
     """Compute schema-level metrics for one case."""
     from src.evaluation.schema_level.capacity_eval import evaluate_capacity
+    from src.evaluation.schema_level.kdc_eval import evaluate_kdc_from_conceptual
     from src.evaluation.schema_level.structural_eval import evaluate_structural
     from src.util.schema_model.data_types import DataType
     from src.util.schema_model.schema import Schema, Table, Column, ForeignKey
@@ -278,6 +283,15 @@ def _schema_metrics(
         out.update(capacity.as_dict())
         out["uncovered_fact_ids"] = capacity.uncovered_fact_ids
         out["unsupported_elements"] = capacity.unsupported_elements
+
+        # Normalisation, checked against the dependencies the pipeline itself
+        # derived -- so this needs no ground truth, only internal consistency.
+        if conceptual is not None:
+            kdc = evaluate_kdc_from_conceptual(pred_schema, conceptual)
+            out.update(kdc.as_dict())
+            out["kdc_violations"] = (
+                kdc.unenforced + kdc.partial_2nf + kdc.transitive_3nf
+            )
         return out
     except Exception as e:
         return {"error": str(e)}
@@ -333,6 +347,8 @@ def compute_aggregate_metrics(case_results: List[Dict[str, Any]]) -> Dict[str, A
             "ic_f1": _aggregate(schema_scores, "ic_f1"),
             "ic_recall": _aggregate(schema_scores, "ic_recall"),
             "ic_precision": _aggregate(schema_scores, "ic_precision"),
+            "kdc": _aggregate(schema_scores, "kdc"),
+            "kdc_n_checked": _aggregate(schema_scores, "kdc_n_checked"),
         },
         "data": {
             "mre": _aggregate(data_scores, "mre"),
@@ -363,6 +379,8 @@ def _print_aggregate(agg: Dict[str, Any], label: str = "ScribbleDB") -> None:
     print(f"      FK topology F1: {s['fk_topology_f1']:.3f}")
     print(f"      table recall  : {s['table_structural_recall']:.3f}")
     print(f"      column types  : {s['column_type_agreement']:.3f}")
+    print(f"    KDC             : {s.get('kdc', float('nan')):.3f}", end="")
+    print(f"   (dependencies checked: {s.get('kdc_n_checked', 0):.1f} avg)")
     print("  Data")
     print(f"    MRE             : {d['mre']:.3f}")
     print(f"    NLL             : {d['nll']:.3f}")
@@ -446,7 +464,10 @@ async def evaluate(args: argparse.Namespace) -> None:
                 )
             if pred_schema is not None and case.get("ground_truth_schema"):
                 result["schema_metrics"] = _schema_metrics(
-                    pred_schema, case, getattr(s1_out, "final_facts", None)
+                    pred_schema,
+                    case,
+                    getattr(s1_out, "final_facts", None),
+                    getattr(s2_out, "final_conceptual_model", None),
                 )
             else:
                 result["schema_metrics"] = {
@@ -457,6 +478,7 @@ async def evaluate(args: argparse.Namespace) -> None:
                     "ic_f1": 0.0,
                     "ic_recall": 0.0,
                     "ic_precision": 0.0,
+                    "kdc": 0.0,
                 }
 
             # Smoke test + data metrics

@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional, Any
+from src.pipeline.stage2.mapper.conceptual_model import ConceptualModel
 from src.util.schema_model.schema import Schema
 from src.pipeline.stage2.models.chunk import ChunkedPlan
 from src.util.schema_ops.schema_patch import CritiqueReport
@@ -61,6 +62,16 @@ class Output(BaseModel):
     uncovered_fact_ids: List[int] = Field(
         default_factory=list,
         description="IDs of required facts (STRUCTURAL/LOGICAL/STATISTICAL) not represented by any table in the final schema.",
+    )
+    final_conceptual_model: Optional[ConceptualModel] = Field(
+        default=None,
+        description=(
+            "The merged conceptual model the schema was mapped from. Carries the "
+            "functional dependencies, which the KDC normalisation metric needs -- "
+            "it checks whether the mapper laid out keys such that the "
+            "dependencies the extractor derived actually hold. Without this on "
+            "the output there is no way to ask that question after the fact."
+        ),
     )
     merge_decision_log: Optional[Any] = Field(
         default=None,
