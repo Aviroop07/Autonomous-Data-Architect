@@ -20,6 +20,7 @@ from src.pipeline.stage2.mapper.conceptual_model import ConceptualModel
 from src.pipeline.stage2.mapper.relational_mapper import map_conceptual_to_relational
 from src.util.schema_model.registry import TableFactRegistry
 from src.util.config.ablation import AblationConfig
+from src.util.core.agent_provider import AgentProvider
 from src.pipeline.stage2.models.conflicts import ActionType, ConflictFlag
 
 logger = logging.getLogger(__name__)
@@ -200,7 +201,11 @@ async def orchestrate(
     enable_audit: bool = True,
     nl_query: str = "",
     artifact_dir: Optional[Path] = None,
+    provider: Optional[AgentProvider] = None,
 ) -> Tuple[Output, int, TableFactRegistry]:
+    """`provider` selects how LLM agents are built (default: live API-backed --
+    see util/core/agent_provider.py). It is this stage's only external
+    dependency."""
     total_tokens = 0
     registry = TableFactRegistry()
 
@@ -215,7 +220,11 @@ async def orchestrate(
     )
     tasks = [
         run_er_extractor_loop(
-            facts=cluster, nl_query=nl_query, max_retries=retry_count, model=model
+            facts=cluster,
+            nl_query=nl_query,
+            max_retries=retry_count,
+            model=model,
+            provider=provider,
         )
         for cluster in plan.chunks
     ]
@@ -299,6 +308,7 @@ async def orchestrate(
                     facts="\n".join(comp_facts),
                     flags="\n".join(comp_flag_set),
                     model=model,
+                    provider=provider,
                 )
             )
 
@@ -444,6 +454,7 @@ async def orchestrate(
             goal=analytical_goal,
             enriched_nl=facts,
             model=model,
+            provider=provider,
         )
         total_tokens += t_cert
         dump_artifact(artifact_dir, "05_cert_report", cert_report)

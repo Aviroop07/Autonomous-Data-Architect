@@ -1,9 +1,12 @@
 """Shared pytest configuration and fixtures for the ScribbleDB test suite.
 
 Layout:
-  src/tests/unit/         fully offline, deterministic, fast (no LLM, no network)
-  src/tests/integration/  LIVE - call the real OpenAI API (marked `integration`)
-  src/tests/fixtures/      reusable sample-data builders (importable, not tests)
+  src/tests/unit/               fully offline, deterministic, fast (no LLM, no network)
+  src/tests/integration/        LIVE - call the real OpenAI API (marked `integration`)
+  src/tests/integration_offline/ whole stages end to end against an injected
+                                CannedAgentProvider (marked `offline_integration`) --
+                                no network, no key, no cost, so always run
+  src/tests/fixtures/           reusable sample-data builders (importable, not tests)
 
 Integration tests require an EXPLICIT opt-in (`pytest --live`), so a plain
 `pytest` run always stays offline and green:
@@ -17,6 +20,7 @@ import os
 import pytest
 
 from src.tests.fixtures import sample_data
+from src.tests.fixtures.canned_llm import CannedAgentProvider
 
 
 # --------------------------------------------------------------------------- #
@@ -162,3 +166,20 @@ def simple_schema():
 @pytest.fixture
 def simple_facts():
     return sample_data.simple_facts()
+
+
+# --------------------------------------------------------------------------- #
+# Offline cross-stage fixtures
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def canned_provider() -> CannedAgentProvider:
+    """A fresh, unscripted `AgentProvider` that answers from canned payloads.
+
+    Pass it to `orchestrate(..., provider=...)`. No patching is involved: the
+    provider goes in through the same optional argument production code already
+    threads to every agent module, so nothing in the stage under test is
+    replaced or reached behind.
+    """
+    return CannedAgentProvider()

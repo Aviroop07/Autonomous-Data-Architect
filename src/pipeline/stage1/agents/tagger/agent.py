@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from src.util.core.agent import get_agent_, AgentType
+from src.util.core.agent import AgentType
+from src.util.core.agent_provider import AgentProvider, resolve_agent_provider
 from src.util.core.invoke import get_response
 from src.pipeline.stage1.models.rephrased_nl import TaggerOutput, TaggedFact
 from src.pipeline.stage1.models.raw_fact import RawFact
@@ -8,11 +9,13 @@ from src.pipeline.stage1.models.raw_fact import RawFact
 PROMPT_PATH = Path(__file__).parent / "prompt.md"
 
 
-def get_agent(model: Optional[str] = None) -> AgentType:
+def get_agent(
+    model: Optional[str] = None, provider: Optional[AgentProvider] = None
+) -> AgentType:
     with PROMPT_PATH.open(encoding="utf-8") as f:
         system_prompt = f.read()
 
-    return get_agent_(
+    return resolve_agent_provider(provider).build(
         system_prompt=system_prompt,
         output_structure=TaggerOutput,
         model=model,
@@ -25,9 +28,10 @@ async def tag_facts(
     tagger: Optional[AgentType] = None,
     model: Optional[str] = None,
     origins: Optional[Dict[int, str]] = None,
+    provider: Optional[AgentProvider] = None,
 ) -> Tuple[List[TaggedFact], int]:
     if not tagger:
-        tagger = get_agent(model)
+        tagger = get_agent(model, provider)
 
     # `origins` maps fact id -> source segment text. It must be supplied by the
     # caller: this agent runs BEFORE facts are converted to AtomicFact, so the

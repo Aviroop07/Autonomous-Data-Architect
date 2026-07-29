@@ -1,9 +1,10 @@
 import logging
 from operator import itemgetter
-from typing import Any, Dict, List, Literal, Optional, Type, TypeVar, Union
+from typing import Any, Dict, List, Literal, Optional, Type, TypeVar
 
 from dotenv import load_dotenv
 from langchain_core.messages import (  # type: ignore[import]
+    BaseMessage,
     HumanMessage,
     SystemMessage,
 )
@@ -18,6 +19,7 @@ from langchain_core.runnables import (  # type: ignore[import]
 from langchain_openai import ChatOpenAI  # type: ignore[import]
 from pydantic import BaseModel, SecretStr
 
+from src.util.core.agent_provider import AgentReply, AgentRequest, LLMAgent
 from src.util.core.providers import PROVIDERS, resolve_provider
 from src.util.schema_ops.schema_utils import generate_hierarchical_schema_description
 
@@ -25,8 +27,15 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
-# Public alias used by all agent modules for their get_agent() return type
-AgentType = Union["StructuredAgent", Runnable]
+# Public alias used by all agent modules for their get_agent() return type.
+#
+# This was `Union["StructuredAgent", Runnable]` -- two concrete classes, so every
+# agent module's return type named implementations rather than the contract, and
+# an injected agent (see core/agent_provider.py) could not satisfy it however
+# correct it was. LLMAgent is a structural Protocol describing the single method
+# the pipeline actually calls, which both StructuredAgent and Runnable already
+# satisfy, so this narrows nothing and widens the alias to any conforming agent.
+AgentType = LLMAgent
 
 # ------------------------------------------------------------------
 # Provider detection
@@ -204,11 +213,9 @@ class StructuredAgent:
     """Wraps ChatOpenAI.with_structured_output() with the same
     ainvoke({"messages": [...]}) interface as langgraph agents.
 
-    Response format:
-        {
-            "structured_response": <PydanticModel>,
-            "messages": [SystemMessage, HumanMessage, AIMessage],
-        }
+    Takes an `AgentRequest` and returns an `AgentReply` (see
+    core/agent_provider.py). Both used to be bare `Dict[str, Any]`, with the
+    two meaningful keys addressed as string literals by every caller.
     """
 
     def __init__(
@@ -325,16 +332,20 @@ class StructuredAgent:
             )
         )
 
-    async def ainvoke(self, input_dict: Dict[str, Any]) -> Dict[str, Any]:
+    async def ainvoke(self, request: AgentRequest) -> AgentReply:
         import asyncio as _asyncio
 
-        base_messages: List[Any] = [SystemMessage(content=self.system_prompt)]
-        base_messages.extend(input_dict.get("messages", []))
+        base_messages: List[BaseMessage] = [SystemMessage(content=self.system_prompt)]
+        base_messages.extend(request.messages)
 
         _PARSE_RETRIES = 3
         last_error: Optional[str] = None
+        # The ONE untyped payload left in this file, and it is LangChain's own:
+        # with_structured_output(include_raw=True) returns a dict with the keys
+        # "raw"/"parsed"/"parsing_error". It never leaves this method -- the
+        # public boundary above and below is AgentRequest/AgentReply.
         result: Dict[str, Any] = {}
-        messages: List[Any] = list(base_messages)
+        messages: List[BaseMessage] = list(base_messages)
         for attempt in range(_PARSE_RETRIES):
             result = await self.chain.ainvoke(messages)
             # result = {"raw": AIMessage, "parsed": PydanticModel | None, "parsing_error": ...}
@@ -366,10 +377,10 @@ class StructuredAgent:
                 f"Structured output returned None for {self.output_structure.__name__} "
                 f"(model produced empty or unparseable output)"
             )
-        return {
-            "structured_response": result["parsed"],
-            "messages": messages + [result["raw"]],
-        }
+        return AgentReply(
+            structured_response=result["parsed"],
+            messages=messages + [result["raw"]],
+        )
 
 
 # ------------------------------------------------------------------

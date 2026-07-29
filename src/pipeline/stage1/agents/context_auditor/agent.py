@@ -9,7 +9,8 @@ from src.pipeline.stage1.models.raw_fact import RawFact
 from src.pipeline.stage1.models.rephrased_nl import FactList
 from src.pipeline.stage1.models.coverage_report import SpecGap
 from src.util.core.search_tool import EvidenceStore
-from src.util.core.agent import AgentType, get_agent_
+from src.util.core.agent import AgentType
+from src.util.core.agent_provider import AgentProvider, resolve_agent_provider
 from src.util.core.invoke import get_response
 from src.util.orchestration.loop_types import (
     HistoryEntry,
@@ -34,7 +35,9 @@ class ContextAuditorLoopAgent(LoopAgent):
         gaps: List[SpecGap],
         evidence_store: EvidenceStore,
         model: Optional[str] = None,
+        provider: Optional[AgentProvider] = None,
     ) -> None:
+        self._provider = provider
         self._original_facts = original_facts
         self._gaps = gaps
         self._evidence_store = evidence_store
@@ -47,7 +50,7 @@ class ContextAuditorLoopAgent(LoopAgent):
     def _get_agent(self) -> AgentType:
         if self._agent is None:
             system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
-            self._agent = get_agent_(
+            self._agent = resolve_agent_provider(self._provider).build(
                 system_prompt=system_prompt,
                 output_structure=ContextAuditReport,
                 model=self._model,
@@ -81,18 +84,20 @@ class ContextAuditorLoopAgent(LoopAgent):
             f"- id: {fact.id}\n  fact: {fact.fact}\n  referenced_fact_ids: {fact.referenced_fact_ids}\n  addresses_gap: {fact.addresses_gap}\n  evidence_refs: {fact.evidence_refs}"
             for fact in proposed_external_facts
         )
-        
+
         # Inject EVIDENCE section
         tags = set()
         for fact in proposed_external_facts:
             tags.update(fact.evidence_refs)
-            
+
         resolved_evidence = self._evidence_store.resolve(list(tags))
         evidence_text = ""
         if resolved_evidence:
             evidence_lines = []
             for e in resolved_evidence:
-                evidence_lines.append(f"[{e.tag}] {e.title}\n    Source: {e.url}\n    {e.text}")
+                evidence_lines.append(
+                    f"[{e.tag}] {e.title}\n    Source: {e.url}\n    {e.text}"
+                )
             evidence_text = "\n".join(evidence_lines)
         else:
             evidence_text = "None cited."

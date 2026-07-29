@@ -4,7 +4,7 @@ from typing import List, Optional
 from pydantic import BaseModel
 
 from src.pipeline.stage3.models.probe import GroupReconciliation
-from src.util.core.agent import get_agent_
+from src.util.core.agent_provider import AgentProvider, resolve_agent_provider
 from src.util.core.invoke import get_response
 
 PROMPT_PATH = Path(__file__).parent / "prompt.md"
@@ -20,9 +20,9 @@ class ConflictItemForReconciliation(BaseModel):
     involved_constraints: str
 
 
-def get_agent(model: Optional[str] = None):
+def get_agent(model: Optional[str] = None, provider: Optional[AgentProvider] = None):
     system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
-    return get_agent_(
+    return resolve_agent_provider(provider).build(
         system_prompt=system_prompt,
         output_structure=GroupReconciliation,
         model=model,
@@ -49,13 +49,14 @@ async def reconcile_conflict_group(
     schema_context: str,
     agent=None,
     model: Optional[str] = None,
+    provider: Optional[AgentProvider] = None,
 ) -> tuple[GroupReconciliation, int]:
     """Single structured-output call over a WHOLE GROUP of related
     conflicts -- not a retry loop. This is a judgment/classification task,
     not generative structured output that benefits from iterative
     self-correction the way extraction does."""
     if not agent:
-        agent = get_agent(model)
+        agent = get_agent(model, provider)
 
     query = _render_group_query(items, schema_context)
 

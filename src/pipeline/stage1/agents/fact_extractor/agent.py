@@ -1,7 +1,8 @@
 from pathlib import Path
 from typing import List, Optional
 
-from src.util.core.agent import AgentType, get_agent_
+from src.util.core.agent import AgentType
+from src.util.core.agent_provider import AgentProvider, resolve_agent_provider
 from src.util.core.invoke import get_response
 from src.util.orchestration.loop_types import (
     HistoryEntry,
@@ -20,8 +21,9 @@ PROMPT_PATH = Path(__file__).parent / "prompt.md"
 def build_extractor_agent(
     system_prompt: str,
     model: Optional[str] = None,
+    provider: Optional[AgentProvider] = None,
 ) -> AgentType:
-    return get_agent_(
+    return resolve_agent_provider(provider).build(
         system_prompt=system_prompt,
         output_structure=RephrasedOutput,
         model=model,
@@ -35,8 +37,13 @@ class FactExtractorLoopAgent(LoopAgent):
     Absorbs the old _ExtractorContextBuilder stateful logic.
     """
 
-    def __init__(self, model: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        model: Optional[str] = None,
+        provider: Optional[AgentProvider] = None,
+    ) -> None:
         self._model = model
+        self._provider = provider
         self._agent: Optional[AgentType] = None
         self._errored_ids_history: set[int] = set()
 
@@ -44,7 +51,9 @@ class FactExtractorLoopAgent(LoopAgent):
         if self._agent is None:
             system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
             self._agent = build_extractor_agent(
-                system_prompt=system_prompt, model=self._model
+                system_prompt=system_prompt,
+                model=self._model,
+                provider=self._provider,
             )
         return self._agent
 

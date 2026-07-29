@@ -14,6 +14,7 @@ import asyncio
 from pydantic import BaseModel
 from langchain_core.messages import AIMessage, HumanMessage
 
+from src.util.core.agent_provider import AgentReply, AgentRequest
 from src.util.core.invoke import _extract_token_usage, get_response
 from src.util.observability.llm_trace import (
     LLMTraceCollector,
@@ -27,12 +28,15 @@ class SimpleResponse(BaseModel):
 
 
 class FakeTracedAgent:
+    """Satisfies the `LLMAgent` protocol: typed request in, typed reply out."""
+
     name = "fake_traced_agent"
 
-    async def ainvoke(self, payload: object):
-        return {
-            "structured_response": SimpleResponse(value="ok"),
-            "messages": [
+    async def ainvoke(self, request: AgentRequest) -> AgentReply:
+        assert request.messages, "get_response must send at least the query turn"
+        return AgentReply(
+            structured_response=SimpleResponse(value="ok"),
+            messages=[
                 HumanMessage(content="hello"),
                 AIMessage(
                     content="world",
@@ -43,7 +47,7 @@ class FakeTracedAgent:
                     },
                 ),
             ],
-        }
+        )
 
 
 def test_empty_list_returns_zero():

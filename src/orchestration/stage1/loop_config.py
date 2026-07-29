@@ -14,6 +14,7 @@ from src.pipeline.stage1.middleware.extraction_validator_node import (
 )
 from src.pipeline.stage1.models.raw_fact import RawFact
 from src.pipeline.stage1.models.coverage_report import SpecGap
+from src.util.core.agent_provider import AgentProvider
 from src.util.core.search_tool import EvidenceStore
 from src.util.orchestration.loop_types import (
     AgentRoleConfig,
@@ -42,12 +43,13 @@ ENRICHMENT_ROUNDS = 3
 def make_stage1_loop_config(
     nl_description: str,
     model: Optional[str] = None,
+    provider: Optional[AgentProvider] = None,
 ) -> LoopConfig:
     """Build the AgentLoop config for Stage 1 extraction + verification."""
 
-    extractor = FactExtractorLoopAgent(model=model)
+    extractor = FactExtractorLoopAgent(model=model, provider=provider)
     extraction_validator = ExtractionValidatorLoopAgent()
-    verifier = VerifierLoopAgent(model=model)
+    verifier = VerifierLoopAgent(model=model, provider=provider)
 
     return LoopConfig(
         agents={
@@ -91,6 +93,8 @@ def make_enrichment_loop_config(
     original_facts: List[RawFact],
     gaps: List[SpecGap],
     model: Optional[str] = None,
+    provider: Optional[AgentProvider] = None,
+    evidence_store: Optional[EvidenceStore] = None,
 ) -> tuple[
     LoopConfig,
     ContextEnricherLoopAgent,
@@ -113,19 +117,27 @@ def make_enrichment_loop_config(
     and the auditor: enricher -> filter directly. The filter's invalid-reference
     errors are routed back to the enricher via det_error_sources.
     """
-    evidence_store = EvidenceStore()
+    # Constructed here unless the caller supplies one. The store is the ONLY
+    # web-facing dependency in Stage 1, and it accumulates per-run evidence
+    # tags the auditor resolves against, so a caller that needs to control or
+    # observe what evidence a run saw (an offline reproduction, a cached
+    # replay) has to be able to hand one in rather than have it minted here.
+    if evidence_store is None:
+        evidence_store = EvidenceStore()
 
     enricher = ContextEnricherLoopAgent(
         original_facts=original_facts,
         gaps=gaps,
         evidence_store=evidence_store,
         model=model,
+        provider=provider,
     )
     auditor = ContextAuditorLoopAgent(
         original_facts=original_facts,
         gaps=gaps,
         evidence_store=evidence_store,
         model=model,
+        provider=provider,
     )
     context_filter = ContextFilterLoopAgent(original_facts=original_facts)
 

@@ -25,12 +25,13 @@ from src.pipeline.stage1.models.rephrased_nl import (
     convert_to_atomic,
 )
 from src.util.config.ablation import AblationConfig
+from src.util.core.agent_provider import AgentProvider
 from src.util.observability.llm_trace import (
     LLMTraceCollector,
     activate_trace_collector,
     reset_trace_collector,
 )
-from src.util.core.search_tool import clear_search_cache
+from src.util.core.search_tool import EvidenceStore, clear_search_cache
 from src.util.orchestration.loop import AgentLoop
 
 logger = logging.getLogger(__name__)
@@ -91,7 +92,13 @@ async def orchestrate(
     model: Optional[str] = None,
     ablation_config: Optional[AblationConfig] = None,
     trace_collector: Optional[LLMTraceCollector] = None,
+    provider: Optional[AgentProvider] = None,
+    evidence_store: Optional[EvidenceStore] = None,
 ) -> Tuple[Output, int]:
+    """`provider` selects how LLM agents are built (default: live API-backed --
+    see util/core/agent_provider.py). `evidence_store` selects where enrichment
+    evidence comes from (default: live web search). Both are the run's external
+    dependencies; everything else here is internal."""
     limit = _max_nl_chars(model)
     if len(nl_description) > limit:
         raise ValueError(
@@ -109,6 +116,8 @@ async def orchestrate(
             nl_description=nl_description,
             model=model,
             ablation_config=ablation_config,
+            provider=provider,
+            evidence_store=evidence_store,
         )
     finally:
         if trace_token is not None:
@@ -119,10 +128,14 @@ async def _orchestrate_impl(
     nl_description: str,
     model: Optional[str] = None,
     ablation_config: Optional[AblationConfig] = None,
+    provider: Optional[AgentProvider] = None,
+    evidence_store: Optional[EvidenceStore] = None,
 ) -> Tuple[Output, int]:
     clear_search_cache()
     logger.info("[Stage 1] Initializing extraction agent loop...")
-    loop_config = make_stage1_loop_config(nl_description, model=model)
+    loop_config = make_stage1_loop_config(
+        nl_description, model=model, provider=provider
+    )
     result = await AgentLoop(loop_config).run(nl_description)
     logger.info(
         f"[Stage 1] Extraction loop completed in {result.iteration_count} iterations. Total tokens so far: {result.total_tokens}"
@@ -171,6 +184,7 @@ async def _orchestrate_impl(
         analytical_goal=extraction_output.analytical_goal or "Unknown",
         verifier_suggestions=search_suggestions,
         model=model,
+        provider=provider,
     )
     total_tokens += t_cov
 
@@ -188,6 +202,8 @@ async def _orchestrate_impl(
             gaps=gate_gaps,
             model=model,
             audit_trail=context_audit_trail,
+            provider=provider,
+            evidence_store=evidence_store,
         )
         total_tokens += t_enrich
         enrichment_filter_report = filter_external_facts(
@@ -229,6 +245,7 @@ async def _orchestrate_impl(
     tag_results, t_tag = await tag_facts(
         facts=all_facts,
         model=model,
+        provider=provider,
         origins={fid: text for fid, (text, _, _) in segment_lookup.items()},
     )
     total_tokens += t_tag
@@ -293,11 +310,15 @@ async def _run_context_enrichment_loop(
     gaps: List[SpecGap],
     model: Optional[str],
     audit_trail: List[ContextAuditAttempt],
+    provider: Optional[AgentProvider] = None,
+    evidence_store: Optional[EvidenceStore] = None,
 ) -> Tuple[List[RawFact], int]:
     config, enricher_agent, auditor_agent, _filter_agent = make_enrichment_loop_config(
         original_facts=facts,
         gaps=gaps,
         model=model,
+        provider=provider,
+        evidence_store=evidence_store,
     )
     result = await AgentLoop(config).run("")
     audit_trail.extend(auditor_agent.audit_trail)

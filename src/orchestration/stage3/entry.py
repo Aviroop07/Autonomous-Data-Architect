@@ -83,6 +83,7 @@ from src.orchestration.stage3.sharding import (
     _derive_shards_from_schema,
 )
 from src.orchestration.stage3.state import Stage3Output, _ShardState, _merge_all
+from src.util.core.agent_provider import AgentProvider
 from src.util.config.ablation import AblationConfig
 from src.util.observability.artifact_dump import dump_artifact
 from src.util.orchestration.parallel_loop import ParallelLoopSpec, run_parallel_loops
@@ -106,6 +107,7 @@ async def orchestrate(
     max_reconciliation_rounds: int = 5,
     max_constraint_retries: int = 3,
     artifact_dir: Optional[Path] = None,
+    provider: Optional[AgentProvider] = None,
 ) -> Tuple[Stage3Output, int]:
     """Run Stage 3: per-shard extraction -> global conflict analysis ->
     schema-locality grouping -> reconciliation.
@@ -142,6 +144,10 @@ async def orchestrate(
             the single global reconciliation pass.
         max_constraint_retries: Max times a single conflict can be sent to
             the reconciler before it is auto-dismissed as a false positive.
+        provider: How LLM agents are built (default: live API-backed --
+            see util/core/agent_provider.py). This stage's only external
+            dependency, threaded into both Phase 1 extraction and the
+            Phase 2/3 reconciliation calls.
         artifact_dir: If set, dumps intermediate state after each major
             phase (per-shard extraction, global reconciliation) via
             dump_artifact -- a mid-run crash still leaves everything
@@ -216,7 +222,7 @@ async def orchestrate(
     )
     phase1_specs = [
         ParallelLoopSpec(
-            config=_build_generator_loop_config(phase1_max_iter, model),
+            config=_build_generator_loop_config(phase1_max_iter, model, provider),
             initial_context=_serialize_context(
                 ss.schema, ss.fact_ids, facts_map, ss.stub_tables
             ),
@@ -275,6 +281,7 @@ async def orchestrate(
         resolved_rerun_max_retries,
         max_reconciliation_rounds,
         max_constraint_retries,
+        provider,
     )
     total_tokens += phase23_tokens
 

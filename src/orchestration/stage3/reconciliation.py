@@ -5,8 +5,10 @@ This is the largest single concern in Stage 3 and the one with the most
 subtle control flow (per-conflict retry budgets surviving across rounds, an
 unconditional final snapshot). It gets its own module for that reason.
 
-NOTE for tests: names patched here must be patched on THIS module, not on
-entry -- e.g. monkeypatch.setattr(stage3_reconciliation, "_rerun_shard", ...).
+The LLM boundary reaches this module as an injected `provider`
+(util/core/agent_provider.py), threaded down into both the reconciler call and
+the shard reruns -- so driving this phase without a live API is a matter of
+passing a different provider, not of replacing names in this module.
 """
 
 from __future__ import annotations
@@ -43,6 +45,7 @@ from src.pipeline.stage3.bridge.from_cross_shard import bridge_constraints
 from src.util.constraint_model.conflicts.evaluate import evaluate_constraints
 from src.util.constraint_model.conflicts.models import Conflict
 from src.util.constraint_model.relation.nodes import extract_base_tables
+from src.util.core.agent_provider import AgentProvider
 from src.util.orchestration.parallel_loop import run_parallel
 
 logger = logging.getLogger(__name__)
@@ -280,6 +283,7 @@ async def _reconcile_and_apply(
     max_retries: int,
     max_rounds: int,
     max_constraint_retries: int,
+    provider: Optional[AgentProvider] = None,
 ) -> Tuple[
     List[Conflict], List[DismissedConflict], List[str], int, Stage3AnalysisReport
 ]:
@@ -395,7 +399,7 @@ async def _reconcile_and_apply(
                 for it in group
             ]
             verdicts, tokens = await reconcile_conflict_group(
-                request_items, schema_text, model=model
+                request_items, schema_text, model=model, provider=provider
             )
             return group, verdicts, tokens
 
@@ -486,6 +490,7 @@ async def _reconcile_and_apply(
                     guidance,
                     model,
                     max_retries,
+                    provider,
                 )
             )
         rerun_results = await run_parallel(

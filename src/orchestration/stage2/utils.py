@@ -5,6 +5,7 @@ from typing import List, Optional, Tuple
 from src.pipeline.stage1.models.rephrased_nl import AtomicFact
 
 from src.pipeline.stage2.models.corrections import FixHistoryStep
+from src.util.core.agent_provider import AgentProvider
 from src.util.orchestration.loop import AgentLoop
 from src.util.orchestration.rounds import rounds_to_max_iter
 from src.util.orchestration.loop_types import (
@@ -39,12 +40,16 @@ logger = logging.getLogger(__name__)
 
 class ERExtractorLoopAgent(LoopAgent):
     def __init__(
-        self, facts: List[AtomicFact], nl_query: str, model: Optional[str] = None
+        self,
+        facts: List[AtomicFact],
+        nl_query: str,
+        model: Optional[str] = None,
+        provider: Optional[AgentProvider] = None,
     ):
         self._facts = facts
         self._nl_query = nl_query
         self._model = model
-        self.agent = get_conceptual_extractor_agent(model)
+        self.agent = get_conceptual_extractor_agent(model, provider)
         self._feedback_history: list[Tuple[int, list[str]]] = []
 
     async def invoke(self, query: str) -> tuple[LoopOutputModel, int]:
@@ -112,10 +117,15 @@ class ERExtractorLoopAgent(LoopAgent):
 
 
 class ERAuditorLoopAgent(LoopAgent):
-    def __init__(self, facts: List[AtomicFact], model: Optional[str] = None):
+    def __init__(
+        self,
+        facts: List[AtomicFact],
+        model: Optional[str] = None,
+        provider: Optional[AgentProvider] = None,
+    ):
         self._facts = facts
         self._model = model
-        self.agent = get_conceptual_verifier_agent(model)
+        self.agent = get_conceptual_verifier_agent(model, provider)
 
     async def invoke(self, query: str) -> tuple[LoopOutputModel, int]:
         from src.util.core.invoke import get_response
@@ -243,13 +253,14 @@ async def run_er_extractor_loop(
     nl_query: str,
     max_retries: int = 4,
     model: Optional[str] = None,
+    provider: Optional[AgentProvider] = None,
 ) -> Tuple[ConceptualModel, List[FixHistoryStep], int]:
     from src.pipeline.stage2.middleware.conceptual_filter_node import (
         ConceptualFilterLoopAgent,
     )
 
-    extractor = ERExtractorLoopAgent(facts, nl_query, model)
-    auditor = ERAuditorLoopAgent(facts, model)
+    extractor = ERExtractorLoopAgent(facts, nl_query, model, provider)
+    auditor = ERAuditorLoopAgent(facts, model, provider)
     filter_node = ConceptualFilterLoopAgent([f.id for f in facts])
 
     config = LoopConfig(

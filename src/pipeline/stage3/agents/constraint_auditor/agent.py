@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from src.pipeline.stage3.agents.extraction_outputs import AuditReport, UnifiedOutput
-from src.util.core.agent import AgentType, get_agent_
+from src.util.core.agent import AgentType
+from src.util.core.agent_provider import AgentProvider, resolve_agent_provider
 from src.util.core.invoke import get_response
 from src.util.orchestration.loop_types import (
     HistoryEntry,
@@ -32,14 +33,19 @@ PROMPT_PATH = Path(__file__).parent / "prompt.md"
 class ConstraintAuditorLoopAgent(LoopAgent):
     """LoopAgent for the unified audit node."""
 
-    def __init__(self, model: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        model: Optional[str] = None,
+        provider: Optional[AgentProvider] = None,
+    ) -> None:
         self._model = model
+        self._provider = provider
         self._agent: Optional[AgentType] = None
 
     def _get_agent(self) -> AgentType:
         if self._agent is None:
             system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
-            self._agent = get_agent_(
+            self._agent = resolve_agent_provider(self._provider).build(
                 system_prompt=system_prompt,
                 output_structure=AuditReport,
                 model=self._model,
@@ -64,7 +70,7 @@ class ConstraintAuditorLoopAgent(LoopAgent):
             logger.warning(
                 "[ConstraintAuditor] Failed to parse initial_context as JSON."
             )
-        except (TypeError, AttributeError):
+        except TypeError, AttributeError:
             logger.warning("[ConstraintAuditor] initial_context was not a JSON string.")
 
         fact_ids = context_data.get("fact_ids", [])

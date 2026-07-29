@@ -1,10 +1,11 @@
 import asyncio
 import re
 import logging
-from typing import Type, TypeVar, Tuple, Optional, Union
+from typing import Optional, Tuple, Type, TypeVar, Union, overload
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage, BaseMessage  # type: ignore[import]
 import openai  # type: ignore[import]
+from src.util.core.agent_provider import AgentReply, AgentRequest, LLMAgent
 from src.util.observability.llm_trace import get_active_trace_collector
 
 logger = logging.getLogger(__name__)
@@ -14,7 +15,7 @@ _DAILY_QUOTA_RE = re.compile(r"PerDay", re.IGNORECASE)
 _MAX_RATE_LIMIT_RETRIES = 6
 
 
-async def _ainvoke_with_backoff(agent, input_dict: dict) -> dict:
+async def _ainvoke_with_backoff(agent: LLMAgent, request: AgentRequest) -> AgentReply:
     """Wrap agent.ainvoke() with retry-with-backoff for transient API errors.
 
     Retries on:
@@ -27,7 +28,7 @@ async def _ainvoke_with_backoff(agent, input_dict: dict) -> dict:
     delay = 15.0
     for attempt in range(_MAX_RATE_LIMIT_RETRIES):
         try:
-            return await agent.ainvoke(input_dict)
+            return await agent.ainvoke(request)
         except openai.RateLimitError as exc:
             err_str = str(exc)
             if _DAILY_QUOTA_RE.search(err_str):
@@ -62,16 +63,37 @@ async def _ainvoke_with_backoff(agent, input_dict: dict) -> dict:
 T = TypeVar("T", bound=BaseModel)
 
 
+# Overloads, not a bare union return: `output_structure` fully determines
+# whether the first element is a validated model or prose, and callers that pass
+# a model class then had to cope with a `T | str` they could never receive. Every
+# `Type "tuple[X | str, int]" is not assignable to "tuple[X, int]"` complaint
+# across the agent modules came from that single lost distinction.
+@overload
 async def get_response(
-    agent,
+    agent: LLMAgent,
+    output_structure: Type[T],
+    query: Union[str, list],
+) -> Tuple[T, int]: ...
+
+
+@overload
+async def get_response(
+    agent: LLMAgent,
+    output_structure: None,
+    query: Union[str, list],
+) -> Tuple[str, int]: ...
+
+
+async def get_response(
+    agent: LLMAgent,
     output_structure: Optional[Type[T]],
     query: Union[str, list],
 ) -> Tuple[Union[T, str], int]:
-    """
-    Standardized async caller for agents with Pydantic validation and token tracking.
+    """Standardized async caller: typed request in, validated model + token
+    count out.
 
-    Works with both StructuredAgent (from agent.py) and langgraph agents.
-    Both return {"structured_response": model, "messages": [...]}.
+    `agent` is anything satisfying `LLMAgent` (core/agent_provider.py) -- the
+    live `StructuredAgent`, or whatever an injected `AgentProvider` built.
 
     Returns (parsed_content, total_tokens).
     """
@@ -86,12 +108,15 @@ async def get_response(
     logger.info(f"[invoke] Calling agent '{agent_name}'")
     logger.debug(f"[invoke] Query preview (first 300 chars):\n{query[:300]}...")
 
-    input_messages = [HumanMessage(content=query)]
-    response = await _ainvoke_with_backoff(agent, {"messages": input_messages})
+    input_messages: list[BaseMessage] = [HumanMessage(content=query)]
+    reply = await _ainvoke_with_backoff(
+        agent, AgentRequest(messages=input_messages)
+    )
 
     # Extract structured response or fallback to last message content
+    parsed: Union[BaseModel, str, None]
     if output_structure:
-        parsed = response.get("structured_response")
+        parsed = reply.structured_response
         if parsed is None:
             raise TypeError(
                 f"Agent did not return structured_response. "
@@ -102,7 +127,7 @@ async def get_response(
                 f"Expected {output_structure.__name__}, got {type(parsed).__name__}"
             )
     else:
-        last_msg = response["messages"][-1]
+        last_msg = reply.messages[-1]
         if isinstance(last_msg.content, list):
             text_parts = [
                 part["text"]
@@ -114,7 +139,7 @@ async def get_response(
             parsed = last_msg.content
 
     # Extract token usage from AI messages' metadata
-    total_tokens = _extract_token_usage(response.get("messages", []))
+    total_tokens = _extract_token_usage(reply.messages)
     logger.info(f"[invoke] Response received from '{agent_name}'. Tokens used: {total_tokens}")
     logger.debug(f"[invoke] Parsed structure: {type(parsed).__name__}")
 
@@ -128,7 +153,7 @@ async def get_response(
             agent_name=str(getattr(agent, "name", agent.__class__.__name__)),
             output_structure_name=output_structure_name,
             input_messages=input_messages,
-            returned_messages=response.get("messages", []),
+            returned_messages=reply.messages,
             token_usage=total_tokens,
             parsed_response_type=parsed_response_type,
         )

@@ -18,7 +18,8 @@ from src.pipeline.stage3.agents.extraction_outputs import AuditReport, UnifiedOu
 from src.pipeline.stage3.models.cross_shard import UnifiedExtractionOutput
 from src.util.schema_model.schema import Schema
 from src.util.schema_model.render import schema_to_prompt_text
-from src.util.core.agent import AgentType, get_agent_
+from src.util.core.agent import AgentType
+from src.util.core.agent_provider import AgentProvider, resolve_agent_provider
 from src.util.core.invoke import get_response
 from src.util.orchestration.loop_types import (
     HistoryEntry,
@@ -48,15 +49,20 @@ def _facts_to_text(fact_ids: List[int], facts_map: dict) -> str:
 class ConstraintGeneratorLoopAgent(LoopAgent):
     """LoopAgent for the unified constraint-generation node."""
 
-    def __init__(self, model: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        model: Optional[str] = None,
+        provider: Optional[AgentProvider] = None,
+    ) -> None:
         self._model = model
+        self._provider = provider
         self._agent: Optional[AgentType] = None
         self._errored_ids_history: set[int] = set()
 
     def _get_agent(self) -> AgentType:
         if self._agent is None:
             system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
-            self._agent = get_agent_(
+            self._agent = resolve_agent_provider(self._provider).build(
                 system_prompt=system_prompt,
                 output_structure=UnifiedExtractionOutput,
                 model=self._model,
@@ -90,7 +96,7 @@ class ConstraintGeneratorLoopAgent(LoopAgent):
             logger.warning(
                 "[ConstraintGenerator] Failed to parse initial_context as JSON."
             )
-        except (TypeError, AttributeError):
+        except TypeError, AttributeError:
             logger.warning(
                 "[ConstraintGenerator] initial_context was not a JSON string."
             )

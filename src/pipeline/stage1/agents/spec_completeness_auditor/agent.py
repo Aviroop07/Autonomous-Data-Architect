@@ -1,17 +1,23 @@
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Optional, Tuple
 
 from src.pipeline.stage1.models.coverage_report import CoverageReport
 from src.pipeline.stage1.models.raw_fact import RawFact
-from src.util.core.agent import get_agent_
+from src.util.core.agent_provider import (
+    AgentProvider,
+    LLMAgent,
+    resolve_agent_provider,
+)
 from src.util.core.invoke import get_response
 
 PROMPT_PATH = Path(__file__).parent / "prompt.md"
 
 
-def get_agent(model: Optional[str] = None) -> Any:
+def get_agent(
+    model: Optional[str] = None, provider: Optional[AgentProvider] = None
+) -> LLMAgent:
     system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
-    return get_agent_(
+    return resolve_agent_provider(provider).build(
         system_prompt=system_prompt,
         output_structure=CoverageReport,
         model=model,
@@ -49,11 +55,12 @@ async def audit_completeness(
     domain: str,
     analytical_goal: str,
     verifier_suggestions: Optional[list[str]] = None,
-    agent: Optional[Any] = None,
+    agent: Optional[LLMAgent] = None,
     model: Optional[str] = None,
+    provider: Optional[AgentProvider] = None,
 ) -> Tuple[CoverageReport, int]:
     if not agent:
-        agent = get_agent(model)
+        agent = get_agent(model, provider)
 
     input_data = _build_completeness_query(
         facts=facts,

@@ -2,7 +2,8 @@ import re
 from pathlib import Path
 from typing import List, Optional, Set
 
-from src.util.core.agent import AgentType, get_agent_
+from src.util.core.agent import AgentType
+from src.util.core.agent_provider import AgentProvider, resolve_agent_provider
 from src.util.core.invoke import get_response
 from src.util.core.search_tool import EvidenceStore
 from src.util.orchestration.loop_types import (
@@ -20,16 +21,17 @@ PROMPT_PATH = Path(__file__).parent / "prompt.md"
 
 _ACRONYM_RE = re.compile(r"\b[A-Z]{2,5}\b")
 _MAX_FACTS_IN_CONTEXT = 100  # cap facts shown to enricher; loop handles the rest
-_MAX_FACT_TEXT_LEN = 200     # truncate individual fact texts
-_MAX_ORIGIN_LEN = 150        # truncate segment origin texts
-_MAX_OUTPUT_FACTS = 15       # max external facts per round
+_MAX_FACT_TEXT_LEN = 200  # truncate individual fact texts
+_MAX_ORIGIN_LEN = 150  # truncate segment origin texts
+_MAX_OUTPUT_FACTS = 15  # max external facts per round
 
 
 def build_context_enricher_agent(
     system_prompt: str,
     model: Optional[str] = None,
+    provider: Optional[AgentProvider] = None,
 ) -> AgentType:
-    return get_agent_(
+    return resolve_agent_provider(provider).build(
         system_prompt=system_prompt,
         output_structure=FactList,
         model=model,
@@ -52,7 +54,9 @@ class ContextEnricherLoopAgent(LoopAgent):
         gaps: List[SpecGap],
         evidence_store: EvidenceStore,
         model: Optional[str] = None,
+        provider: Optional[AgentProvider] = None,
     ) -> None:
+        self._provider = provider
         self._facts = original_facts
         self._gaps = gaps
         self._evidence = evidence_store
@@ -70,7 +74,9 @@ class ContextEnricherLoopAgent(LoopAgent):
         if self._agent is None:
             system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
             self._agent = build_context_enricher_agent(
-                system_prompt=system_prompt, model=self._model
+                system_prompt=system_prompt,
+                model=self._model,
+                provider=self._provider,
             )
         return self._agent
 

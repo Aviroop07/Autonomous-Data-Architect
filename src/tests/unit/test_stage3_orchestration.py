@@ -341,7 +341,14 @@ class TestReconcileAndApplyRouting:
         rerun_calls = []
 
         async def fake_rerun_shard(
-            schema_, fact_ids, facts_map_, stub_tables, guidance, model, max_retries
+            schema_,
+            fact_ids,
+            facts_map_,
+            stub_tables,
+            guidance,
+            model,
+            max_retries,
+            provider=None,
         ):
             rerun_calls.append(guidance)
             return UnifiedExtractionOutput(), 0
@@ -424,7 +431,14 @@ class TestReconcileAndApplyRouting:
         rerun_calls = []
 
         async def fake_rerun_shard(
-            schema_, fact_ids, facts_map_, stub_tables, guidance, model, max_retries
+            schema_,
+            fact_ids,
+            facts_map_,
+            stub_tables,
+            guidance,
+            model,
+            max_retries,
+            provider=None,
         ):
             rerun_calls.append(guidance)
             return UnifiedExtractionOutput(), 0
@@ -516,7 +530,14 @@ class TestReconcileAndApplyRouting:
         )
 
         async def fake_rerun_shard(
-            schema_, fact_ids, facts_map_, stub_tables, guidance, model, max_retries
+            schema_,
+            fact_ids,
+            facts_map_,
+            stub_tables,
+            guidance,
+            model,
+            max_retries,
+            provider=None,
         ):
             return UnifiedExtractionOutput(
                 structural_constraints=[_range_constraint([1])]

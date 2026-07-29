@@ -23,6 +23,7 @@ from src.pipeline.stage3.middleware.deterministic_checker import (
 )
 from src.pipeline.stage3.models.cross_shard import UnifiedExtractionOutput
 from src.orchestration.stage3.context import _serialize_context
+from src.util.core.agent_provider import AgentProvider
 from src.util.orchestration.loop import AgentLoop
 from src.util.orchestration.rounds import rounds_to_max_iter as _rounds_to_max_iter
 from src.util.orchestration.loop_types import (
@@ -58,7 +59,11 @@ def rounds_to_max_iter(rounds: int) -> int:
     return _rounds_to_max_iter(rounds, GENERATOR_GRAPH_NODE_COUNT)
 
 
-def _build_generator_loop_config(max_iter: int, model: Optional[str]) -> LoopConfig:
+def _build_generator_loop_config(
+    max_iter: int,
+    model: Optional[str],
+    provider: Optional[AgentProvider] = None,
+) -> LoopConfig:
     """Builds one shard's generator -> deterministic_checker -> auditor
     LoopConfig.
 
@@ -85,9 +90,9 @@ def _build_generator_loop_config(max_iter: int, model: Optional[str]) -> LoopCon
     own construction in orchestrate() passes its auto-scaled raw value
     directly, since its policy differs from reruns/diagnostics.
     """
-    generator = ConstraintGeneratorLoopAgent(model=model)
+    generator = ConstraintGeneratorLoopAgent(model=model, provider=provider)
     checker = DeterministicCheckerLoopAgent()
-    auditor = ConstraintAuditorLoopAgent(model=model)
+    auditor = ConstraintAuditorLoopAgent(model=model, provider=provider)
 
     return LoopConfig(
         agents={
@@ -165,6 +170,7 @@ async def _run_generator_loop(
     context_str: str,
     model: Optional[str],
     max_retries: int,
+    provider: Optional[AgentProvider] = None,
 ) -> Tuple[UnifiedExtractionOutput, int]:
     """Runs one shard's generator loop directly (no cross-shard budget
     sharing) -- kept for any single-shard caller, e.g. isolated diagnostic
@@ -172,7 +178,9 @@ async def _run_generator_loop(
     goes through run_parallel_loops() instead, with its own auto-scaled
     raw max_iter (see orchestrate()'s Phase 1 construction) rather than
     this function's "N full audited rounds" policy."""
-    config = _build_generator_loop_config(rounds_to_max_iter(max_retries), model)
+    config = _build_generator_loop_config(
+        rounds_to_max_iter(max_retries), model, provider
+    )
     result = await AgentLoop(config).run(context_str)
     return _extract_generator_output(result)
 
@@ -185,6 +193,7 @@ async def _rerun_shard(
     guidance: str,
     model: Optional[str],
     max_retries: int,
+    provider: Optional[AgentProvider] = None,
 ) -> Tuple[UnifiedExtractionOutput, int]:
     """Re-run a shard's WHOLE generator loop with reconciliation guidance
     injected -- there is only one generator now, so a MISEXTRACTION fix
@@ -197,10 +206,14 @@ async def _rerun_shard(
     fan-out (only the shards a reconciliation round actually flagged),
     so cross-shard retry-budget reallocation matters far less here than
     for Phase 1's bulk extraction. Each rerun still gets its own
-    independent budget. This shape also keeps _rerun_shard directly
-    monkeypatchable by name, which existing tests rely on.
+    independent budget.
+
+    Kept as a named module-level function because the reconciliation module
+    calls it by name; the LLM boundary itself is injected via `provider`
+    (util/core/agent_provider.py), so a test does not need to replace this
+    function to run offline.
     """
     context_str = _serialize_context(
         shard, fact_ids, facts_map, stub_tables, reconciliation_guidance=guidance
     )
-    return await _run_generator_loop(context_str, model, max_retries)
+    return await _run_generator_loop(context_str, model, max_retries, provider)
