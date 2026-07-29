@@ -410,22 +410,98 @@ def _walk_condition(
             where, f"{label}: references column '{tbl}.{col}', which does not exist"
         )
 
-    join = node.get("join")
-    if join is not None:
-        if not isinstance(join, dict):
-            f.error(where, f"{label}: join is not an object")
-            return
-        for side in ("from", "to"):
-            ref = join.get(side)
-            if not isinstance(ref, str) or ref.count(".") != 1:
-                f.error(where, f"{label}: join.{side} {ref!r} is not 'TABLE.column'")
-                continue
-            jt, jc = ref.split(".", 1)
-            if jt not in tables:
-                f.error(where, f"{label}: join.{side} names unknown table '{jt}'")
-            elif jc not in tables[jt]:
-                f.error(where, f"{label}: join.{side} names unknown column '{jt}.{jc}'")
+    _check_join(where, label, node.get("join"), "join", tables, f)
 
+    # Right-hand side. Exactly one of value / rhs_column / rhs_expr, so a leaf
+    # can never silently mean two things. rhs_column and rhs_expr are what make
+    # a CROSS-COLUMN constraint expressible at all: the pipeline's own
+    # RComparison takes a full expression on BOTH sides, so ground truth able
+    # only to compare a column against a literal was strictly weaker than the
+    # thing it is supposed to score.
+    rhs_forms = [k for k in ("value", "rhs_column", "rhs_expr") if k in node]
+    if not rhs_forms:
+        f.error(
+            where,
+            f"{label}: leaf has no right-hand side; give one of value, "
+            "rhs_column or rhs_expr",
+        )
+        return
+    if len(rhs_forms) > 1:
+        f.error(where, f"{label}: leaf carries several right-hand sides {rhs_forms}")
+        return
+
+    if "rhs_column" in node:
+        rhs_tbl = node.get("rhs_table_ref") or tbl
+        rhs_col = node.get("rhs_column")
+        if rhs_tbl not in tables:
+            f.error(where, f"{label}: rhs_table_ref '{rhs_tbl}' is not in the schema")
+        elif rhs_col not in tables[rhs_tbl]:
+            f.error(where, f"{label}: rhs column '{rhs_tbl}.{rhs_col}' does not exist")
+        _check_join(where, label, node.get("rhs_join"), "rhs_join", tables, f)
+        return
+
+    if "rhs_expr" in node:
+        expr = node.get("rhs_expr")
+        if not isinstance(expr, dict):
+            f.error(where, f"{label}: rhs_expr is not an object")
+            return
+        if expr.get("op") not in ("+", "-", "*", "/"):
+            f.error(where, f"{label}: rhs_expr.op {expr.get('op')!r} is not one of + - * /")
+        e_tbl = expr.get("table_ref") or tbl
+        e_col = expr.get("column")
+        if e_tbl not in tables:
+            f.error(where, f"{label}: rhs_expr.table_ref '{e_tbl}' is not in the schema")
+        elif e_col not in tables[e_tbl]:
+            f.error(where, f"{label}: rhs_expr column '{e_tbl}.{e_col}' does not exist")
+        operands = [k for k in ("value", "rhs_column") if k in expr]
+        if len(operands) != 1:
+            f.error(
+                where,
+                f"{label}: rhs_expr needs exactly one of value / rhs_column, "
+                f"got {operands}",
+            )
+        elif "rhs_column" in expr:
+            o_tbl = expr.get("rhs_table_ref") or e_tbl
+            o_col = expr.get("rhs_column")
+            if o_tbl not in tables:
+                f.error(where, f"{label}: rhs_expr.rhs_table_ref '{o_tbl}' is unknown")
+            elif o_col not in tables[o_tbl]:
+                f.error(
+                    where,
+                    f"{label}: rhs_expr column '{o_tbl}.{o_col}' does not exist",
+                )
+        _check_join(where, label, expr.get("join"), "rhs_expr.join", tables, f)
+
+
+def _check_join(
+    where: str,
+    label: str,
+    join: Any,
+    field_name: str,
+    tables: Dict[str, Dict[str, str]],
+    f: Findings,
+) -> None:
+    """Resolve both endpoints of a join, whichever field carried it."""
+    if join is None:
+        return
+    if not isinstance(join, dict):
+        f.error(where, f"{label}: {field_name} is not an object")
+        return
+    for side in ("from", "to"):
+        ref = join.get(side)
+        if not isinstance(ref, str) or ref.count(".") != 1:
+            f.error(
+                where, f"{label}: {field_name}.{side} {ref!r} is not 'TABLE.column'"
+            )
+            continue
+        jt, jc = ref.split(".", 1)
+        if jt not in tables:
+            f.error(where, f"{label}: {field_name}.{side} names unknown table '{jt}'")
+        elif jc not in tables[jt]:
+            f.error(
+                where,
+                f"{label}: {field_name}.{side} names unknown column '{jt}.{jc}'",
+            )
 
 def _check_constraints(
     where: str, constraints: Any, tables: Dict[str, Dict[str, str]], f: Findings

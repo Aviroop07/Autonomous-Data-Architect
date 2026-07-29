@@ -54,6 +54,10 @@ SchemaAgent/
 # 1.26 MB across 16 files. The genuinely large things above stay excluded.
 # RSchema is third-party input data rather than something authored here, so it
 # stays out; scratch and generated run output stay out too.
+# The benchmark's authoring spec is a project artifact, not harness memory --
+# it defines the ground-truth format, so a clone needs it to extend the dataset.
+# Needed explicitly because of the blanket *.md rule above.
+!dataset/handcrafted/AUTHORING_CONTRACT.md
 dataset/RSchema/
 dataset/**/incoming/
 dataset/**/cases_archive_*.jsonl
