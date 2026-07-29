@@ -681,22 +681,15 @@ class Schema(LoopOutputModel):
                 (c for c in ref_table.columns if c.name == rel.referencing_column), None
             )
             # Find which column in the target table this FK is referencing.
-            target_pk_col = None
-            if len(target_table.primary_key) == 1:
-                target_pk_col = next(
-                    (c for c in target_table.columns if c.name == target_table.pk), None
-                )
-            else:
-                # If composite PK, try to match by column name
-                target_pk_col = next(
-                    (
-                        c
-                        for c in target_table.columns
-                        if c.name in target_table.pk_set
-                        and c.name == rel.referencing_column
-                    ),
-                    None,
-                )
+            # Delegate to the FK's OWN resolver rather than re-deriving it here.
+            # These two lookups used to disagree: the resolver falls back to a
+            # suffix match for composite keys (owner_code -> code) while this
+            # site matched composite keys by exact name only. An FK the
+            # validator resolved by suffix was therefore reported as a type
+            # mismatch that the aligner structurally could not fix, and Stage 2
+            # aborted after exhausting its repair rounds. One resolver means
+            # the two can no longer diverge.
+            target_pk_col = rel._resolve_referred_pk_column(target_table)
 
             if (
                 ref_col

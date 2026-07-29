@@ -134,7 +134,29 @@ def _extract_generator_output(
         return UnifiedExtractionOutput(), 0
     output = result.node_outputs.get("generator")
     if not isinstance(output, UnifiedExtractionOutput):
+        # Dropping an entire shard's constraints used to be completely silent
+        # here -- no log line, no flag -- so a shard contributing nothing was
+        # indistinguishable from a shard with nothing to contribute.
+        logger.error(
+            "[Stage 3] Discarding a shard's extraction: the generator node's "
+            "final output was %s, not UnifiedExtractionOutput. This shard "
+            "contributes NO constraints.",
+            type(output).__name__,
+        )
         output = UnifiedExtractionOutput()
+    if result.det_errors_exhausted:
+        # The loop gave up with the deterministic checker still reporting
+        # errors, so some constraints here failed canonicalization or column
+        # resolution and are being shipped anyway. Nothing consumed this flag
+        # before, which made an unrepaired extraction look identical to a
+        # clean one all the way through to Stage 4.
+        logger.error(
+            "[Stage 3] Shard extraction exhausted its retry budget with "
+            "UNRESOLVED deterministic errors after %d iteration(s); some "
+            "constraints failed canonicalization or column resolution and are "
+            "being passed through unrepaired to Stage 4.",
+            result.iteration_count,
+        )
     return output, result.total_tokens
 
 

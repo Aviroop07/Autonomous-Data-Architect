@@ -139,6 +139,19 @@ async def _orchestrate_impl(
             f"[Stage 1] Loop exhausted after {result.iteration_count} iterations "
             f"with no accepted extractor output."
         )
+    elif result.det_errors_exhausted:
+        # The loop produced a RephrasedOutput but gave up while the validator was
+        # still reporting errors, so this extraction is structurally invalid --
+        # bad verbatim spans, unresolved references. The isinstance check above
+        # passes in that case, so without this branch a degraded extraction was
+        # indistinguishable from a clean one in both the log and the Output model.
+        logger.error(
+            "[Stage 1] Extraction loop exhausted its retry budget after %d "
+            "iteration(s) with UNRESOLVED validator errors; the %d extracted "
+            "fact(s) below are structurally unverified.",
+            result.iteration_count,
+            len(extraction_output.flat_facts),
+        )
 
     total_tokens = result.total_tokens
 
@@ -197,19 +210,29 @@ async def _orchestrate_impl(
         )
         all_facts = extracted_facts
 
-    logger.info(f"[Stage 1] Tagging {len(all_facts)} facts...")
-
-    tag_results, t_tag = await tag_facts(facts=all_facts, model=model)
-    total_tokens += t_tag
-
     # Carry each fact's source segment (text + offsets) onto its AtomicFact so the graph
     # chunker can group by segment. External/enrichment facts have no segment and are
     # absent from the lookup (treated as standalone downstream).
+    #
+    # Built BEFORE tagging on purpose: the tagger documents an `origin` field, but
+    # `all_facts` are still RawFact at this point (convert_to_atomic runs below), so
+    # reading origin off the fact itself always yielded "(none)". The segment owns
+    # that text, so the tagger is handed the lookup explicitly.
     segment_lookup = {
         f.id: (s.text, s.start_char, s.end_char)
         for s in extraction_output.segments
         for f in s.facts
     }
+
+    logger.info(f"[Stage 1] Tagging {len(all_facts)} facts...")
+
+    tag_results, t_tag = await tag_facts(
+        facts=all_facts,
+        model=model,
+        origins={fid: text for fid, (text, _, _) in segment_lookup.items()},
+    )
+    total_tokens += t_tag
+
     tagged_facts = normalize_stage1_tags(
         convert_to_atomic(all_facts, tag_results, segment_lookup)
     )

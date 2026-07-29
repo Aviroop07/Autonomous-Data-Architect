@@ -47,10 +47,16 @@ class VerifierLoopAgent(LoopAgent):
         if not isinstance(extractor_output, RephrasedOutput):
             facts_text = "(none yet)"
         else:
+            # Walk segments, not flat_facts: flat_facts yields RawFact, which has
+            # no segment_text, so the old hasattr() guard silently rendered an
+            # empty [Segment: ""] for every fact -- this agent is specified to
+            # audit each fact against its claimed origin snippet and was never
+            # actually shown one. The segment owns the text, so read it there.
             facts_text = "\n".join(
-                f'{f.id}. {f.fact}\n   [Segment: "{f.segment_text if hasattr(f, "segment_text") else ""}"]'
+                f'{f.id}. {f.fact}\n   [Segment: "{segment.text}"]'
                 + (f" | External: {f.is_external}" if f.is_external else "")
-                for f in extractor_output.flat_facts
+                for segment in extractor_output.segments
+                for f in segment.facts
             )
         return (
             f"## ORIGINAL DESCRIPTION\n{ctx.initial_context}\n\n"
