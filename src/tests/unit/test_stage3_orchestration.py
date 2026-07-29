@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.orchestration.stage3 import reconciliation as stage3_reconciliation
+from src.orchestration.stage3.extraction import ShardExtractionResult
 from src.orchestration.stage3.reconciliation import (
     _ConflictItem,
     _conflict_items_from,
@@ -351,7 +352,9 @@ class TestReconcileAndApplyRouting:
             provider=None,
         ):
             rerun_calls.append(guidance)
-            return UnifiedExtractionOutput(), 0
+            # _rerun_shard returns a ShardExtractionResult, not a tuple -- it
+            # has to be able to report that a rerun contributed nothing.
+            return ShardExtractionResult(output=UnifiedExtractionOutput(), tokens=0)
 
         monkeypatch.setattr(stage3_reconciliation, "_rerun_shard", fake_rerun_shard)
 
@@ -441,7 +444,9 @@ class TestReconcileAndApplyRouting:
             provider=None,
         ):
             rerun_calls.append(guidance)
-            return UnifiedExtractionOutput(), 0
+            # _rerun_shard returns a ShardExtractionResult, not a tuple -- it
+            # has to be able to report that a rerun contributed nothing.
+            return ShardExtractionResult(output=UnifiedExtractionOutput(), tokens=0)
 
         monkeypatch.setattr(stage3_reconciliation, "_rerun_shard", fake_rerun_shard)
 
@@ -539,9 +544,12 @@ class TestReconcileAndApplyRouting:
             max_retries,
             provider=None,
         ):
-            return UnifiedExtractionOutput(
-                structural_constraints=[_range_constraint([1])]
-            ), 0
+            return ShardExtractionResult(
+                output=UnifiedExtractionOutput(
+                    structural_constraints=[_range_constraint([1])]
+                ),
+                tokens=0,
+            )
 
         monkeypatch.setattr(stage3_reconciliation, "_rerun_shard", fake_rerun_shard)
 

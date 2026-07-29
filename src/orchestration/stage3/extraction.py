@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
 from src.pipeline.stage1.models.rephrased_nl import AtomicFact
 from src.pipeline.stage3.models.shard_context import Stage3ShardContext
@@ -231,7 +231,7 @@ async def _run_generator_loop(
     model: Optional[str],
     max_retries: int,
     provider: Optional[AgentProvider] = None,
-) -> Tuple[UnifiedExtractionOutput, int]:
+) -> ShardExtractionResult:
     """Runs one shard's generator loop directly (no cross-shard budget
     sharing) -- kept for any single-shard caller, e.g. isolated diagnostic
     scripts, and for shard reruns (_rerun_shard). Live Phase 1 extraction
@@ -254,7 +254,7 @@ async def _rerun_shard(
     model: Optional[str],
     max_retries: int,
     provider: Optional[AgentProvider] = None,
-) -> Tuple[UnifiedExtractionOutput, int]:
+) -> ShardExtractionResult:
     """Re-run a shard's WHOLE generator loop with reconciliation guidance
     injected -- there is only one generator now, so a MISEXTRACTION fix
     always targets the owning shard's single loop, not a specific family.

@@ -504,7 +504,26 @@ async def _reconcile_and_apply(
                     f"prior output rather than crashing the whole run."
                 )
                 continue
-            output, tokens = result
+            # _rerun_shard returns a ShardExtractionResult, not a tuple: it has
+            # to be able to say "this rerun produced nothing, and here is why".
+            # A live run crashed here with `cannot unpack non-iterable
+            # ShardExtractionResult` because this path only executes on a
+            # MISEXTRACTION verdict, which no offline test scripts.
+            output, tokens = result.output, result.tokens
+            if result.lost_reason is not None:
+                # The rerun itself was withheld. Keep the PRIOR output rather
+                # than merging an empty one over good constraints -- merging
+                # would silently delete what the first pass got right.
+                logger.warning(
+                    "[Stage 3] shard %d rerun contributed nothing (%s: %s); "
+                    "keeping its prior output rather than merging an empty "
+                    "rerun over it.",
+                    shard_idx,
+                    result.lost_reason.value,
+                    result.detail,
+                )
+                total_tokens += tokens
+                continue
             shard_states[shard_idx].output = _merge_rerun_output(
                 prior=shard_states[shard_idx].output,
                 rerun=output,
