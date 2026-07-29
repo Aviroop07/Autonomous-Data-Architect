@@ -18,7 +18,7 @@ from src.util.orchestration.loop_types import (
     LoopOutputModel,
 )
 
-PROMPT_PATH = Path(__file__).parent / "prompt.txt"
+PROMPT_PATH = Path(__file__).parent / "prompt.md"
 
 
 class ContextAuditorLoopAgent(LoopAgent):

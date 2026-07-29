@@ -12,7 +12,7 @@ from src.util.orchestration.loop_types import (
 from src.pipeline.stage1.models.integrity_report import IntegrityReport
 from src.pipeline.stage1.models.rephrased_nl import RephrasedOutput
 
-PROMPT_PATH = Path(__file__).parent / "prompt.txt"
+PROMPT_PATH = Path(__file__).parent / "prompt.md"
 
 
 class VerifierLoopAgent(LoopAgent):

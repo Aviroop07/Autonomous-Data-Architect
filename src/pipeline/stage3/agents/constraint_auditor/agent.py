@@ -26,7 +26,7 @@ from src.util.orchestration.loop_types import (
 
 logger = logging.getLogger(__name__)
 
-PROMPT_PATH = Path(__file__).parent / "prompt.txt"
+PROMPT_PATH = Path(__file__).parent / "prompt.md"
 
 
 class ConstraintAuditorLoopAgent(LoopAgent):

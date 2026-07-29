@@ -14,7 +14,7 @@ import warnings
 from typing import Any, Callable, Dict
 
 import numpy as np
-from scipy import stats
+from scipy import special, stats
 
 
 # ---------------------------------------------------------------------------
@@ -334,8 +334,31 @@ def cdf_func(family: str, params: Dict[str, float]) -> Callable[[float], float]:
         return dist.cdf  # type: ignore[return-value]
 
     if fam == "zipf":
-        dist = stats.zipf(a=params["a"])
-        return dist.cdf  # type: ignore[return-value]
+        # Closed form, NOT stats.zipf.cdf. scipy's zipf inherits the generic
+        # discrete CDF, which sums the pmf from 1 up to k -- and a heavy-tailed
+        # zipf sample reaches enormous k (a=1.1 over 8000 draws produces values
+        # near 9e18), so that path does not merely run slowly, it does not
+        # finish. The benchmark contains zipf exponents down to 1.1, which is
+        # what surfaced it.
+        #
+        # For Zipf(a), F(k) = H(k,a) / zeta(a) where H(k,a) = sum_{n=1..k} n^-a.
+        # The Hurwitz zeta gives that sum in constant time:
+        #   sum_{n=1..k} n^-a = zeta(a, 1) - zeta(a, k + 1)
+        a = float(params["a"])
+        norm = float(special.zeta(a, 1.0))
+
+        def _zipf_cdf(x: Any) -> Any:
+            k = np.floor(np.asarray(x, dtype=float))
+            out = np.zeros_like(k, dtype=float)
+            valid = k >= 1.0
+            if np.any(valid):
+                # zeta(a, k+1) underflows to 0 for very large k, which is the
+                # correct limit: the whole mass is already accounted for.
+                tail = special.zeta(a, k[valid] + 1.0)
+                out[valid] = (norm - tail) / norm
+            return np.clip(out, 0.0, 1.0)
+
+        return _zipf_cdf  # type: ignore[return-value]
 
     if fam == "categorical":
         # Build empirical step CDF over sorted category values

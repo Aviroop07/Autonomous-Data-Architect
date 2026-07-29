@@ -29,7 +29,7 @@ from src.util.orchestration.loop_types import (
 
 logger = logging.getLogger(__name__)
 
-PROMPT_PATH = Path(__file__).parent / "prompt.txt"
+PROMPT_PATH = Path(__file__).parent / "prompt.md"
 
 
 def _facts_to_text(fact_ids: List[int], facts_map: dict) -> str:

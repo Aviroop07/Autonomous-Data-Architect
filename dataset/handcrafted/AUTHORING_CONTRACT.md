@@ -84,6 +84,28 @@ schema with padding. The prose must still read like a person describing a system
 they work with, which for something this size means an experienced engineer or a
 long handover document rather than a chatty summary.
 
+### Name tables in the prose's own vocabulary
+
+Use the word the description uses, not the canonical industry term you would pick
+yourself. If the text says "drug catalogue", the table is `DRUG`, not
+`MEDICATION`; if it says "staff", it is `STAFF`, not `EMPLOYEE`; if it says
+"style" and "variant", those are the table names.
+
+This is not a style preference. The extractor is instructed never to rename or
+"clean up" domain vocabulary, so it will emit the text's word -- and the schema
+metric then has to bridge your word to its word by embedding similarity at a 0.6
+cosine threshold. Measured on the pipeline's own matcher, that bridge is
+unreliable in exactly this band: `DRUG`/`MEDICATION` scores 0.839 and matches,
+but `MEMBER`/`PATRON` scores 0.505 and `PRODUCT`/`STYLE` scores 0.382, so both
+are counted as misses -- while the completely unrelated `DRUG`/`PATIENT` scores
+0.483, above one of those genuine synonyms. Choosing the text's own word removes
+the dependence on that fuzzy match, so the case measures the pipeline rather than
+the embedding model.
+
+Where a concept genuinely has no single word in the text -- a junction table, an
+event table you inferred -- name it after the words that are there
+(`ORDER_LINE`, `SHIFT_CREW`), not after a term the reader never sees.
+
 Hard rules:
 
 - Table names `UPPER_SNAKE_CASE`, **singular** (`PATIENT`, not `PATIENTS`).

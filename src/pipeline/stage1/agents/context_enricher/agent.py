@@ -16,7 +16,7 @@ from src.pipeline.stage1.models.raw_fact import RawFact
 from src.pipeline.stage1.models.context_audit import ContextAuditReport
 from src.pipeline.stage1.models.coverage_report import SpecGap
 
-PROMPT_PATH = Path(__file__).parent / "prompt.txt"
+PROMPT_PATH = Path(__file__).parent / "prompt.md"
 
 _ACRONYM_RE = re.compile(r"\b[A-Z]{2,5}\b")
 _MAX_FACTS_IN_CONTEXT = 100  # cap facts shown to enricher; loop handles the rest

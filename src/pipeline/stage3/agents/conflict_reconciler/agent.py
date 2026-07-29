@@ -7,7 +7,7 @@ from src.pipeline.stage3.models.probe import GroupReconciliation
 from src.util.core.agent import get_agent_
 from src.util.core.invoke import get_response
 
-PROMPT_PATH = Path(__file__).parent / "prompt.txt"
+PROMPT_PATH = Path(__file__).parent / "prompt.md"
 
 
 class ConflictItemForReconciliation(BaseModel):

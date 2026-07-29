@@ -27,7 +27,7 @@ from pathlib import Path
 import pytest
 
 PROMPTS = sorted(
-    Path("src/pipeline").glob("stage[123]/agents/*/prompt.txt"),
+    Path("src/pipeline").glob("stage[123]/agents/*/prompt.md"),
 )
 
 REQUIRED_SECTIONS = [

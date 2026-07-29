@@ -14,7 +14,7 @@ from src.pipeline.stage1.middleware.error_formatter import format_errors_for_sta
 from src.pipeline.stage1.models.rephrased_nl import RephrasedOutput
 from src.pipeline.stage1.models.integrity_report import IntegrityReport
 
-PROMPT_PATH = Path(__file__).parent / "prompt.txt"
+PROMPT_PATH = Path(__file__).parent / "prompt.md"
 
 
 def build_extractor_agent(

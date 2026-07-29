@@ -18,6 +18,11 @@ requirements.txt
 # --- broad exclusions (see header; negations follow) ------------------------
 *.md
 !README.md
+# Agent prompts are SOURCE, not documentation -- an agent is a folder of
+# agent.py + prompt.md, and the prompt is the larger half of its behaviour.
+# They survived the rename from .txt only because git mv staged them; without
+# this negation the next NEW prompt.md would be silently untracked.
+!src/**/prompt.md
 *.json
 *.pdf
 !paper/*.pdf

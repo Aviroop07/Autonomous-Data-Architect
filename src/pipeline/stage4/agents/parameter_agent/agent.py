@@ -6,7 +6,7 @@ from src.util.core.agent import get_agent_, AgentType
 from src.util.core.invoke import get_response
 from src.pipeline.stage4.models import ParameterManifest
 
-PROMPT_PATH = Path(__file__).parent / "prompt.txt"
+PROMPT_PATH = Path(__file__).parent / "prompt.md"
 
 def get_agent(model: Optional[str] = None) -> AgentType:
     with PROMPT_PATH.open(encoding='utf-8') as f:
