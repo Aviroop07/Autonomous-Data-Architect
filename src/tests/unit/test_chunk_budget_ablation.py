@@ -122,18 +122,34 @@ def test_no_chunk_is_empty() -> None:
     )
 
 
-def test_facts_sharing_one_segment_cannot_shard_at_any_budget() -> None:
-    """The granularity of chunking is the SEGMENT, so this is a property of the
-    input rather than a limit of the knob: a specification whose facts all trace
-    to one span of text is unshardable, and the chunker says so in a warning
-    rather than splitting mid-span. Worth pinning because it is the failure mode
-    of a naive ablation -- shrink the budget, observe one chunk, and wrongly
-    conclude the override does not work."""
+def test_facts_sharing_one_segment_still_shard_when_the_budget_demands_it() -> None:
+    """CORRECTS AN EARLIER VERSION OF THIS TEST, which asserted the opposite.
+
+    It read `cannot_shard_at_any_budget` and described co-located facts as
+    unshardable -- "a property of the input rather than a limit of the knob".
+    That was wrong, and it encoded a defect as a feature: the chunker was
+    emitting a single over-budget chunk rather than splitting the group, which
+    defeats the only thing chunking is for. A segment is a GROUP of facts, and
+    each fact keeps its own span provenance, so splitting the group cuts no
+    source span.
+
+    What remains true, and is the part worth keeping from the original: the
+    chunker's packing UNIT is the segment, so co-located facts stay together
+    whenever they fit. They are only separated when the budget makes keeping
+    them together impossible.
+    """
     facts = _facts(40, segments=False)
     total = sum(estimate_fact_tokens(f) for f in facts)
-    plan = BudgetChunker(budget_tokens=max(1, total // 8)).fit(facts)
-    assert len(plan.chunks) == 1
-    assert len(plan.chunks[0]) == 40, "and no fact may be dropped in the process"
+    budget = max(1, total // 8)
+    plan = BudgetChunker(budget_tokens=budget).fit(facts)
+
+    assert len(plan.chunks) > 1, "an over-budget segment must be split, not shipped"
+    assert not [
+        c for c in plan.chunks if sum(estimate_fact_tokens(f) for f in c) > budget
+    ], "no chunk may exceed the budget"
+    assert sorted(f.id for c in plan.chunks for f in c) == [f.id for f in facts], (
+        "and no fact may be dropped in the process"
+    )
 
 
 def test_a_single_fact_never_shards_however_small_the_budget() -> None:

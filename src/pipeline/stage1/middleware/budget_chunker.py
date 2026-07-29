@@ -63,6 +63,43 @@ def estimate_fact_tokens(fact: AtomicFact) -> int:
     return int(len(text) / _CHARS_PER_TOKEN) + 8
 
 
+def _split_oversized_segment(
+    segment: Sequence[AtomicFact], budget: int
+) -> List[List[AtomicFact]]:
+    """Pack one over-budget segment's facts into budget-sized pieces.
+
+    Only reached when a single source span carries more facts than a prompt can
+    hold. Splits at fact boundaries in document order, so each piece is a
+    contiguous run of the original segment and no fact is ever divided.
+
+    A single fact larger than the budget on its own goes out alone and
+    oversized: that IS genuinely unsplittable, since cutting inside one fact
+    would truncate a statement rather than merely separate two.
+    """
+    pieces: List[List[AtomicFact]] = []
+    current: List[AtomicFact] = []
+    current_tokens = 0
+    for fact in segment:
+        fact_tokens = estimate_fact_tokens(fact)
+        if current and current_tokens + fact_tokens > budget:
+            pieces.append(current)
+            current, current_tokens = [], 0
+        if fact_tokens > budget and not current:
+            logger.warning(
+                "[BudgetChunker] a single fact is ~%d tokens, over the %d "
+                "budget; emitting it alone rather than truncating it.",
+                fact_tokens,
+                budget,
+            )
+            pieces.append([fact])
+            continue
+        current.append(fact)
+        current_tokens += fact_tokens
+    if current:
+        pieces.append(current)
+    return pieces
+
+
 def _group_into_segments(
     facts: Sequence[AtomicFact],
 ) -> List[List[AtomicFact]]:
@@ -154,17 +191,37 @@ class BudgetChunker:
 
         for segment in segments:
             seg_tokens = sum(estimate_fact_tokens(f) for f in segment)
-            # A single segment larger than the whole budget cannot be split
-            # without cutting a source span in half, so it goes out oversized
-            # and alone rather than being silently truncated.
-            if seg_tokens > budget and not current:
+            # A segment bigger than the whole budget is split at FACT
+            # boundaries. The previous behaviour emitted it whole, reasoning
+            # that splitting would cut a source span in half -- but a segment
+            # is a GROUP OF FACTS, and every fact keeps its own segment_text,
+            # start_char and end_char. Splitting the group cuts no span; it
+            # only costs co-location, while emitting it whole produces a chunk
+            # OVER the model's context budget, which is the single failure
+            # chunking exists to prevent.
+            #
+            # It also had a silent path: the old guard was `if seg_tokens >
+            # budget and not current`, so when anything was already pending the
+            # warning never fired and the oversized segment still went out
+            # whole. Measured -- one small segment followed by a 288-token
+            # segment against a 144-token budget produced a 288-token chunk
+            # with no warning at all.
+            if seg_tokens > budget:
+                if current:
+                    chunks.append(current)
+                    current, current_tokens = [], 0
+                pieces = _split_oversized_segment(segment, budget)
                 logger.warning(
                     "[BudgetChunker] one segment is ~%d tokens, over the %d "
-                    "budget; emitting it alone rather than splitting a span.",
+                    "budget; split into %d piece(s) at fact boundaries. Facts "
+                    "from one source span are no longer co-located, which is "
+                    "the lesser cost -- the alternative is a chunk that cannot "
+                    "fit its prompt.",
                     seg_tokens,
                     budget,
+                    len(pieces),
                 )
-                chunks.append(list(segment))
+                chunks.extend(pieces)
                 continue
             if current and current_tokens + seg_tokens > budget:
                 chunks.append(current)
