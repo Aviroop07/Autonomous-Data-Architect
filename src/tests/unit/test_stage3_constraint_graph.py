@@ -1236,16 +1236,10 @@ class TestForkResolution:
         ] == ["institutional"]
 
     # ----------------------------------------------------------------- BUG 1
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "KNOWN BUG 1a (constraint_graph.py:759-769): _build_fork_registry "
-            "skips every distribution whose if_condition is None -- i.e. it "
-            "skips exactly the fork-DEFINING categorical, the only fact that "
-            "actually states (table, column, categories). It should register "
-            "ForkKey(USER, is_institutional) from dc.on.name/dc.column."
-        ),
-    )
+    # FIXED: _build_fork_registry no longer skips unconditional categoricals --
+    # those are precisely the fork-DEFINING facts, and skipping them left the
+    # registry permanently empty. The key now comes from the distribution's own
+    # (base table of dc.on, dc.column).
     def test_fork_defining_categorical_registers_its_own_column_as_the_fork_key(self):
         registry = ForkKeyRegistry()
         cg._build_fork_registry([_fork_defining_categorical()], registry)
@@ -1256,17 +1250,10 @@ class TestForkResolution:
             ]
         }
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "KNOWN BUG 1b (constraint_graph.py:752-769): because the fork key "
-            "is never registered from the defining categorical, _resolve_branch "
-            "returns None for both branches, they collapse to one flat_name, "
-            "_merge_rich_bounds intersects [5,5] with [12,12], and BOTH forked "
-            "parameters are excluded from square AND loose -- they vanish from "
-            "the probe contract entirely."
-        ),
-    )
+    # FIXED: with the defining categorical registered, _resolve_branch resolves
+    # each branch, so the two forked parameters keep distinct flat_names instead
+    # of collapsing into one, intersecting to an empty interval, and vanishing
+    # from both square and loose. This is the probe-contract guarantee.
     def test_auto_discovered_fork_keeps_the_two_branches_separate(self, fintech_schema):
         report, _ = analyze_cross_shard_constraints(
             distributions=[_fork_defining_categorical()] + _forked_pair(),
@@ -1279,17 +1266,10 @@ class TestForkResolution:
         } <= set(report.square_variables)
         assert _over_vars(report) == set()
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "KNOWN BUG 1c (constraint_graph.py:764-769 via "
-            "parse_if_condition_from_predicate): a conditional CATEGORICAL is "
-            "registered under the IF-CONDITION's column with table_name='' -- "
-            "the key '.is_institutional' names neither the fork's table nor "
-            "the branch distribution's own column, and its category list is "
-            "the BRANCH's categories, not the fork's."
-        ),
-    )
+    # FIXED: a conditional categorical no longer registers anything. It states
+    # the categories seen within ONE branch -- a subset of the column's domain --
+    # and trusting a subset as authoritative would make legitimate branch values
+    # look like they match no rows now that _resolve_branch reports that case.
     def test_a_conditional_categorical_does_not_corrupt_the_registry(self):
         registry = ForkKeyRegistry()
         cg._build_fork_registry(
@@ -1308,17 +1288,10 @@ class TestForkResolution:
         )
 
     # ------------------------------------------------------- NEW FINDING (B)
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "NEW BUG B (constraint_graph.py:300-311): _resolve_branch ignores "
-            "the registry's answer. get_branches_for_condition returns [] for "
-            "a value outside the fork's known category set, and the code "
-            "returns a BranchTag anyway -- minting a branch-scoped variable "
-            "for a branch that provably has no rows, which Stage 4 is then "
-            "asked to parameterize."
-        ),
-    )
+    # FIXED: _resolve_branch now honours an empty answer from the registry. An
+    # EQ against a value outside a KNOWN category set selects no rows, so it
+    # yields no BranchTag and logs the disagreement, instead of asking Stage 4
+    # to parameterize a branch that cannot exist.
     def test_a_value_outside_the_forks_category_set_resolves_to_none(self):
         registry = ForkKeyRegistry()
         registry.register_fork(

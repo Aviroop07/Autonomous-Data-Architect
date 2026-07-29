@@ -304,6 +304,23 @@ def _resolve_branch(
             )
             if isinstance(branch_vals, Unresolved):
                 return None
+            if not branch_vals:
+                # The registry KNOWS this fork's categories and `val` is not
+                # among them, so this condition provably selects no rows. A
+                # BranchTag was minted anyway, which asked Stage 4 to
+                # parameterize a branch that cannot exist. Report and decline.
+                logger.warning(
+                    "[ConstraintGraph] Branch condition %s = %r names a value "
+                    "outside the registered category set for %s.%s (%s), so it "
+                    "matches no rows and yields no branch. Either the value or "
+                    "the category list is wrong.",
+                    col_name,
+                    val,
+                    fk.table_name,
+                    fk.column_name,
+                    registry.forks.get(fk),
+                )
+                return None
             return BranchTag(
                 fork_table=fk.table_name,
                 fork_column=fk.column_name,
@@ -816,18 +833,62 @@ def _build_fork_registry(
 ) -> None:
     """Scan categorical distributions to populate the fork registry with
     all known category lists. This replaces the old _discover_fork pattern
-    with a proper scan-and-union over cross_shard.py shapes."""
+    with a proper scan-and-union over cross_shard.py shapes.
+
+    A CATEGORICAL distribution states the category set of ITS OWN column, so
+    that is the (table, column) it gets registered under. Two bugs used to
+    break this, and together they left the registry permanently empty:
+
+    1. It skipped every distribution with `if_condition is None` -- but the
+       fork-DEFINING fact is exactly the unconditional one. "CUSTOMER.tier is
+       CATEGORICAL over [platinum, standard]" is the fact that says what the
+       fork's branches ARE, and it was the one fact being thrown away.
+    2. It registered the categories under the IF-CONDITION's column rather
+       than the distribution's own, with an empty table name -- so a
+       conditional fact filed its branch's categories under the wrong key.
+
+    The consequence was not a wrong answer but a silent disappearance: with
+    the registry empty, `_resolve_branch` returned None for every branch, so
+    both branches of one conditional distribution got the same flat_name,
+    were merged, had their pins intersected into an empty interval, and were
+    excluded from square AND loose. Forked parameters vanished from the probe
+    contract entirely, and Stage 4 never learned they existed.
+
+    Only UNCONDITIONAL categoricals register. A conditional one states the
+    categories seen WITHIN its branch, which is a subset of the column's
+    domain, and treating a subset as the authoritative category set is now
+    actively harmful: `_resolve_branch` reports a value outside the registered
+    set as matching no rows, so a partial list would make legitimate branches
+    look impossible. The unconditional fact is the one that speaks for the
+    whole column, so it is the only one trusted here.
+    """
     for dc in distributions:
         if dc.family != "CATEGORICAL":
             continue
-        if dc.if_condition is None:
-            continue
-        cond = parse_if_condition_from_predicate(dc.if_condition)
-        if cond is None:
+        if dc.if_condition is not None:
             continue
         cats = dc.parameters.get("categories", [])
-        if isinstance(cats, list) and cats:
-            registry.register_fork(cond.fork_key, cats)
+        if not isinstance(cats, list) or not cats:
+            continue
+        # The column ref in an if_condition is deliberately unqualified (see
+        # RColumnRef), so the table has to come from the enclosing ON tree.
+        table = _on_base_table(dc.on)
+        if table is None:
+            logger.info(
+                "[ConstraintGraph] CATEGORICAL distribution on column %s "
+                "(facts %s) has no single base table in its ON tree, so its "
+                "categories cannot be attributed to one column and are not "
+                "registered as a fork.",
+                dc.column,
+                list(dc.fact_references),
+            )
+            continue
+        # Categories are compared against string literals from if_conditions,
+        # so normalize to str here rather than at every comparison site.
+        registry.register_fork(
+            ForkKey(table_name=table, column_name=dc.column),
+            [str(cat) for cat in cats],
+        )
 
 
 def parse_if_condition_from_predicate(
