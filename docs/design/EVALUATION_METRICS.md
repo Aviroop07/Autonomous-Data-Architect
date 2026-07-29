@@ -129,10 +129,24 @@ dataset carries them, the NL spans each element cites). Three failures counted
 separately, because they are not equally bad:
 
 - **missing** -- the relationship is not represented at all;
+- **spurious** -- a relationship nothing in the specification asks for;
 - **reversed** -- the FK is on the wrong side, which changes the cardinality the
-  schema can express and is a genuine modelling error;
-- **mis-optional** -- nullability contradicts stated mandatory or optional
-  participation.
+  schema can express and is a genuine modelling error.
+
+`reversed` is BEST EFFORT, and the reason is worth stating because it is a real
+limit of refusing to read names. Reversing an edge changes the in/out degrees of
+both endpoints, and those degrees are exactly what the alignment uses -- so
+reversing tends to move the alignment that would be needed to see it. Four schema
+shapes were tried (two tables; a three-table chain; a hub with four spokes; a
+chain with distinctive column profiles) and in every one the alignment re-mapped,
+so the defect surfaced as one missing edge plus one spurious edge. A second,
+alignment-independent pass recovers the case where a missing edge's exact opposite
+was predicted. The three counts together are always complete -- a defect is never
+dropped -- but the attribution between them degrades.
+
+**mis-optional** is NOT implemented: `ground_truth_schema` columns carry only
+`name` and `data_type`, so there is no stated nullability to compare against.
+Adding it is a contract change, like the functional dependencies KDC needed.
 
 ---
 

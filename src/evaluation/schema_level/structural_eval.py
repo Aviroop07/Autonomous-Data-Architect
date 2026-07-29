@@ -127,6 +127,23 @@ class StructuralResult:
     aligned_pairs: List[Tuple[str, str, float]] = field(default_factory=list)
     unaligned_gt: List[str] = field(default_factory=list)
     unaligned_pred: List[str] = field(default_factory=list)
+    # Three distinct foreign-key defects, kept apart because they mean different
+    # things: a REVERSED key points the wrong way and changes which side the
+    # cardinality lives on; a MISSING one is an omission; a SPURIOUS one is a
+    # relationship nothing asked for.
+    #
+    # KNOWN LIMIT on `reversed_fks`, measured rather than assumed. Flipping an
+    # edge changes both endpoints' in/out degrees, so it can change the alignment
+    # itself -- and where a schema has several structurally identical tables the
+    # assignment is degenerate and may permute them freely. When that happens the
+    # reversal is not visible AS a reversal and lands in missing + spurious
+    # instead. A second pass recovers the case where a missing edge's exact
+    # opposite was predicted, but a reversal that also scrambled the alignment
+    # stays split. The three counts together are still complete; only the
+    # attribution between them can degrade.
+    reversed_fks: List[str] = field(default_factory=list)
+    missing_fks: List[str] = field(default_factory=list)
+    spurious_fks: List[str] = field(default_factory=list)
 
     @property
     def structural_score(self) -> float:
@@ -153,6 +170,9 @@ class StructuralResult:
             "fk_topology_recall": self.fk_topology_recall,
             "table_structural_recall": self.table_structural_recall,
             "column_type_agreement": self.column_type_agreement,
+            "fk_reversed": float(len(self.reversed_fks)),
+            "fk_missing": float(len(self.missing_fks)),
+            "fk_spurious": float(len(self.spurious_fks)),
         }
 
 
@@ -336,6 +356,39 @@ def evaluate_structural(pred: Schema, gt: Schema) -> StructuralResult:
             untranslatable += 1
 
     hits = len(translated & pred_edges)
+
+    # A missed edge and a BACKWARDS edge are not the same defect, and averaging
+    # them into one recall number hides which happened. A reversed foreign key is
+    # a genuine modelling error: it changes which side the cardinality lives on,
+    # so the schema can no longer represent the same set of states. A missing one
+    # is an omission -- the relationship simply is not there. Reported separately
+    # so a run can be diagnosed rather than merely scored.
+    reversed_edges: List[Tuple[str, str]] = []
+    missing_edges: List[Tuple[str, str]] = []
+    for a, b in sorted(translated):
+        if (a, b) in pred_edges:
+            continue
+        if (b, a) in pred_edges:
+            reversed_edges.append((a, b))
+        else:
+            missing_edges.append((a, b))
+    # Predicted edges with no ground-truth counterpart in either direction.
+    spurious_edges = sorted(
+        e for e in pred_edges if e not in translated and (e[1], e[0]) not in translated
+    )
+
+    # Second pass, alignment-independent: a MISSING edge whose exact opposite was
+    # predicted as SPURIOUS is a reversal that the first pass could not see,
+    # because the two endpoints aligned to different tables. Reclassifying the
+    # pair keeps the counts honest -- one modelling error rather than two
+    # unrelated ones.
+    for a, b in list(missing_edges):
+        if (b, a) in spurious_edges:
+            missing_edges.remove((a, b))
+            spurious_edges.remove((b, a))
+            reversed_edges.append((a, b))
+    reversed_edges.sort()
+
     # An edge whose endpoints did not align cannot be credited, so it counts
     # against recall rather than vanishing from the denominator.
     recall_denom = len(translated) + untranslatable
@@ -358,6 +411,9 @@ def evaluate_structural(pred: Schema, gt: Schema) -> StructuralResult:
         fk_topology_f1=f1,
         fk_topology_precision=precision,
         fk_topology_recall=recall,
+        reversed_fks=[f"{a} -> {b}" for a, b in reversed_edges],
+        missing_fks=[f"{a} -> {b}" for a, b in missing_edges],
+        spurious_fks=[f"{a} -> {b}" for a, b in spurious_edges],
         table_structural_recall=table_recall,
         column_type_agreement=col_agreement,
         aligned_pairs=pairs,

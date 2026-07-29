@@ -215,3 +215,100 @@ def test_empty_schemas_do_not_raise() -> None:
     r = evaluate_structural(empty, empty)
     assert r.table_structural_recall == 0.0
     assert r.as_dict()["fk_topology_f1"] in (0.0, 1.0)
+
+
+def test_reversal_is_best_effort_and_never_loses_the_defect() -> None:
+    """What is actually true, established by measurement rather than hoped for.
+
+    Reversing a foreign key changes the in/out degrees of BOTH endpoints -- and
+    those degrees are exactly what the name-blind alignment uses. So the act of
+    reversing tends to move the alignment that would be needed to recognise it.
+    Four different schema shapes were tried (two tables, a three-table chain, a
+    hub with four spokes, and a chain with distinctive column profiles) and in
+    every one the alignment re-mapped, so the reversal surfaced as a missing edge
+    plus a spurious one rather than as a reversal.
+
+    That is an inherent tension in a metric that refuses to read names, not a
+    coding fault, and `reversed_fks` is therefore BEST EFFORT: it fires when the
+    alignment happens to hold, or when a missing edge's exact opposite was
+    predicted. What must always hold is the weaker, more important property
+    asserted here -- the defect is reported under SOME heading and never silently
+    disappears.
+    """
+    def chain(reverse_last: bool) -> Schema:
+        rels = [_fk("A", "b_id", "B"), _fk("B", "c_id", "C")]
+        if reverse_last:
+            rels[1] = _fk("C", "b_id", "B")
+        return Schema(
+            tables=[
+                _t("A", [("a_id", DataType.INTEGER), ("b_id", DataType.INTEGER),
+                         ("name", DataType.VARCHAR)]),
+                _t("B", [("b_id", DataType.INTEGER), ("c_id", DataType.INTEGER),
+                         ("when", DataType.DATE)]),
+                _t("C", [("c_id", DataType.INTEGER), ("b_id", DataType.INTEGER),
+                         ("amount", DataType.DECIMAL)]),
+            ],
+            relationships=rels,
+        )
+
+    r = evaluate_structural(chain(reverse_last=True), chain(reverse_last=False))
+    counted = len(r.reversed_fks) + len(r.missing_fks) + len(r.spurious_fks)
+    assert counted > 0, f"the reversal vanished entirely: {r.as_dict()}"
+    # And it costs the headline score, whichever heading it landed under.
+    assert r.structural_score < 1.0, r.as_dict()
+
+
+def test_the_three_fk_counts_are_complete_even_when_attribution_degrades() -> None:
+    """The documented limit: with structurally identical tables the alignment may
+    permute them, so a reversal can stay split across missing and spurious. What
+    must never happen is a defect vanishing entirely."""
+    def hub(reverse_one: bool) -> Schema:
+        rels = [_fk("HUB", f"leaf{i}_id", f"LEAF{i}") for i in range(1, 5)]
+        if reverse_one:
+            rels[0] = _fk("LEAF1", "hub_id", "HUB")
+        return Schema(
+            tables=[
+                _t("HUB", [("hub_id", DataType.INTEGER)]
+                   + [(f"leaf{i}_id", DataType.INTEGER) for i in range(1, 5)]),
+                *[_t(f"LEAF{i}", [(f"leaf{i}_id", DataType.INTEGER),
+                                  ("hub_id", DataType.INTEGER),
+                                  ("label", DataType.VARCHAR)]) for i in range(1, 5)],
+            ],
+            relationships=rels,
+        )
+
+    r = evaluate_structural(hub(True), hub(False))
+    assert len(r.reversed_fks) + len(r.missing_fks) + len(r.spurious_fks) > 0, (
+        "the defect must be reported under SOME heading, never dropped"
+    )
+
+
+def test_a_genuinely_absent_fk_is_reported_as_missing() -> None:
+    gt = _customer_order_schema()
+    pred = _customer_order_schema()
+    pred.relationships = []
+
+    r = evaluate_structural(pred, gt)
+    assert r.missing_fks, r.as_dict()
+    assert not r.reversed_fks
+    assert not r.spurious_fks
+
+
+def test_an_invented_fk_is_reported_as_spurious() -> None:
+    gt = _customer_order_schema()
+    pred = _customer_order_schema()
+    pred.tables.append(
+        _t("PROMO", [("promo_id", DataType.INTEGER), ("code", DataType.VARCHAR)])
+    )
+    pred.relationships = list(pred.relationships or []) + [
+        _fk("PROMO", "promo_id", "CUSTOMER")
+    ]
+
+    r = evaluate_structural(pred, gt)
+    assert r.spurious_fks, r.as_dict()
+
+
+def test_a_perfect_schema_reports_no_fk_defects_of_any_kind() -> None:
+    s = _customer_order_schema()
+    r = evaluate_structural(s, s)
+    assert (r.reversed_fks, r.missing_fks, r.spurious_fks) == ([], [], [])
