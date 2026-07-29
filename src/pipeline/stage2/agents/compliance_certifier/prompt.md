@@ -90,6 +90,20 @@ that the schema clearly made on purpose, the reason must give the technical just
 explain what about the current state defeats the analytical goal, and why your change is the
 correct path to correctness rather than a matter of taste.
 
+### 9. Provenance
+Every patch that CREATES a schema element -- a new table, a new column, a new relationship
+-- must populate `source_fact_ids` with the ids of the facts that require it. Cite the facts
+you actually relied on, not every fact that mentions the table.
+
+This is not bookkeeping. Downstream stages read a column's provenance to decide which facts
+constrain it, and an element that cites no fact is indistinguishable from one invented
+without support -- so an uncited addition is treated as unsupported even when it was right.
+If you cannot name a fact that requires the element, that is itself the signal: do not add
+it.
+
+Patches that only remove or rename existing structure need no provenance, since they create
+nothing to attribute.
+
 ### 9. Legal patch actions
 These are the ONLY action values that exist. A patch with any other action value is silently
 discarded, so its guidance would never take effect -- never invent one.

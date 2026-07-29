@@ -1,3 +1,4 @@
+import logging
 import re as _re
 from typing import List, Optional, Any, Union, Annotated, Literal, TYPE_CHECKING
 from pydantic import (
@@ -12,6 +13,14 @@ from src.util.orchestration.loop_types import LoopOutputModel
 
 if TYPE_CHECKING:
     from src.util.schema_model.schema import Schema
+
+logger = logging.getLogger(__name__)
+
+# Actions that CREATE a schema element. These are the ones whose provenance
+# matters downstream: Stage 3 maps facts to columns, and the information-capacity
+# metric treats an element no fact supports as a hallucination. A patch that
+# adds structure without citing a fact breaks that chain silently.
+_STRUCTURE_ADDING_TAGS = frozenset({"ADD_TABLE", "ADD_COLUMN", "ADD_RELATIONSHIP"})
 
 
 class ActionTag(str, Enum):
@@ -703,6 +712,19 @@ class CritiqueReport(LoopOutputModel):
                 if reason_key != "reason":
                     patch["reason"] = patch.pop(reason_key)
                 if not patch.get("reason"):
+                    # The prompt makes `reason` mandatory and explicitly forbids
+                    # one that "purely restates the action" -- which is exactly
+                    # what this fallback is. It exists so a missing reason cannot
+                    # fail the whole certification, but it must not be silent:
+                    # measured across three live runs, two of them omitted the
+                    # reason on EVERY patch and the substitution made that
+                    # indistinguishable from a model that had justified its work.
+                    logger.warning(
+                        "[SchemaPatch] no reason given for a %s patch; substituting a "
+                        "placeholder. The prompt requires a real justification, so "
+                        "this indicates the certifier ignored it.",
+                        patch.get("action") or patch.get("Action") or "<unknown>",
+                    )
                     patch["reason"] = "Mandatory schema adjustment."
 
                 fact_ids_key = next(
@@ -729,9 +751,32 @@ class CritiqueReport(LoopOutputModel):
                         for fid in raw_fact_ids:
                             try:
                                 coerced.append(int(fid))
-                            except (TypeError, ValueError):
+                            except TypeError, ValueError:
                                 continue
                         patch["source_fact_ids"] = coerced
+
+                # A structure-ADDING patch with no provenance is the quiet one.
+                # It cannot fail validation (the field defaults to an empty list),
+                # so the element reaches the final schema attributed to nothing --
+                # and Stage 3's fact-to-column mapping plus the
+                # information-capacity metric both read that attribution. Two of
+                # three live runs added tables, columns and relationships this
+                # way. Logged rather than rejected because the certifier is
+                # invoked directly, NOT inside an AgentLoop, so there is no
+                # feedback edge to route an error back along.
+                declared_action = _normalize_action_tag(
+                    str(patch.get("action") or patch.get("Action") or "")
+                )
+                if declared_action in _STRUCTURE_ADDING_TAGS and not patch.get(
+                    "source_fact_ids"
+                ):
+                    logger.warning(
+                        "[SchemaPatch] %s cites no source_fact_ids; the element it "
+                        "creates will carry no fact provenance, which Stage 3's "
+                        "fact-to-column mapping and the information-capacity "
+                        "metric both depend on.",
+                        declared_action,
+                    )
 
                 action_key = next(
                     (k for k in patch.keys() if k.lower() == "action"), None
