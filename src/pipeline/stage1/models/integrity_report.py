@@ -96,7 +96,7 @@ class IntegrityReport(LoopOutputModel):
     def get_errors(self) -> list[str]:
         errors = []
         for issue in self._blocking_issues():
-            f_id = f" (Fact {issue.fact_id})" if issue.fact_id else ""
+            f_id = f" (Fact {issue.fact_id})" if issue.fact_id is not None else ""
             errors.append(f"[{issue.severity.upper()}] {issue.description}{f_id}")
         return errors
 
@@ -110,7 +110,7 @@ class IntegrityReport(LoopOutputModel):
                 return
             lines.append(f"\n{title}:")
             for iss in issues:
-                f_id = f" (Fact {iss.fact_id})" if iss.fact_id else ""
+                f_id = f" (Fact {iss.fact_id})" if iss.fact_id is not None else ""
                 lines.append(f"  - [{iss.severity.upper()}] {iss.description}{f_id}")
 
         format_issues("Missing Information", self.missing_information)

@@ -33,6 +33,7 @@ from src.util.observability.llm_trace import (
 )
 from src.util.core.search_tool import EvidenceStore, clear_search_cache
 from src.util.orchestration.loop import AgentLoop
+from src.pipeline.stage2.models.chunk import ChunkedPlan
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,21 @@ async def orchestrate(
     evidence comes from (default: live web search). Both are the run's external
     dependencies; everything else here is internal."""
     limit = _max_nl_chars(model)
+    if not nl_description.strip():
+        logger.error(
+            "[Stage 1] Empty or whitespace-only NL description; returning empty plan."
+        )
+        empty_plan = ChunkedPlan(core_modeling_facts=[], chunks=[])
+        return Output(
+            final_facts=[],
+            domain="Unknown",
+            analytical_goal="General Purpose",
+            iterations=[],
+            original_nl=nl_description,
+            plan=empty_plan,
+            token_usage=0,
+        ), 0
+
     if len(nl_description) > limit:
         raise ValueError(
             f"NL description is {len(nl_description)} characters "
@@ -226,6 +242,27 @@ async def _orchestrate_impl(
         )
         all_facts = extracted_facts
 
+    # Zero-fact guard: no facts means no work for tagger, chunker, or downstream.
+    # Emitting a live LLM call on empty input would waste budget and the
+    # resulting empty chunk would give Stage 2 a hallucination opportunity.
+    if not all_facts:
+        logger.error(
+            "[Stage 1] No facts were extracted from the NL description; "
+            "returning empty plan."
+        )
+        empty_plan = ChunkedPlan(core_modeling_facts=[], chunks=[])
+        output = Output(
+            final_facts=[],
+            domain="Unknown",
+            analytical_goal="General Purpose",
+            iterations=[EnrichedNL(extracted_output=extraction_output)],
+            original_nl=nl_description,
+            plan=empty_plan,
+            converged=result.converged,
+            token_usage=total_tokens,
+        )
+        return output, total_tokens
+
     # Carry each fact's source segment (text + offsets) onto its AtomicFact so the graph
     # chunker can group by segment. External/enrichment facts have no segment and are
     # absent from the lookup (treated as standalone downstream).
@@ -234,11 +271,44 @@ async def _orchestrate_impl(
     # `all_facts` are still RawFact at this point (convert_to_atomic runs below), so
     # reading origin off the fact itself always yielded "(none)". The segment owns
     # that text, so the tagger is handed the lookup explicitly.
-    segment_lookup = {
-        f.id: (s.text, s.start_char, s.end_char)
-        for s in extraction_output.segments
-        for f in s.facts
-    }
+    #
+    # Segment lookup keys are built with duplicate detection: when the LLM assigns
+    # the same ID to facts in different segments, the later entry overwrites the
+    # earlier, silently losing segment attribution. A deterministic renumbering
+    # pass (below) runs before convert_to_atomic so IDs are globally unique.
+    segment_lookup: dict[int, tuple[str, int, int]] = {}
+    segment_dup_count = 0
+    for s in extraction_output.segments:
+        for f in s.facts:
+            if f.id in segment_lookup:
+                segment_dup_count += 1
+            segment_lookup[f.id] = (s.text, s.start_char, s.end_char)
+    if segment_dup_count:
+        logger.warning(
+            "[Stage 1] %d fact ID(s) appeared in multiple segments; "
+            "renumbering will deduplicate them.",
+            segment_dup_count,
+        )
+
+    # Deterministic renumbering: LLMs can emit duplicate fact IDs within or
+    # across segments, and external facts from enrichment may collide with
+    # extracted facts. A duplicate ID silently overwrites in segment_lookup
+    # and the tagger matches on the first collision, so an external fact
+    # inherits the wrong segment attribution and tag set. Renumber every fact
+    # to a globally-unique ID so membership is never ambiguous.
+    seen_ids: set[int] = set()
+    for f in all_facts:
+        if f.id in seen_ids:
+            new_id = max(seen_ids) + 1 if seen_ids else 1
+            seen_ids.add(new_id)
+            # Update segment_lookup if this fact had a segment entry
+            # (enrichment facts won't; they are absent from segment_lookup).
+            if f.id in segment_lookup:
+                old_entry = segment_lookup.pop(f.id)
+                segment_lookup[new_id] = old_entry
+            f.id = new_id
+        else:
+            seen_ids.add(f.id)
 
     logger.info(f"[Stage 1] Tagging {len(all_facts)} facts...")
 
@@ -299,6 +369,7 @@ async def _orchestrate_impl(
         enrichment_filter_report=enrichment_filter_report,
         context_audit_trail=context_audit_trail,
         plan=plan,
+        converged=result.converged,
         token_usage=total_tokens,
     )
 

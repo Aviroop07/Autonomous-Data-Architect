@@ -167,3 +167,36 @@ def test_atomicfact_str_omits_segment_when_empty():
 def test_atomicfact_repr_lists_tag_values():
     f = AtomicFact(id=11, fact="x", tags=[FactTag.STRUCTURAL])
     assert repr(f) == "AtomicFact(id=11, tags=['STRUCTURAL'])"
+
+
+# --------------------------------------------------------------------------- #
+# Generic field-preservation: every RawFact field survives AtomicFact.from_raw
+# --------------------------------------------------------------------------- #
+
+
+def test_from_raw_preserves_every_rawfact_field():
+    """Iterates RawFact.model_fields GENERICALLY so a newly added field is
+    covered automatically. The bug that motivated this silently dropped
+    addresses_gap and evidence_refs at the Stage 1 output boundary."""
+    from pydantic import Field as PydanticField
+
+    raw = RawFact(
+        id=42,
+        fact="Every field must survive.",
+        referenced_fact_ids=[1, 2],
+        is_external=True,
+        addresses_gap=7,
+        evidence_refs=["src:doc.pdf"],
+        external_kind=ExternalFactKind.DOMAIN_CONSTRAINT_HINT,
+        novelty_reason="Adds a test constraint.",
+    )
+    atomic = AtomicFact.from_raw(raw, [FactTag.LOGICAL])
+
+    for field_name in RawFact.model_fields:
+        raw_val = getattr(raw, field_name)
+        atomic_val = getattr(atomic, field_name)
+        assert raw_val == atomic_val, (
+            f"RawFact field {field_name!r} differs after from_raw: "
+            f"raw={raw_val!r}, atomic={atomic_val!r}"
+        )
+    assert atomic.tags == [FactTag.LOGICAL]

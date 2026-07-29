@@ -146,7 +146,7 @@ class BudgetChunker:
         determined -- in which case the caller falls back to a single chunk,
         which is what the pipeline did before this module existed."""
         if self._explicit_budget is not None:
-            return self._explicit_budget
+            return self._explicit_budget if self._explicit_budget > 0 else None
         try:
             from src.util.core.agent import _detect_provider
             from src.util.core.context_window import get_context_window

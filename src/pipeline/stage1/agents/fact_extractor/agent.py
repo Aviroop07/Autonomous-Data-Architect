@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from typing import List, Optional
 
@@ -61,20 +62,29 @@ class FactExtractorLoopAgent(LoopAgent):
         from src.util.algorithms.semantic_match import FactOriginMatcher
 
         cursor = 0
-        normalized_text = text.lower()
         matcher = None
 
         for segment in parsed.segments:
             if not segment.text:
                 continue
 
-            seg_lower = segment.text.lower()
-            idx = normalized_text.find(seg_lower, cursor)
-
-            if idx != -1:
-                # Exact match found
+            # Search the ORIGINAL text case-insensitively so indices are always
+            # in original-string coordinates. .lower() can change string length
+            # for certain Unicode codepoints (e.g. Turkish İ/i), which would
+            # corrupt every downstream offset.
+            match = re.search(re.escape(segment.text), text[cursor:], re.IGNORECASE)
+            if match:
+                idx = cursor + match.start()
                 segment.start_char = idx
                 segment.end_char = idx + len(segment.text)
+                # Assert the recovered slice matches case-insensitively.
+                assert (
+                    text[segment.start_char : segment.end_char].lower()
+                    == segment.text.lower()
+                ), (
+                    f"offset-based slice mismatch at {segment.start_char}:{segment.end_char}: "
+                    f"got {text[segment.start_char : segment.end_char]!r}, expected {segment.text!r}"
+                )
                 cursor = segment.end_char
             else:
                 # Fallback to fuzzy matcher

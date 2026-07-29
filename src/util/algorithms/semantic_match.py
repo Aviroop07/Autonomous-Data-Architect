@@ -59,7 +59,7 @@ class FactOriginMatcher:
             return nltk.sent_tokenize(text)
 
     def _sentence_match(self, claimed_origin: str) -> Optional[str]:
-        """Check if claimed_origin matches a whole sentence (exact or via substring)."""
+        """Check if claimed_origin matches a whole sentence (exact or case-insensitive)."""
         if not claimed_origin:
             return None
         lower_origin = claimed_origin.lower().strip()
@@ -68,8 +68,6 @@ class FactOriginMatcher:
                 return sent
             if sent.lower() == lower_origin:
                 return sent
-            if lower_origin in sent.lower() or sent.lower() in lower_origin:
-                continue
         return None
 
     @staticmethod

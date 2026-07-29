@@ -110,8 +110,11 @@ def _beta_mom(values: np.ndarray) -> Tuple[float, float]:
     if len(values) == 0:
         return 1.0, 1.0
     mu = float(np.mean(values))
+    # Clamp mu away from both boundaries: mu=0.0 or mu=1.0 makes
+    # mu*(1-mu)/var divide 0.0 by 0.0, producing a ZeroDivisionError.
+    mu = np.clip(mu, 1e-6, 1.0 - 1e-6)
     var = float(np.var(values, ddof=0))
-    if var >= mu * (1.0 - mu) or var <= 0.0:
+    if var <= 0.0 or var >= mu * (1.0 - mu):
         var = mu * (1.0 - mu) * 0.999
     scale = mu * (1.0 - mu) / var - 1.0
     a = max(mu * scale, 1.0)

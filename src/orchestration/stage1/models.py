@@ -3,19 +3,36 @@ from typing import List
 from src.pipeline.stage1.models.atomic_fact import AtomicFact
 from src.pipeline.stage1.models.context_audit import ContextAuditAttempt
 from src.pipeline.stage1.models.rephrased_nl import EnrichedNL
-from src.pipeline.stage1.middleware.external_context_filter import ExternalFactFilterResult
+from src.pipeline.stage1.middleware.external_context_filter import (
+    ExternalFactFilterResult,
+)
 from src.pipeline.stage2.models.chunk import ChunkedPlan
 
+
 class Output(BaseModel):
-    final_facts: List[AtomicFact] = Field(description="The finalized list of atomic facts.")
+    final_facts: List[AtomicFact] = Field(
+        description="The finalized list of atomic facts."
+    )
     domain: str = Field(description="The identified industry or technical sector.")
     analytical_goal: str = Field(description="The primary analytical purpose.")
-    iterations: List[EnrichedNL] = Field(description="The full history of enrichment attempts.")
+    iterations: List[EnrichedNL] = Field(
+        description="The full history of enrichment attempts."
+    )
     original_nl: str = Field(description="The original natural language description.")
-    enrichment_filter_report: ExternalFactFilterResult = Field(default_factory=ExternalFactFilterResult)
+    enrichment_filter_report: ExternalFactFilterResult = Field(
+        default_factory=ExternalFactFilterResult
+    )
     context_audit_trail: List[ContextAuditAttempt] = Field(default_factory=list)
     plan: ChunkedPlan = Field(description="The finalized graph-based cluster plan.")
+    converged: bool = Field(
+        default=False,
+        description="True when the extraction loop ended via convergence "
+        "(start node cycled back with no improvement and no errors) rather "
+        "than the retry budget.",
+    )
     token_usage: int = 0
 
     def __str__(self) -> str:
-        return f"Stage 1 Output: {len(self.final_facts)} facts, {self.token_usage} tokens."
+        return (
+            f"Stage 1 Output: {len(self.final_facts)} facts, {self.token_usage} tokens."
+        )

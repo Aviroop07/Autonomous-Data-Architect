@@ -31,17 +31,10 @@ def test_an_empty_spec_yields_an_empty_but_well_formed_output() -> None:
     """An empty specification must produce a complete, empty `Output` -- not an
     exception, and not a half-built object.
 
-    Stage 1's degenerate path runs through every downstream step with nothing to
-    carry: `convert_to_atomic` over an empty list, `normalize_stage1_tags`, and
-    the chunker. Each is individually unit-tested on empty input; what is untested
-    is that `orchestrate()` composes them without any of them assuming at least
-    one fact.
-
-    Mutation this catches: have `BudgetChunker.fit` return `chunks=[]` for an
-    empty fact list instead of a single empty chunk (or index `facts[0]` to seed
-    a chunk) -- Stage 2 then receives a plan with no chunks and raises "No
-    conceptual models generated" a whole stage later, with nothing pointing back
-    here.
+    Stage 1's degenerate path bails out early before any LLM call: calling the
+    tagger or chunker on an empty fact list would waste budget and the resulting
+    empty chunk gives Stage 2 a hallucination opportunity. The plan is still
+    structurally usable by Stage 2 rather than absent.
     """
     provider = (
         CannedAgentProvider()
@@ -55,25 +48,14 @@ def test_an_empty_spec_yields_an_empty_but_well_formed_output() -> None:
     assert output.final_facts == []
     assert output.original_nl == ""
     assert output.domain == "Unknown"
-    assert output.analytical_goal == "Unknown"
+    assert output.analytical_goal == "General Purpose"
+    assert output.converged is False
     # The plan must still be structurally usable by Stage 2 rather than absent.
     assert output.plan.core_modeling_facts == []
-    assert all(chunk == [] for chunk in output.plan.chunks), (
-        f"an empty spec must not manufacture facts; got {output.plan.chunks}"
-    )
-    assert output.enrichment_filter_report.rejected_facts == []
-    assert output.context_audit_trail == []
-    # Every agent on the happy path was still consulted -- an empty spec must not
-    # silently skip verification or tagging.
-    assert provider.calls == [
-        "RephrasedOutput",
-        "IntegrityReport",
-        "CoverageReport",
-        "TaggerOutput",
-    ], provider.calls
-    assert tokens == 15 * 4, (
-        f"four agent calls at 15 tokens each should total 60, got {tokens}"
-    )
+    assert output.plan.chunks == []
+    # Zero-fact early return: no LLM calls were made.
+    assert provider.calls == [], provider.calls
+    assert tokens == 0
 
 
 def test_a_single_fact_spec_produces_exactly_one_tagged_fact_in_one_chunk() -> None:
