@@ -48,7 +48,7 @@ check is never mistaken for an earned one.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Sequence, Set, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from src.util.schema_model.schema import Schema
 
@@ -60,13 +60,14 @@ class KDCResult:
     """`source` records where the dependencies came from -- see the module
     docstring. It decides which key the score is reported under."""
 
-    kdc: float
+    kdc: Optional[float]
     source: str = "pipeline"
     unenforced: List[str] = field(default_factory=list)
     partial_2nf: List[str] = field(default_factory=list)
     transitive_3nf: List[str] = field(default_factory=list)
     cross_table: List[str] = field(default_factory=list)
     tables_without_key: List[str] = field(default_factory=list)
+    unresolved_tables: List[str] = field(default_factory=list)
     n_checked: int = 0
 
     @property
@@ -75,7 +76,7 @@ class KDCResult:
         # consequence of decomposition, not an error.
         return len(self.unenforced) + len(self.partial_2nf) + len(self.transitive_3nf)
 
-    def as_dict(self) -> Dict[str, float]:
+    def as_dict(self) -> Dict[str, Optional[float]]:
         # A circular score must never be published under the metric's name.
         key = "kdc" if self.source == "ground_truth" else "internal_fd_consistency"
         return {
@@ -84,6 +85,7 @@ class KDCResult:
             "kdc_partial_2nf": float(len(self.partial_2nf)),
             "kdc_transitive_3nf": float(len(self.transitive_3nf)),
             "kdc_tables_without_key": float(len(self.tables_without_key)),
+            "kdc_unresolved_tables": float(len(self.unresolved_tables)),
             "kdc_n_checked": float(self.n_checked),
         }
 
@@ -116,8 +118,30 @@ def _table_index(schema: Schema) -> Tuple[Dict[str, Set[str]], Dict[str, Set[str
     return cols, pks
 
 
+def _resolve_table(
+    name: str,
+    cols: Dict[str, Set[str]],
+    name_map: Optional[Mapping[str, str]],
+) -> Optional[str]:
+    """Find the schema table a reference dependency is talking about.
+
+    Direct hit first, then the caller-supplied structural alignment, which is
+    what makes this name-blind like the rest of the suite.
+    """
+    if name in cols:
+        return name
+    if name_map:
+        mapped = name_map.get(name) or name_map.get(name.upper())
+        if mapped and mapped.upper() in cols:
+            return mapped.upper()
+    return None
+
+
 def evaluate_kdc(
-    schema: Schema, fds: Iterable[object], source: str = "pipeline"
+    schema: Schema,
+    fds: Iterable[object],
+    source: str = "pipeline",
+    name_map: Optional[Mapping[str, str]] = None,
 ) -> KDCResult:
     """Check each functional dependency against the schema's key structure.
 
@@ -132,6 +156,7 @@ def evaluate_kdc(
     partial: List[str] = []
     transitive: List[str] = []
     cross: List[str] = []
+    unresolved: List[str] = []
     checked = 0
 
     for raw in fds:
@@ -153,13 +178,22 @@ def evaluate_kdc(
             cross.append(label)
             continue
 
-        table = next(iter(det_tables))
-        if table not in cols:
-            # The entity did not survive mapping; that is a capacity problem,
-            # reported by IC, not a normalisation one. Do not count it here.
+        table = _resolve_table(next(iter(det_tables)), cols, name_map)
+        if table is None:
+            # NOT the same thing as "the entity did not survive". A table that
+            # was merely RENAMED is still there, and renaming is exactly what
+            # Stage 2 does: a benchmark run produced SITE and FAULT_RECORD where
+            # the reference says SOLAR_FARM and FAULT_EVENT. Every other metric
+            # in this suite is name-blind for that reason; this one was not, so
+            # its dependencies silently left the denominator and the score came
+            # back a flattering 1.000 having checked NOTHING.
+            #
+            # `name_map` carries the structural alignment the caller already
+            # computed, so a rename resolves. What remains unresolved is
+            # recorded rather than dropped.
+            unresolved.append(label)
             continue
 
-        checked += 1
         det_cols = {c.lower() for _, c in det_pairs}
         dep_cols = {c.lower() for _, c in dep_pairs}
         pk = pks.get(table, set())
@@ -169,7 +203,21 @@ def evaluate_kdc(
         det_cols &= table_cols
         dep_cols &= table_cols
         if not det_cols or not dep_cols:
+            # COUNTED AS UNRESOLVED, NOT AS CHECKED. The table was found but its
+            # COLUMNS were not, which happens because the alignment this metric
+            # borrows is table-level -- there is no column-level alignment to
+            # borrow. Case 104's reference dependency names fault_code and
+            # fault_wording where the generated table has code and
+            # code_description.
+            #
+            # `checked` used to be incremented ABOVE this point, so four
+            # dependencies none of which could be evaluated produced
+            # n_checked=4 and kdc=1.0 -- a number that looks earned and is not.
+            # The counter now means what it says: evaluated.
+            unresolved.append(label)
             continue
+
+        checked += 1
 
         non_key_dep = dep_cols - pk
         if not non_key_dep:
@@ -199,9 +247,14 @@ def evaluate_kdc(
         transitive_3nf=sorted(transitive),
         cross_table=sorted(cross),
         tables_without_key=tables_without_key,
+        unresolved_tables=sorted(unresolved),
         n_checked=checked,
     )
-    result.kdc = 1.0 - (result.n_violations / checked) if checked else 1.0
+    # UNDEFINED, not 1.0, when nothing was checked. "1 - violations/0" has no
+    # value, and reporting a perfect score for an empty check is the single most
+    # misleading thing this module could do -- it is how a case with a real 3NF
+    # violation in its reference dependencies scored 1.000.
+    result.kdc = (1.0 - result.n_violations / checked) if checked else None
     return result
 
 

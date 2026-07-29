@@ -100,7 +100,12 @@ def test_a_cross_table_dependency_is_reported_but_not_penalised() -> None:
     r = evaluate_kdc(schema, [_FD(["ORDER.customer_id"], ["CUSTOMER.full_name"])])
     assert r.cross_table, r.as_dict()
     assert r.n_violations == 0
-    assert r.kdc == 1.0
+    # "Not penalised" means no violation is counted. The SCORE is undefined
+    # rather than 1.0, because the only dependency supplied was never checkable
+    # -- reporting a perfect score off an empty check is what this module used
+    # to do wrong.
+    assert r.kdc is None
+    assert r.n_checked == 0
 
 
 def test_determining_part_of_the_key_is_not_a_violation() -> None:
@@ -150,9 +155,69 @@ def test_a_dependency_naming_a_vanished_table_is_not_counted_here() -> None:
     assert r.n_violations == 0
 
 
-def test_no_dependencies_scores_vacuously_but_reports_it() -> None:
-    """A 1.0 with nothing checked must be distinguishable from an earned 1.0."""
+def test_nothing_checked_is_undefined_not_a_perfect_score() -> None:
+    """CORRECTS AN EARLIER VERSION OF THIS TEST, which asserted `kdc == 1.0`
+    here. Its docstring already said a vacuous 1.0 "must be distinguishable from
+    an earned 1.0" -- and then made them the same number, distinguishable only by
+    reading n_checked separately.
+
+    They were not distinguished in practice. A benchmark case whose reference
+    dependencies include a real 3NF violation reported kdc 1.000 with
+    n_checked 0, because the reference table names had been renamed by Stage 2
+    and every dependency dropped out of the denominator. "1 - violations/0" has
+    no value, so it now reports None."""
     schema = _schema(_table("A", ["a_id"], ["a_id"]))
     r = evaluate_kdc(schema, [])
-    assert r.kdc == 1.0
+    assert r.kdc is None
     assert r.n_checked == 0
+
+
+def test_a_renamed_table_resolves_through_the_alignment() -> None:
+    """The bug this module had. Every other metric in the suite is NAME-BLIND --
+    tables are aligned by structural signature -- but KDC matched dependencies to
+    tables by name, and renaming is exactly what Stage 2 does.
+
+    Measured on benchmark case 104: the reference dependencies name FAULT_EVENT
+    and SOLAR_FARM while the pipeline produced FAULT_RECORD and SITE, so all four
+    dependencies silently left the denominator and the score came back 1.000
+    having checked NOTHING -- including a genuine `fault_code -> fault_wording`
+    third-normal-form violation that was sitting in the generated schema.
+    """
+    schema = _schema(
+        _table("FAULT_RECORD", ["fault_id", "code", "code_description"], ["fault_id"])
+    )
+    fd = _FD(["FAULT_EVENT.code"], ["FAULT_EVENT.code_description"])
+
+    # Without the alignment the dependency cannot be located at all.
+    blind = evaluate_kdc(schema, [fd])
+    assert blind.n_checked == 0
+    assert blind.kdc is None
+    assert blind.unresolved_tables, "an unlocatable dependency must be reported"
+
+    # With it, the rename resolves and the violation is found.
+    aligned = evaluate_kdc(schema, [fd], name_map={"FAULT_EVENT": "FAULT_RECORD"})
+    assert aligned.n_checked == 1
+    assert aligned.transitive_3nf, aligned.as_dict()
+    assert aligned.kdc == 0.0
+
+
+def test_the_alignment_is_only_a_fallback_for_direct_hits() -> None:
+    """A table whose name already matches must not be re-routed by the map."""
+    schema = _schema(
+        _table("ORDER", ["order_id", "customer_ref", "customer_city"], ["order_id"]),
+        _table("OTHER", ["other_id"], ["other_id"]),
+    )
+    fd = _FD(["ORDER.customer_ref"], ["ORDER.customer_city"])
+    r = evaluate_kdc(schema, [fd], name_map={"ORDER": "OTHER"})
+    assert r.n_checked == 1
+    assert r.transitive_3nf, "resolved against ORDER itself, not the map target"
+
+
+def test_an_unresolved_dependency_is_counted_and_surfaced() -> None:
+    """Silence was the original failure. An unlocatable dependency has to appear
+    somewhere a reader will see it."""
+    schema = _schema(_table("A", ["a_id"], ["a_id"]))
+    r = evaluate_kdc(schema, [_FD(["GHOST.x"], ["GHOST.y"])])
+    assert r.n_checked == 0
+    assert len(r.unresolved_tables) == 1
+    assert r.as_dict()["kdc_unresolved_tables"] == 1.0
