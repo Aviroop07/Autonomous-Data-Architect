@@ -16,10 +16,11 @@ provides the history summary; infrastructure overwrites unresolved_issues after.
 from __future__ import annotations
 
 import logging
-from typing import Callable, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple
 
 from src.util.orchestration.loop_types import (
     AgentRoleConfig,
+    InputT,
     LoopAgent,
     LoopConfig,
     LoopContext,
@@ -72,9 +73,13 @@ class AgentLoop:
     # ------------------------------------------------------------------
 
     async def run(
-        self, initial_context: str, budget: Optional[RetryBudget] = None
+        self, initial_context: InputT, budget: Optional[RetryBudget] = None
     ) -> LoopResult:
         """Run the loop from start_node until a stop condition is met.
+
+        `initial_context` is the typed payload passed to every node's
+        build_context(). Stages 1/2 pass a str; Stage 3 passes a typed
+        object (Stage3ShardContext).
 
         `budget` is optional -- when omitted, a fresh RetryBudget(config.
         max_iter) is used internally, identical to this method's behavior

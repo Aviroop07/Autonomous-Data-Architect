@@ -9,12 +9,12 @@ Replaces the 3 separate statistical/structural/logic auditors.
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Optional
 
 from src.pipeline.stage3.agents.extraction_outputs import AuditReport, UnifiedOutput
+from src.pipeline.stage3.models.shard_context import Stage3ShardContext
 from src.util.core.agent import AgentType
 from src.util.core.agent_provider import AgentProvider, resolve_agent_provider
 from src.util.core.invoke import get_response
@@ -62,24 +62,30 @@ class ConstraintAuditorLoopAgent(LoopAgent):
         assert isinstance(parsed, AuditReport)
         return parsed, tokens
 
-    def build_context(self, ctx: LoopContext) -> str:
-        context_data: Dict[str, Any] = {}
-        try:
-            context_data = json.loads(ctx.initial_context)
-        except json.JSONDecodeError:
+    def build_context(self, ctx: LoopContext[Stage3ShardContext]) -> str:
+        # Reads the typed context directly. This used to json.loads() the
+        # context back out of a string and then dict-index it
+        # (facts_map[str(fid)]["fact"]), which meant a renamed key was
+        # invisible to the type checker and failed at runtime in three separate
+        # consumers. The producer now hands over the object; the only string on
+        # this path is the prompt text built below.
+        ctx_data = ctx.initial_context
+        if not isinstance(ctx_data, Stage3ShardContext):
+            # Kept deliberately: this guards a genuinely different failure --
+            # a caller wiring the wrong payload into this loop -- rather than
+            # the JSON round-trip damage the old ladder existed to survive.
             logger.warning(
-                "[ConstraintAuditor] Failed to parse initial_context as JSON."
+                "[ConstraintAuditor] initial_context was %s, not "
+                "Stage3ShardContext; auditing with no fact context.",
+                type(ctx_data).__name__,
             )
-        except TypeError, AttributeError:
-            logger.warning("[ConstraintAuditor] initial_context was not a JSON string.")
-
-        fact_ids = context_data.get("fact_ids", [])
-        facts_map = context_data.get("facts_map", {})
-        facts_text = "\n".join(
-            f"- [id={fid}] {facts_map[str(fid)]['fact']}"
-            for fid in sorted(fact_ids)
-            if str(fid) in facts_map
-        )
+            facts_text = ""
+        else:
+            facts_text = "\n".join(
+                f"- [id={fid}] {ctx_data.facts_map[fid].fact}"
+                for fid in sorted(ctx_data.fact_ids)
+                if fid in ctx_data.facts_map
+            )
 
         extractor_output = ctx.node_outputs.get("generator")
         if isinstance(extractor_output, UnifiedOutput):

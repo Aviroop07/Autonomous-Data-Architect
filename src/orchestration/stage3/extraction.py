@@ -8,9 +8,11 @@ while using different execution strategies -- see _rerun_shard.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from src.pipeline.stage1.models.rephrased_nl import AtomicFact
+from src.pipeline.stage3.models.shard_context import Stage3ShardContext
 from src.util.schema_model.schema import Schema
 from src.pipeline.stage3.agents.constraint_auditor.agent import (
     ConstraintAuditorLoopAgent,
@@ -22,7 +24,8 @@ from src.pipeline.stage3.middleware.deterministic_checker import (
     DeterministicCheckerLoopAgent,
 )
 from src.pipeline.stage3.models.cross_shard import UnifiedExtractionOutput
-from src.orchestration.stage3.context import _serialize_context
+from src.pipeline.stage3.models.probe import LostShardReason
+from src.orchestration.stage3.context import _build_shard_context
 from src.util.core.agent_provider import AgentProvider
 from src.util.orchestration.loop import AgentLoop
 from src.util.orchestration.rounds import rounds_to_max_iter as _rounds_to_max_iter
@@ -128,46 +131,103 @@ def _build_generator_loop_config(
     )
 
 
+def _count_constraints(output: UnifiedExtractionOutput) -> int:
+    """Total constraints across every shape the extraction output carries.
+
+    Derived from `model_fields` rather than a hardcoded field list, so adding a
+    new constraint shape to UnifiedExtractionOutput cannot silently stop being
+    counted -- the same class of drift that made AtomicFact.from_raw lose two
+    fields.
+    """
+    total = 0
+    for name in type(output).model_fields:
+        value = getattr(output, name, None)
+        if isinstance(value, list):
+            total += len(value)
+    return total
+
+
+@dataclass(frozen=True)
+class ShardExtractionResult:
+    """What one shard's generator loop produced, plus whether it was lost.
+
+    A plain (output, tokens) tuple could not carry the "this shard contributed
+    nothing, and here is why" signal, which is exactly the information that was
+    previously confined to a log line.
+    """
+
+    output: UnifiedExtractionOutput
+    tokens: int
+    lost_reason: Optional[LostShardReason] = None
+    detail: str = ""
+    withheld_constraint_count: int = 0
+
+
 def _extract_generator_output(
     result: Optional["LoopResult"],
-) -> Tuple[UnifiedExtractionOutput, int]:
-    """Pulls the generator node's final output out of a completed
-    LoopResult. `result` is None when run_parallel_loops() isolated a
-    failure for this unit (see its own docstring) -- treated as an empty
-    output rather than propagating the failure, the same way a shard that
-    ran but produced nothing extractable is already handled."""
+) -> ShardExtractionResult:
+    """Pulls the generator node's final output out of a completed LoopResult.
+
+    `result` is None when run_parallel_loops() isolated a failure for this unit
+    (see its own docstring) -- treated as an empty output rather than
+    propagating the failure, so one shard's crash cannot take the run down.
+
+    A shard that produced nothing is now REPORTED rather than only logged, and
+    a shard whose deterministic checker never converged has its constraints
+    WITHHELD rather than shipped: they failed canonicalization or column
+    resolution, so they may reference columns that do not exist, and Stage 4
+    generating data against them is worse than Stage 4 not having them. Either
+    way the caller learns which facts went unrepresented.
+    """
     if result is None:
-        return UnifiedExtractionOutput(), 0
+        return ShardExtractionResult(
+            output=UnifiedExtractionOutput(),
+            tokens=0,
+            lost_reason=LostShardReason.EXTRACTION_FAILED,
+            detail="run_parallel_loops isolated a failure for this shard.",
+        )
     output = result.node_outputs.get("generator")
     if not isinstance(output, UnifiedExtractionOutput):
-        # Dropping an entire shard's constraints used to be completely silent
-        # here -- no log line, no flag -- so a shard contributing nothing was
-        # indistinguishable from a shard with nothing to contribute.
         logger.error(
             "[Stage 3] Discarding a shard's extraction: the generator node's "
             "final output was %s, not UnifiedExtractionOutput. This shard "
             "contributes NO constraints.",
             type(output).__name__,
         )
-        output = UnifiedExtractionOutput()
+        return ShardExtractionResult(
+            output=UnifiedExtractionOutput(),
+            tokens=result.total_tokens,
+            lost_reason=LostShardReason.EXTRACTION_FAILED,
+            detail=(
+                f"generator produced {type(output).__name__}, not "
+                "UnifiedExtractionOutput."
+            ),
+        )
     if result.det_errors_exhausted:
-        # The loop gave up with the deterministic checker still reporting
-        # errors, so some constraints here failed canonicalization or column
-        # resolution and are being shipped anyway. Nothing consumed this flag
-        # before, which made an unrepaired extraction look identical to a
-        # clean one all the way through to Stage 4.
+        withheld = _count_constraints(output)
         logger.error(
             "[Stage 3] Shard extraction exhausted its retry budget with "
-            "UNRESOLVED deterministic errors after %d iteration(s); some "
-            "constraints failed canonicalization or column resolution and are "
-            "being passed through unrepaired to Stage 4.",
+            "UNRESOLVED deterministic errors after %d iteration(s); "
+            "WITHHOLDING its %d constraint(s) rather than shipping constraints "
+            "that never passed canonicalization or column resolution.",
             result.iteration_count,
+            withheld,
         )
-    return output, result.total_tokens
+        return ShardExtractionResult(
+            output=UnifiedExtractionOutput(),
+            tokens=result.total_tokens,
+            lost_reason=LostShardReason.DETERMINISTIC_CHECK_UNRESOLVED,
+            detail=(
+                f"deterministic checker still reporting errors after "
+                f"{result.iteration_count} iteration(s)."
+            ),
+            withheld_constraint_count=withheld,
+        )
+    return ShardExtractionResult(output=output, tokens=result.total_tokens)
 
 
 async def _run_generator_loop(
-    context_str: str,
+    context: Stage3ShardContext,
     model: Optional[str],
     max_retries: int,
     provider: Optional[AgentProvider] = None,
@@ -181,7 +241,7 @@ async def _run_generator_loop(
     config = _build_generator_loop_config(
         rounds_to_max_iter(max_retries), model, provider
     )
-    result = await AgentLoop(config).run(context_str)
+    result = await AgentLoop(config).run(context)
     return _extract_generator_output(result)
 
 
@@ -213,7 +273,7 @@ async def _rerun_shard(
     (util/core/agent_provider.py), so a test does not need to replace this
     function to run offline.
     """
-    context_str = _serialize_context(
+    context = _build_shard_context(
         shard, fact_ids, facts_map, stub_tables, reconciliation_guidance=guidance
     )
-    return await _run_generator_loop(context_str, model, max_retries, provider)
+    return await _run_generator_loop(context, model, max_retries, provider)

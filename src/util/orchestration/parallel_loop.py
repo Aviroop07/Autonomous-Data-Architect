@@ -30,10 +30,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Awaitable, List, Optional, Sequence, TypeVar
+from typing import Awaitable, Generic, List, Optional, Sequence, TypeVar
 
 from src.util.orchestration.loop import AgentLoop
-from src.util.orchestration.loop_types import LoopConfig, LoopResult, RetryBudget
+from src.util.orchestration.loop_types import (
+    InputT,
+    LoopConfig,
+    LoopResult,
+    RetryBudget,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,11 +69,11 @@ async def run_parallel(
 
 
 @dataclass
-class ParallelLoopSpec:
+class ParallelLoopSpec(Generic[InputT]):
     """One AgentLoop unit to run as part of a run_parallel_loops() batch."""
 
     config: LoopConfig
-    initial_context: str
+    initial_context: InputT
     label: str = ""
 
 

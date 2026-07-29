@@ -9,14 +9,14 @@ structural checks (empty fact_references, etc.) via UnifiedOutput.get_errors().
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
+from src.pipeline.stage1.models.rephrased_nl import AtomicFact
 from src.pipeline.stage3.agents.extraction_outputs import AuditReport, UnifiedOutput
 from src.pipeline.stage3.models.cross_shard import UnifiedExtractionOutput
-from src.util.schema_model.schema import Schema
+from src.pipeline.stage3.models.shard_context import Stage3ShardContext
 from src.util.schema_model.render import schema_to_prompt_text
 from src.util.core.agent import AgentType
 from src.util.core.agent_provider import AgentProvider, resolve_agent_provider
@@ -33,16 +33,12 @@ logger = logging.getLogger(__name__)
 PROMPT_PATH = Path(__file__).parent / "prompt.md"
 
 
-def _facts_to_text(fact_ids: List[int], facts_map: dict) -> str:
+def _facts_to_text(fact_ids: List[int], facts_map: Dict[int, AtomicFact]) -> str:
     lines: List[str] = ["## ALLOCATED FACTS"]
     for fid in sorted(fact_ids):
-        # facts_map round-trips through JSON (initial_context), so its keys
-        # are always strings and its values are plain {"id":..., "fact":...}
-        # dicts, never AtomicFact objects -- looking up by int fid or
-        # accessing .fact as an attribute both silently miss every entry.
-        fact = facts_map.get(str(fid))
+        fact = facts_map.get(fid)
         if fact is not None:
-            lines.append(f"- [id={fid}] {fact['fact']}")
+            lines.append(f"- [id={fid}] {fact.fact}")
     return "\n".join(lines)
 
 
@@ -88,38 +84,12 @@ class ConstraintGeneratorLoopAgent(LoopAgent):
         )
         return wrapped, tokens
 
-    def build_context(self, ctx: LoopContext) -> str:
-        context_data: Dict[str, Any] = {}
-        try:
-            context_data = json.loads(ctx.initial_context)
-        except json.JSONDecodeError:
-            logger.warning(
-                "[ConstraintGenerator] Failed to parse initial_context as JSON."
-            )
-        except TypeError, AttributeError:
-            logger.warning(
-                "[ConstraintGenerator] initial_context was not a JSON string."
-            )
-
-        schema_raw = context_data.get("schema")
-        stub_tables = context_data.get("stub_tables")
-        fact_ids = context_data.get("fact_ids", [])
-        facts_map = context_data.get("facts_map", {})
-
-        schema: Optional[Schema] = None
-        if isinstance(schema_raw, Schema):
-            schema = schema_raw
-        elif isinstance(schema_raw, dict):
-            try:
-                schema = Schema(**schema_raw)
-            except Exception:
-                pass
+    def build_context(self, ctx: LoopContext[Stage3ShardContext]) -> str:
+        ctx_data = ctx.initial_context
 
         parts: List[str] = []
-        if schema is not None:
-            parts.append(schema_to_prompt_text(schema, stub_tables))
-        if fact_ids and facts_map:
-            parts.append(_facts_to_text(fact_ids, facts_map))
+        parts.append(schema_to_prompt_text(ctx_data.schema, ctx_data.stub_tables))
+        parts.append(_facts_to_text(ctx_data.fact_ids, ctx_data.facts_map))
 
         prior_output = ctx.node_outputs.get("generator")
         if isinstance(prior_output, UnifiedOutput) and self._errored_ids_history:
@@ -153,12 +123,11 @@ class ConstraintGeneratorLoopAgent(LoopAgent):
                 + accepted.model_dump_json(indent=2)
             )
 
-        reconciliation_guidance = context_data.get("reconciliation_guidance")
-        if reconciliation_guidance:
+        if ctx_data.reconciliation_guidance:
             parts.append(
                 "## RECONCILIATION GUIDANCE (a conflict-reconciliation pass found a "
                 "misextraction in a prior round -- fix this)\n"
-                + reconciliation_guidance
+                + ctx_data.reconciliation_guidance
             )
 
         if ctx.det_error_history:

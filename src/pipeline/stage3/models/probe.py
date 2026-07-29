@@ -126,6 +126,45 @@ class VariableProbe(BaseModel):
     )
 
 
+class LostShardReason(str, Enum):
+    """Why a shard contributed nothing. The distinction matters to Stage 4:
+    EXTRACTION_FAILED means we never got a usable answer at all, whereas
+    DETERMINISTIC_CHECK_UNRESOLVED means we got constraints and deliberately
+    withheld them because they never passed canonicalization or column
+    resolution -- i.e. they referenced things that may not exist."""
+
+    EXTRACTION_FAILED = "EXTRACTION_FAILED"
+    DETERMINISTIC_CHECK_UNRESOLVED = "DETERMINISTIC_CHECK_UNRESOLVED"
+
+
+class LostShard(BaseModel):
+    """A shard whose constraints did not make it into the output.
+
+    Recorded rather than merely logged: Stage 4 consumes this object, not the
+    log, so a silently-dropped shard would otherwise be indistinguishable from
+    a shard that genuinely had nothing to contribute.
+    """
+
+    shard_index: int = Field(description="The shard's index in this run.")
+    reason: LostShardReason
+    detail: str = Field(
+        default="",
+        description="Human-readable specifics, e.g. how many iterations the "
+        "loop burned before its retry budget ran out.",
+    )
+    fact_references: list[int] = Field(
+        default_factory=list,
+        description="The facts allocated to this shard, i.e. exactly what went "
+        "unrepresented. Lets a caller tell which parts of the spec lost their "
+        "constraints rather than only that something was lost.",
+    )
+    withheld_constraint_count: int = Field(
+        default=0,
+        description="How many constraints were quarantined rather than shipped. "
+        "0 for EXTRACTION_FAILED, since nothing was ever produced.",
+    )
+
+
 class Stage3AnalysisReport(BaseModel):
     """The complete output of running the DOF graph over a
     ConstraintManifest. `square_variables` is informational (confirms what
@@ -163,6 +202,15 @@ class Stage3AnalysisReport(BaseModel):
         "pattern, or a predicate shape with no constraint_model equivalent yet) -- "
         "not conflicts, but not silently clean either.",
     )
+    lost_shards: list[LostShard] = Field(
+        default_factory=list,
+        description="Shards that contributed NO constraints because their "
+        "extraction failed or never passed the deterministic checker. Stage 4 "
+        "consumes this object rather than the log, so without this field a run "
+        "that silently lost a shard is indistinguishable from one where that "
+        "shard genuinely had nothing to say -- and any metric computed over the "
+        "two would be measuring different things while looking identical.",
+    )
 
     @property
     def is_feasible(self) -> bool:
@@ -171,3 +219,15 @@ class Stage3AnalysisReport(BaseModel):
             and not self.derived_cycle_conflicts
             and not self.conflicts
         )
+
+    @property
+    def is_complete(self) -> bool:
+        """True iff every shard actually contributed its constraints.
+
+        Deliberately separate from `is_feasible`: a run can be perfectly
+        feasible over the constraints it managed to collect while having
+        quietly dropped a whole shard's worth. Feasibility asks "do these
+        constraints contradict each other"; completeness asks "are these all
+        the constraints there should have been".
+        """
+        return not self.lost_shards

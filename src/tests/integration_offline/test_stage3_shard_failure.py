@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from src.orchestration.stage3.state import Stage3Output
 from src.pipeline.stage3.agents.extraction_outputs import AuditReport
 from src.pipeline.stage3.models.cross_shard import UnifiedExtractionOutput
-from src.pipeline.stage3.models.probe import GroupReconciliation
+from src.pipeline.stage3.models.probe import GroupReconciliation, LostShardReason
 from src.tests.fixtures.canned_llm import CannedAgentProvider
 from src.tests.fixtures.canned_payloads import stage1 as p1
 from src.tests.fixtures.canned_payloads import stage3 as p3
@@ -192,34 +192,36 @@ def test_the_surviving_shard_contributes_its_full_output(
     assert output.derived_columns == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "KNOWN GAP: a shard whose extraction failed entirely is reported only via "
-        "logger.warning in orchestration/stage3/entry.py -- Stage3Output and "
-        "Stage3AnalysisReport carry no field for it. So a run that silently lost "
-        "a whole shard's constraints is indistinguishable, in the returned "
-        "object, from a run where that shard had nothing to contribute. Stage 4 "
-        "consumes the object, not the log. Fix by adding a failed-shard record "
-        "to Stage3AnalysisReport and populating it where `result is None`."
-    ),
-)
 def test_a_failed_shard_is_reported_in_the_output_not_only_the_log(
     two_shard_run: Tuple[Stage3Output, CannedAgentProvider],
 ) -> None:
     """A lost shard must be visible to the CALLER, not just to whoever reads the
-    log afterwards."""
+    log afterwards. Stage 4 consumes this object, not the log.
+
+    Asserts the STRUCTURED record rather than substring-matching free text, so
+    it pins which shard was lost, why, and which facts went unrepresented --
+    a report that merely mentioned the word "shard" somewhere would not pass.
+    """
     output, _provider = two_shard_run
     report = output.analysis_report
-    evidence = [
-        *report.unsupported,
-        *(c.summary for c in report.conflicts),
-        *(d.reason for d in report.dismissed_conflicts),
-    ]
-    assert any("shard" in text.lower() for text in evidence), (
+
+    assert report.lost_shards, (
         "nothing in Stage3AnalysisReport records that a shard's extraction "
-        f"failed entirely; report carries {evidence}"
+        f"failed entirely; report.unsupported carries {report.unsupported}"
     )
+    assert not report.is_complete, (
+        "is_complete must be False when a shard was lost -- it is the flag a "
+        "caller checks to know the constraint set is not the whole story"
+    )
+    lost = report.lost_shards[0]
+    assert lost.reason is LostShardReason.EXTRACTION_FAILED
+    assert lost.fact_references, (
+        "a lost shard must name the facts it left unrepresented, otherwise a "
+        "caller learns something was lost but not what"
+    )
+    # Also surfaced in the human-facing list, so a consumer reading only
+    # `unsupported` still learns the run was incomplete.
+    assert any("shard" in text.lower() for text in report.unsupported)
 
 
 @pytest.mark.xfail(

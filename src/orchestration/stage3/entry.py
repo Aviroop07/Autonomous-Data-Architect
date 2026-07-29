@@ -69,8 +69,8 @@ from typing import Dict, List, Optional, Tuple
 from src.pipeline.stage1.models.rephrased_nl import AtomicFact
 from src.util.schema_model.schema import Schema
 from src.pipeline.stage3.middleware.fact_allocation import allocate_facts_to_shards
-from src.pipeline.stage3.models.probe import Stage3AnalysisReport
-from src.orchestration.stage3.context import _serialize_context
+from src.pipeline.stage3.models.probe import LostShard, Stage3AnalysisReport
+from src.orchestration.stage3.context import _build_shard_context
 from src.orchestration.stage3.extraction import (
     _build_generator_loop_config,
     rounds_to_max_iter,
@@ -223,7 +223,7 @@ async def orchestrate(
     phase1_specs = [
         ParallelLoopSpec(
             config=_build_generator_loop_config(phase1_max_iter, model, provider),
-            initial_context=_serialize_context(
+            initial_context=_build_shard_context(
                 ss.schema, ss.fact_ids, facts_map, ss.stub_tables
             ),
             label=f"shard-{ss.index}",
@@ -232,6 +232,11 @@ async def orchestrate(
     ]
     phase1_results = await run_parallel_loops(phase1_specs)
     total_tokens = 0
+    # Shards that contributed nothing. Recorded on the report rather than only
+    # logged: Stage 4 consumes the object, so without this a run that lost a
+    # whole shard looks identical to one where that shard had nothing to say.
+    lost_shards: List[LostShard] = []
+    lost_shard_notes: List[str] = []
     for ss, result in zip(shard_states, phase1_results):
         if result is None:
             logger.warning(
@@ -240,10 +245,30 @@ async def orchestrate(
                 f"-- treated as an empty output rather than crashing the "
                 f"whole run."
             )
-        output, tokens = _extract_generator_output(result)
-        ss.output = output
-        ss.tokens = tokens
-        total_tokens += tokens
+        extraction = _extract_generator_output(result)
+        ss.output = extraction.output
+        ss.tokens = extraction.tokens
+        total_tokens += extraction.tokens
+        if extraction.lost_reason is not None:
+            lost_shards.append(
+                LostShard(
+                    shard_index=ss.index,
+                    reason=extraction.lost_reason,
+                    detail=extraction.detail,
+                    fact_references=list(ss.fact_ids),
+                    withheld_constraint_count=extraction.withheld_constraint_count,
+                )
+            )
+            # Also surfaced in `unsupported`, whose contract is "not conflicts,
+            # but not silently clean either" -- which is exactly what a lost
+            # shard is. `lost_shards` carries the structure for Stage 4;
+            # this line means a consumer reading only the human-facing list
+            # still learns the run was incomplete.
+            lost_shard_notes.append(
+                f"shard {ss.index} contributed no constraints "
+                f"({extraction.lost_reason.value}): {extraction.detail} "
+                f"Facts left unrepresented: {sorted(ss.fact_ids)}."
+            )
 
     logger.info(
         f"[Stage 3] Phase 1 extraction complete for {len(shard_states)} shards."
@@ -315,10 +340,11 @@ async def orchestrate(
         overconstrained_blocks=[
             b for b in old_report.overconstrained_blocks if b.constraints
         ],
+        lost_shards=lost_shards,
         derived_cycle_conflicts=remaining_cycles,
         dismissed_conflicts=dismissed,
         conflicts=conflicts,
-        unsupported=unsupported,
+        unsupported=[*unsupported, *lost_shard_notes],
     )
 
     logger.info(

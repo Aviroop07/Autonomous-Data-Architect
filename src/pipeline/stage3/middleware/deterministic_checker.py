@@ -16,12 +16,12 @@ own _last_schema/_validate_output split, now made an explicit node.
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
-from src.util.schema_model.schema import Schema
 from src.pipeline.stage3.agents.extraction_outputs import UnifiedOutput
+from src.pipeline.stage3.models.shard_context import Stage3ShardContext
+from src.util.schema_model.schema import Schema
 from src.util.constraint_model.condition.expressions import RColumnRef, RLiteral
 from src.util.constraint_model.condition.predicates import (
     RComparison,
@@ -266,51 +266,26 @@ class DeterministicCheckerLoopAgent(LoopAgent):
         errors = self._canonicalize_all(self._pending_output, self._schema)
         return DetCheckOutput(errors=errors), 0
 
-    def build_context(self, ctx: LoopContext) -> str:
+    def build_context(self, ctx: LoopContext[Stage3ShardContext]) -> str:
         generator_output = ctx.node_outputs.get("generator")
         self._pending_output = (
             generator_output if isinstance(generator_output, UnifiedOutput) else None
         )
 
-        context_data: Dict[str, Any] = {}
-        try:
-            context_data = json.loads(ctx.initial_context)
-        except json.JSONDecodeError:
-            logger.warning(
-                "[DeterministicChecker] Failed to parse initial_context as JSON."
-            )
-        except (TypeError, AttributeError):
-            logger.warning(
-                "[DeterministicChecker] initial_context was not a JSON string."
-            )
-
-        schema_raw = context_data.get("schema")
-        schema: Optional[Schema] = None
-        if isinstance(schema_raw, Schema):
-            schema = schema_raw
-        elif isinstance(schema_raw, dict):
-            try:
-                schema = Schema(**schema_raw)
-            except Exception as exc:
-                # Was a bare `pass`. Losing the schema here disables EVERY
-                # check this node performs, and invoke() then returned an empty
-                # error list -- indistinguishable from a genuine clean pass, so
-                # the loop routed straight on to the auditor. Silence was the
-                # worst possible response to it.
-                logger.error(
-                    "[DeterministicChecker] Could not reconstruct the shard Schema "
-                    "from context (%s: %s). Every canonicalization, column-resolution "
-                    "and vacuous-bound check will be SKIPPED for this round.",
-                    type(exc).__name__,
-                    exc,
-                )
-        elif schema_raw is not None:
+        ctx_data = ctx.initial_context
+        if isinstance(ctx_data, Stage3ShardContext):
+            self._schema = ctx_data.schema
+        else:
+            # Not being able to check is not the same as a clean pass. This
+            # guard was previously a Type-3 Schema-reconstruction ladder that
+            # existed only to survive the JSON round-trip (now eliminated).
+            self._schema = None
             logger.error(
-                "[DeterministicChecker] Context 'schema' has unexpected type %s; "
-                "expected Schema or dict. All checks will be SKIPPED this round.",
-                type(schema_raw).__name__,
+                "[DeterministicChecker] initial_context is %s, not "
+                "Stage3ShardContext. Every canonicalization, column-resolution "
+                "and vacuous-bound check will be SKIPPED for this round.",
+                type(ctx_data).__name__,
             )
-        self._schema = schema
 
         return "deterministic canonicalize() pass over the generator's latest output"
 

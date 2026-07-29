@@ -9,9 +9,16 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Callable, Literal, Optional, Tuple
+from typing import Any, Callable, Generic, Literal, Optional, Tuple, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+# Type variable for the initial context payload passed through LoopContext.
+# Stages 1 and 2 pass a plain str; Stage 3 passes a Stage3ShardContext.
+# The default (str) means all existing code that uses LoopContext without
+# a type parameter continues to see initial_context: str.
+InputT = TypeVar("InputT", default=str)
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +92,7 @@ class LoopAgent(ABC):
         ...
 
     @abstractmethod
-    def build_context(self, ctx: "LoopContext") -> str:
+    def build_context(self, ctx: "LoopContext[Any]") -> str:
         """Construct the full query string for this invocation.
 
         Reads ctx.node_outputs, ctx.history, ctx.det_errors, ctx.ema_issues.
@@ -255,8 +262,8 @@ class LoopConfig(BaseModel):
 
 
 @dataclass
-class LoopContext:
-    initial_context: str
+class LoopContext(Generic[InputT]):
+    initial_context: InputT
     current_node: str
     iteration: int
     node_outputs: dict[str, LoopOutputModel]
@@ -358,8 +365,8 @@ class LoopResult(BaseModel):
 
 
 @dataclass
-class _LoopState:
-    initial_context: str
+class _LoopState(Generic[InputT]):
+    initial_context: InputT
     node_outputs: dict[str, LoopOutputModel] = field(default_factory=dict)
     node_prev: dict[str, LoopOutputModel] = field(default_factory=dict)
     output_trace: list[NodeOutputRecord] = field(default_factory=list)
