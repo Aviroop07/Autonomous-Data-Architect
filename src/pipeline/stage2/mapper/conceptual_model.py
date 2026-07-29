@@ -114,4 +114,95 @@ class ConceptualModel(LoopOutputModel):  # participates in the self-correction l
                         f"Relationship '{r.name}' references unknown entity '{p.entity}'."
                     )
 
+        errors.extend(self._cardinality_errors())
+
+        return errors
+
+    def _cardinality_errors(self) -> list[str]:
+        """Enforce the cardinality contract the mapper silently depends on.
+
+        Until now the invariant lived only in two prompts (er_extractor and
+        er_auditor both ask for it) and in a comment on `Participant`. Nothing
+        checked it, yet `relational_mapper.py`'s 1:N branch decides FK DIRECTION
+        from `cardinality_max` alone -- so a violation does not fail, it produces
+        a structurally valid schema with a reversed foreign key, which no
+        downstream validator can detect because a reversed edge is still a
+        legal edge.
+
+        Two distinct violations, both observed or reachable:
+
+        * OUT-OF-DOMAIN values. `cardinality_max` is structural -- 1 for the
+          "one" side, null for the "many" side -- but a population count can
+          leak in instead (a saved run carried `min=50, max=5000`, meaning "each
+          warehouse handles 50-5000 orders"). That is the LOOK-HERE reading of
+          participation, whereas the mapper implements LOOK-ACROSS, so its
+          presence is evidence the sides may also be inverted. The pair is
+          symmetric under inversion and therefore undetectable on its own; an
+          out-of-domain value is the one syntactic tell there is.
+
+        * WRONG SHAPE for the declared `kind`. A 1:N with both participants at
+          null is the live hazard: the mapper's `p1.cardinality_max != 1` test
+          then makes p1 the child, so the foreign key lands wherever participant
+          ORDER happens to put it. Zero of 464 saved binary relationships hit
+          this, so it is a guard against an unhit path rather than a fix for a
+          current failure -- but the cost of being wrong is a silently reversed
+          key, which is the most damaging schema error there is.
+        """
+        errors: list[str] = []
+
+        for r in self.relationships:
+            for p in r.participants:
+                if p.cardinality_max not in (1, None):
+                    errors.append(
+                        f"Relationship '{r.name}' participant '{p.entity}' has "
+                        f"cardinality_max={p.cardinality_max}. This field is "
+                        "STRUCTURAL, not a population estimate: use 1 on the side of "
+                        "which at most one instance is associated with each instance "
+                        "of the other participant, and null on the side whose "
+                        "instances repeat. Expected counts belong in the facts, not "
+                        "here."
+                    )
+                if p.cardinality_min not in (0, 1, None):
+                    errors.append(
+                        f"Relationship '{r.name}' participant '{p.entity}' has "
+                        f"cardinality_min={p.cardinality_min}. Use 0 for optional "
+                        "participation or 1 for mandatory participation -- it records "
+                        "WHETHER an instance must participate, not how many times."
+                    )
+
+            if r.degree != "binary" or len(r.participants) != 2:
+                continue
+
+            maxes = [p.cardinality_max for p in r.participants]
+            names = [p.entity for p in r.participants]
+            if r.kind == "1:N" and maxes.count(1) != 1:
+                if maxes.count(1) == 2:
+                    detail = (
+                        "both sides are 1, which describes a 1:1 relationship. Set the "
+                        "repeating side to null, or change kind to '1:1'"
+                    )
+                else:
+                    detail = (
+                        "neither side is 1, so there is no 'one' side to point at and "
+                        "the foreign key would land on whichever participant happens "
+                        "to be listed first. Set cardinality_max=1 on the parent, or "
+                        "change kind to 'M:N'"
+                    )
+                errors.append(
+                    f"Relationship '{r.name}' is declared 1:N between "
+                    f"'{names[0]}' and '{names[1]}' but {detail}."
+                )
+            elif r.kind == "1:1" and maxes != [1, 1]:
+                errors.append(
+                    f"Relationship '{r.name}' is declared 1:1 but its participants "
+                    f"carry cardinality_max {maxes}. Both sides of a 1:1 must be 1."
+                )
+            elif r.kind == "M:N" and 1 in maxes:
+                errors.append(
+                    f"Relationship '{r.name}' is declared M:N but participant "
+                    f"'{names[maxes.index(1)]}' carries cardinality_max=1. Both sides "
+                    "of an M:N repeat, so both must be null; if one side really is "
+                    "single-valued, the relationship is 1:N."
+                )
+
         return errors
