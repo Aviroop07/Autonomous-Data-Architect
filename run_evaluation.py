@@ -229,7 +229,10 @@ def _schema_metrics(
 ) -> Dict[str, Any]:
     """Compute schema-level metrics for one case."""
     from src.evaluation.schema_level.capacity_eval import evaluate_capacity
-    from src.evaluation.schema_level.kdc_eval import evaluate_kdc_from_conceptual
+    from src.evaluation.schema_level.kdc_eval import (
+        evaluate_internal_fd_consistency,
+        evaluate_kdc,
+    )
     from src.evaluation.schema_level.structural_eval import evaluate_structural
     from src.util.schema_model.data_types import DataType
     from src.util.schema_model.schema import Schema, Table, Column, ForeignKey
@@ -284,10 +287,18 @@ def _schema_metrics(
         out["uncovered_fact_ids"] = capacity.uncovered_fact_ids
         out["unsupported_elements"] = capacity.unsupported_elements
 
-        # Normalisation, checked against the dependencies the pipeline itself
-        # derived -- so this needs no ground truth, only internal consistency.
-        if conceptual is not None:
-            kdc = evaluate_kdc_from_conceptual(pred_schema, conceptual)
+        # Normalisation. Ground-truth dependencies give the real METRIC; the
+        # pipeline's own dependencies give only a diagnostic, because scoring it
+        # against its own assertions is circular. as_dict() reports them under
+        # different keys so the two can never be confused.
+        gt_fds = gt_raw.get("functional_dependencies")
+        if gt_fds:
+            kdc = evaluate_kdc(pred_schema, gt_fds, source="ground_truth")
+        elif conceptual is not None:
+            kdc = evaluate_internal_fd_consistency(pred_schema, conceptual)
+        else:
+            kdc = None
+        if kdc is not None:
             out.update(kdc.as_dict())
             out["kdc_violations"] = (
                 kdc.unenforced + kdc.partial_2nf + kdc.transitive_3nf
@@ -348,6 +359,9 @@ def compute_aggregate_metrics(case_results: List[Dict[str, Any]]) -> Dict[str, A
             "ic_recall": _aggregate(schema_scores, "ic_recall"),
             "ic_precision": _aggregate(schema_scores, "ic_precision"),
             "kdc": _aggregate(schema_scores, "kdc"),
+            "internal_fd_consistency": _aggregate(
+                schema_scores, "internal_fd_consistency"
+            ),
             "kdc_n_checked": _aggregate(schema_scores, "kdc_n_checked"),
         },
         "data": {
@@ -379,8 +393,17 @@ def _print_aggregate(agg: Dict[str, Any], label: str = "ScribbleDB") -> None:
     print(f"      FK topology F1: {s['fk_topology_f1']:.3f}")
     print(f"      table recall  : {s['table_structural_recall']:.3f}")
     print(f"      column types  : {s['column_type_agreement']:.3f}")
-    print(f"    KDC             : {s.get('kdc', float('nan')):.3f}", end="")
-    print(f"   (dependencies checked: {s.get('kdc_n_checked', 0):.1f} avg)")
+    kdc_val = s.get("kdc")
+    if kdc_val == kdc_val and kdc_val is not None:
+        print(f"    KDC             : {kdc_val:.3f}", end="")
+    else:
+        # No ground-truth dependencies, so only the circular diagnostic exists.
+        print(
+            f"    KDC             : n/a  (no GT dependencies; internal "
+            f"consistency {s.get('internal_fd_consistency', float('nan')):.3f})",
+            end="",
+        )
+    print(f"   [deps checked: {s.get('kdc_n_checked', 0):.1f} avg]")
     print("  Data")
     print(f"    MRE             : {d['mre']:.3f}")
     print(f"    NLL             : {d['nll']:.3f}")

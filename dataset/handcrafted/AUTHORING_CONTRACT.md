@@ -123,6 +123,32 @@ Hard rules:
 - Model a many-to-many association as an explicit junction table with a
   composite PK, since that is what the relational output looks like.
 
+### Functional dependencies (optional, but they unlock a metric)
+
+```json
+"functional_dependencies": [
+  { "determinant": ["ENROLMENT.student_id", "ENROLMENT.course_id"],
+    "dependent":   ["ENROLMENT.grade"] },
+  { "determinant": ["COURSE.course_code"], "dependent": ["COURSE.title"] }
+]
+```
+
+Sits at the top level of the case, beside `ground_truth_schema`. Qualified
+`TABLE.column` on both sides, naming tables in your own ground-truth schema.
+
+Author these wherever the prose states or clearly implies one -- "each course
+code has exactly one title", "the grade depends on the student and the course
+together". They are what make the Key and Dependency Correctness metric a real
+measurement: it checks whether the pipeline laid out keys so the dependencies the
+DOMAIN has are actually enforced. Without them the evaluator can only compare the
+pipeline against dependencies it derived itself, which is circular and is reported
+as a diagnostic rather than a score.
+
+Do not invent dependencies the text does not support, and do not simply restate
+"the primary key determines everything else" -- that is true of every table and
+measures nothing. The valuable ones are the dependencies that reveal whether a
+table should have been decomposed.
+
 ---
 
 ## 3. `ground_truth_distributions`

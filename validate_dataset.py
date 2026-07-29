@@ -603,6 +603,7 @@ def validate(cases: Iterable[Dict[str, Any]]) -> Findings:
                 f.error(where, f"'{field}' must be a non-empty string")
 
         tables = _check_schema(where, case.get("ground_truth_schema"), f)
+        _check_fds(where, case.get("functional_dependencies"), tables, f)
         if tables:
             _check_distributions(
                 where, case.get("ground_truth_distributions"), tables, f
@@ -613,6 +614,41 @@ def validate(cases: Iterable[Dict[str, Any]]) -> Findings:
         if n > 1:
             f.error("dataset", f"id {cid} appears {n} times")
     return f
+
+
+def _check_fds(
+    where: str, fds: Any, tables: Dict[str, Dict[str, str]], f: Findings
+) -> None:
+    """Ground-truth functional dependencies, if the case carries any.
+
+    Optional, but when present they turn the KDC normalisation check from a
+    circular self-comparison into a real measurement, so a malformed one is worth
+    an error rather than a shrug.
+    """
+    if fds is None or not tables:
+        return
+    if not isinstance(fds, list):
+        f.error(where, "functional_dependencies is not a list")
+        return
+    for i, fd in enumerate(fds):
+        label = f"functional_dependencies[{i}]"
+        if not isinstance(fd, dict):
+            f.error(where, f"{label} is not an object")
+            continue
+        for side in ("determinant", "dependent"):
+            refs = fd.get(side)
+            if not isinstance(refs, list) or not refs:
+                f.error(where, f"{label}.{side} must be a non-empty list")
+                continue
+            for ref in refs:
+                if not isinstance(ref, str) or ref.count(".") != 1:
+                    f.error(where, f"{label}.{side} {ref!r} is not 'TABLE.column'")
+                    continue
+                tbl, col = ref.split(".", 1)
+                if tbl not in tables:
+                    f.error(where, f"{label}.{side} names unknown table '{tbl}'")
+                elif col not in tables[tbl]:
+                    f.error(where, f"{label}.{side} names unknown column '{ref}'")
 
 
 def coverage(cases: List[Dict[str, Any]]) -> str:

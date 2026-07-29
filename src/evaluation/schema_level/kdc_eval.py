@@ -1,37 +1,48 @@
-"""Key and Dependency Correctness: is the schema actually normalised?
+"""Key and Dependency Correctness, and an internal-consistency diagnostic.
 
-This is the check a database reviewer weights above everything else, because a
-partial dependency does not announce itself at review time -- it shows up much
-later as an update anomaly in production, where one logical edit has to touch
-many rows and eventually touches only some of them.
+TWO MODES, and they are NOT interchangeable. The difference is where the
+functional dependencies come from, and it decides whether the number is a
+quality metric or merely a diagnostic.
 
-It needs functional dependencies, and the useful realisation is that the pipeline
-already derives them: Stage 2's conceptual model carries
-`functional_dependencies`, and they now survive the merge. So this asks a
-self-consistency question that requires NO ground-truth schema --
+`source="ground_truth"` -- METRIC.
+    Dependencies authored from the specification, independent of the pipeline.
+    This measures normalisation quality against a standard: are the keys laid
+    out so the dependencies the domain actually has are enforced? This is the
+    check a database reviewer weights above all others, because a partial
+    dependency does not announce itself at review time -- it surfaces later as
+    an update anomaly, where one logical edit must touch many rows and
+    eventually touches only some of them.
 
-    the extractor asserted these dependencies from the text; did the mapper then
-    lay out keys such that they actually hold?
+`source="pipeline"` -- DIAGNOSTIC ONLY, NOT A METRIC.
+    Dependencies the pipeline derived itself, in Stage 2's conceptual model.
+    Scoring the pipeline against its own assertions is CIRCULAR: the extractor
+    can reach a perfect score by asserting no dependencies at all, or by
+    asserting only ones the mapper already satisfies. Nothing here constrains
+    it toward the truth. What it does detect honestly is DISAGREEMENT between
+    the extractor and the mapper -- the extractor asserted a dependency and the
+    mapper laid out keys that cannot enforce it -- which is a real bug class and
+    worth surfacing. It is reported under `internal_fd_consistency`, never
+    under `kdc`, so a circular number can never be mistaken for a measured one.
 
--- which is the same property that makes IC-Recall usable on any spec someone
-writes rather than only on authored benchmark cases.
+Ground-truth dependencies do not yet exist in cases.jsonl, so today only the
+diagnostic runs. Adding them is a contract change, noted in
+docs/design/EVALUATION_METRICS.md.
 
-Four violations, kept separate because they are not equally serious:
+Violations, kept separate because they are not equally serious:
 
-  `unenforced`   the determinant is not a superkey, so the database cannot
-                 enforce the dependency at all. The most serious: the schema
-                 permits states the specification forbids.
-  `partial_2nf`  a non-key attribute depends on part of a composite key. The
-                 classic update-anomaly generator.
+  `unenforced`     the determinant is not a superkey, so the database cannot
+                   enforce the dependency at all -- the schema permits states
+                   the specification forbids. The most serious.
+  `partial_2nf`    a non-key attribute depends on part of a composite key. The
+                   classic update-anomaly generator.
   `transitive_3nf` a non-key attribute depends on another non-key attribute.
-                 Redundancy that drifts out of agreement with itself.
-  `cross_table`  the dependency spans two tables, so no single table's key
-                 structure can enforce it. Often legitimate after
-                 decomposition, so it is reported and NOT counted as a defect.
+                   Redundancy that drifts out of agreement with itself.
+  `cross_table`    the dependency spans two tables, so no single table's keys
+                   can enforce it. Usually a legitimate consequence of
+                   decomposition, so it is REPORTED and NOT counted a defect.
 
-A schema with no dependencies to check scores 1.0 vacuously, which is honest --
-there is nothing to get wrong -- but `n_checked` is reported so a vacuous 1.0 is
-never mistaken for a demonstrated one.
+`n_checked` is always reported, so a vacuous 1.0 on a schema with nothing to
+check is never mistaken for an earned one.
 """
 
 from __future__ import annotations
@@ -46,7 +57,11 @@ Violation = Tuple[str, str]  # (kind, human-readable detail)
 
 @dataclass
 class KDCResult:
+    """`source` records where the dependencies came from -- see the module
+    docstring. It decides which key the score is reported under."""
+
     kdc: float
+    source: str = "pipeline"
     unenforced: List[str] = field(default_factory=list)
     partial_2nf: List[str] = field(default_factory=list)
     transitive_3nf: List[str] = field(default_factory=list)
@@ -61,8 +76,10 @@ class KDCResult:
         return len(self.unenforced) + len(self.partial_2nf) + len(self.transitive_3nf)
 
     def as_dict(self) -> Dict[str, float]:
+        # A circular score must never be published under the metric's name.
+        key = "kdc" if self.source == "ground_truth" else "internal_fd_consistency"
         return {
-            "kdc": self.kdc,
+            key: self.kdc,
             "kdc_unenforced": float(len(self.unenforced)),
             "kdc_partial_2nf": float(len(self.partial_2nf)),
             "kdc_transitive_3nf": float(len(self.transitive_3nf)),
@@ -99,7 +116,9 @@ def _table_index(schema: Schema) -> Tuple[Dict[str, Set[str]], Dict[str, Set[str
     return cols, pks
 
 
-def evaluate_kdc(schema: Schema, fds: Iterable[object]) -> KDCResult:
+def evaluate_kdc(
+    schema: Schema, fds: Iterable[object], source: str = "pipeline"
+) -> KDCResult:
     """Check each functional dependency against the schema's key structure.
 
     `fds` are the conceptual model's dependencies, whose determinants and
@@ -174,6 +193,7 @@ def evaluate_kdc(schema: Schema, fds: Iterable[object]) -> KDCResult:
 
     result = KDCResult(
         kdc=0.0,
+        source=source,
         unenforced=sorted(unenforced),
         partial_2nf=sorted(partial),
         transitive_3nf=sorted(transitive),
@@ -185,7 +205,13 @@ def evaluate_kdc(schema: Schema, fds: Iterable[object]) -> KDCResult:
     return result
 
 
-def evaluate_kdc_from_conceptual(schema: Schema, conceptual: object) -> KDCResult:
-    """Convenience wrapper: pull the dependencies off a ConceptualModel."""
+def evaluate_internal_fd_consistency(
+    schema: Schema, conceptual: object
+) -> KDCResult:
+    """DIAGNOSTIC: does the mapper's key layout honour the extractor's own FDs?
+
+    Explicitly named for what it is. This is not KDC -- see the module docstring
+    on why scoring the pipeline against its own assertions is circular.
+    """
     fds: Sequence[object] = getattr(conceptual, "functional_dependencies", None) or []
-    return evaluate_kdc(schema, fds)
+    return evaluate_kdc(schema, fds, source="pipeline")
