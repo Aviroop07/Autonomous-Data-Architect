@@ -83,7 +83,7 @@ async def get_response(
         query = query.encode("utf-8", errors="ignore").decode("utf-8")
 
     agent_name = getattr(agent, "name", agent.__class__.__name__)
-    logger.info(f"[invoke] 🚀 Calling agent '{agent_name}'")
+    logger.info(f"[invoke] Calling agent '{agent_name}'")
     logger.debug(f"[invoke] Query preview (first 300 chars):\n{query[:300]}...")
 
     input_messages = [HumanMessage(content=query)]
@@ -115,7 +115,7 @@ async def get_response(
 
     # Extract token usage from AI messages' metadata
     total_tokens = _extract_token_usage(response.get("messages", []))
-    logger.info(f"[invoke] ✅ Response received from '{agent_name}'. Tokens used: {total_tokens}")
+    logger.info(f"[invoke] Response received from '{agent_name}'. Tokens used: {total_tokens}")
     logger.debug(f"[invoke] Parsed structure: {type(parsed).__name__}")
 
     collector = get_active_trace_collector()

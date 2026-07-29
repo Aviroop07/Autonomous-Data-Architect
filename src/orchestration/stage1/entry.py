@@ -87,7 +87,7 @@ async def _orchestrate_impl(
     )
     if not isinstance(raw_extraction, RephrasedOutput):
         logger.warning(
-            f"[Stage 1] 🚨 Loop exhausted after {result.iteration_count} iterations "
+            f"[Stage 1] Loop exhausted after {result.iteration_count} iterations "
             f"with no accepted extractor output."
         )
 
