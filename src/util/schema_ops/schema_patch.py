@@ -712,13 +712,23 @@ class CritiqueReport(LoopOutputModel):
                 if reason_key != "reason":
                     patch["reason"] = patch.pop(reason_key)
                 if not patch.get("reason"):
-                    # The prompt makes `reason` mandatory and explicitly forbids
-                    # one that "purely restates the action" -- which is exactly
-                    # what this fallback is. It exists so a missing reason cannot
-                    # fail the whole certification, but it must not be silent:
-                    # measured across three live runs, two of them omitted the
-                    # reason on EVERY patch and the substitution made that
-                    # indistinguishable from a model that had justified its work.
+                    # `reason` is a REQUIRED field -- no default on BasePatch --
+                    # and the prompt separately calls it mandatory and forbids one
+                    # that "purely restates the action", which is exactly what
+                    # this placeholder is. The requirement is nonetheless never
+                    # enforced, because this runs in a mode="before" validator and
+                    # fills the field in before pydantic can reject its absence.
+                    #
+                    # That is deliberate and worth keeping: dropping the patch
+                    # instead would discard a CORRECT schema fix to punish a
+                    # missing sentence, and measured behaviour is that the model
+                    # omits the reason while still getting the patch right (a run
+                    # emitted UPSERT_UNIQUE citing fact 89 accurately, with no
+                    # reason attached). So the fallback stays and the omission is
+                    # logged instead -- across five live runs the reason was
+                    # missing on nearly every patch, and before this warning
+                    # existed that was indistinguishable from a model that had
+                    # justified its work.
                     logger.warning(
                         "[SchemaPatch] no reason given for a %s patch; substituting a "
                         "placeholder. The prompt requires a real justification, so "
