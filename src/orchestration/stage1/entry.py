@@ -180,8 +180,25 @@ async def _orchestrate_impl(
     else:
         from src.pipeline.stage1.middleware.budget_chunker import BudgetChunker
 
-        logger.info("[Stage 1] Chunking facts to fit the model's context budget...")
-        plan = BudgetChunker(model=model).fit(tagged_facts)
+        # An explicit budget is an ABLATION knob, not tuning: the live-queried
+        # budget exceeds the fact volume of even the most complex measured
+        # specification by ~317x, so a faithful run always takes the
+        # single-chunk path and Stage 2's shard-and-merge is never entered.
+        # AblationConfig.forced_multi_chunk() exists to reach it.
+        budget_override = (
+            ablation_config.chunk_budget_tokens if ablation_config is not None else None
+        )
+        if budget_override is not None:
+            logger.info(
+                "[Stage 1] Chunking facts to an OVERRIDDEN budget of %d token(s) "
+                "-- this is an ablation setting, not the model's real budget.",
+                budget_override,
+            )
+        else:
+            logger.info("[Stage 1] Chunking facts to fit the model's context budget...")
+        plan = BudgetChunker(budget_tokens=budget_override, model=model).fit(
+            tagged_facts
+        )
     logger.info(f"[Stage 1] Chunker produced {len(plan.chunks)} chunk(s).")
 
     output = Output(
