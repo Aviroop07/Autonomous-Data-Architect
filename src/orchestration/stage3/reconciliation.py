@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, FrozenSet, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Protocol, Tuple, TypeVar
 
 from src.pipeline.stage1.models.rephrased_nl import AtomicFact
 from src.util.schema_model.schema import Schema
@@ -38,6 +38,7 @@ from src.orchestration.stage3.context import (
 from src.util.schema_model.render import schema_to_prompt_text
 from src.orchestration.stage3.extraction import _rerun_shard
 from src.orchestration.stage3.state import _ShardState, _merge_all
+from src.pipeline.stage3.models.cross_shard import UnifiedExtractionOutput
 from src.pipeline.stage3.bridge.from_cross_shard import bridge_constraints
 from src.util.constraint_model.conflicts.evaluate import evaluate_constraints
 from src.util.constraint_model.conflicts.models import Conflict
@@ -148,6 +149,126 @@ def _conflict_ref_for(c: Conflict) -> str:
         facts = "-".join(str(f) for f in sorted(c.involved_fact_references))
         return f"{c.kind}::{facts}"
     return f"{c.kind}::{c.summary}"
+
+
+class _HasFactRefs(Protocol):
+    """The only thing the merge needs of a constraint: which facts it cites.
+
+    All seven constraint families carry `fact_references` but share no base
+    class, so this is what keeps the merge one generic function instead of seven
+    near-identical ones.
+    """
+
+    fact_references: List[int]
+
+
+_Constraint = TypeVar("_Constraint", bound=_HasFactRefs)
+
+
+def _merge_category(
+    prior_items: List[_Constraint],
+    rerun_items: List[_Constraint],
+    fixed_fact_ids: set[int],
+) -> Tuple[List[_Constraint], int]:
+    """Merge one constraint family, returning the result and how many were
+    carried forward. Generic over the family so each call keeps its concrete
+    element type -- the seven families share no base class."""
+
+    def key(item: _Constraint) -> Tuple[int, ...]:
+        return tuple(sorted(item.fact_references))
+
+    rerun_keys = {key(it) for it in rerun_items}
+    kept = list(rerun_items)
+    preserved = 0
+    for it in prior_items:
+        refs = key(it)
+        if refs in rerun_keys:
+            continue  # the re-run restated this rule; its version wins
+        if set(refs) & fixed_fact_ids:
+            continue  # in scope: dropping it was an authorised decision
+        kept.append(it)
+        preserved += 1
+    return kept, preserved
+
+
+def _merge_rerun_output(
+    prior: UnifiedExtractionOutput,
+    rerun: UnifiedExtractionOutput,
+    fixed_fact_ids: set[int],
+    shard_idx: int,
+) -> UnifiedExtractionOutput:
+    """Keep what the re-run was never asked to reconsider.
+
+    A misextraction fix is scoped to specific FACTS -- the reconciler names them
+    one by one ("fact 32: ...") -- but the repair mechanism re-runs the whole
+    shard, and the result used to REPLACE the shard's entire output. Since
+    extraction is not deterministic, a re-run routinely fails to reproduce
+    constraints it got right the first time, and those vanished with no record:
+    not a conflict, not dismissed, not unsupported. Silent.
+
+    Measured on the first live Stage 3 run to complete (2026-07-29): the shard
+    extracted a well-formed fanout constraint on ORDER -> ORDER_ITEM from fact
+    32, three unrelated misextraction fixes triggered one re-run, and the final
+    output contained ZERO structural constraints. Nothing had objected to it.
+
+    So the rule is scope: the re-run's version wins for any constraint touching a
+    fact it was asked to fix, and for anything it independently re-emitted. A
+    prior constraint that cites NONE of the fixed facts and that the re-run did
+    not produce is carried forward, because nothing ever authorised dropping it.
+
+    Identity is (sorted fact_references) within a category. Two constraints in
+    one category over exactly the same facts are the same rule restated, which is
+    precisely the case where the re-run's version should supersede.
+    """
+    counts: List[int] = []
+
+    distributions, n = _merge_category(
+        prior.distributions, rerun.distributions, fixed_fact_ids
+    )
+    counts.append(n)
+    moment_targets, n = _merge_category(
+        prior.moment_targets, rerun.moment_targets, fixed_fact_ids
+    )
+    counts.append(n)
+    correlations, n = _merge_category(
+        prior.correlations, rerun.correlations, fixed_fact_ids
+    )
+    counts.append(n)
+    structural, n = _merge_category(
+        prior.structural_constraints, rerun.structural_constraints, fixed_fact_ids
+    )
+    counts.append(n)
+    logic, n = _merge_category(
+        prior.logic_constraints, rerun.logic_constraints, fixed_fact_ids
+    )
+    counts.append(n)
+    derived, n = _merge_category(
+        prior.derived_columns, rerun.derived_columns, fixed_fact_ids
+    )
+    counts.append(n)
+    state_sequences, n = _merge_category(
+        prior.state_sequences, rerun.state_sequences, fixed_fact_ids
+    )
+    counts.append(n)
+
+    preserved_total = sum(counts)
+
+    if preserved_total:
+        logger.info(
+            "[Stage 3] shard %d rerun: preserved %d constraint(s) the re-run did "
+            "not re-emit and was not asked to reconsider.",
+            shard_idx,
+            preserved_total,
+        )
+    return UnifiedExtractionOutput(
+        distributions=distributions,
+        moment_targets=moment_targets,
+        correlations=correlations,
+        structural_constraints=structural,
+        logic_constraints=logic,
+        derived_columns=derived,
+        state_sequences=state_sequences,
+    )
 
 
 async def _reconcile_and_apply(
@@ -379,7 +500,12 @@ async def _reconcile_and_apply(
                 )
                 continue
             output, tokens = result
-            shard_states[shard_idx].output = output
+            shard_states[shard_idx].output = _merge_rerun_output(
+                prior=shard_states[shard_idx].output,
+                rerun=output,
+                fixed_fact_ids={f.fact_id for f in fixes_by_shard[shard_idx]},
+                shard_idx=shard_idx,
+            )
             shard_states[shard_idx].tokens += tokens
             total_tokens += tokens
         logger.info(

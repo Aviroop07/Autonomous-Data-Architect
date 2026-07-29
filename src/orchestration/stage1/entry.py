@@ -35,7 +35,54 @@ from src.util.orchestration.loop import AgentLoop
 
 logger = logging.getLogger(__name__)
 
-NL_MAX_CHARS = 4000
+# Fallback ceiling, used only when the model's real context window cannot be
+# resolved (offline, no key, unknown model). Grounded in the largest thing this
+# project actually feeds Stage 1 -- the benchmark's longest specification is
+# 12,197 characters -- with room to spare, so it rejects a pasted book and
+# nothing legitimate.
+NL_MAX_CHARS_FALLBACK = 50_000
+
+# Share of the context window the NL itself may occupy. The rest carries the
+# system prompt, the tool schema, and the structured output, all of which are
+# larger than the input for this stage.
+_NL_WINDOW_SHARE = 0.25
+
+# Rough English chars-per-token. Only used to turn a token budget into a
+# character budget for a guard-rail check, so precision does not matter.
+_CHARS_PER_TOKEN = 4
+
+
+def _max_nl_chars(model: Optional[str]) -> int:
+    """Resolve the NL length ceiling from the model's real context window.
+
+    This was a bare `NL_MAX_CHARS = 4000` with no comment, and it was wrong by
+    roughly two orders of magnitude against the actual constraint: a 12,197-char
+    specification is about 3,000 tokens, against a live-queried window of some
+    623,000. The consequence was not a slow run but an outright `ValueError` --
+    54 of the benchmark's 150 cases exceeded it, INCLUDING ALL 14 of the cases
+    above `max_tables_per_shard=18`, which exist specifically to exercise the
+    cross-shard path. The dataset built to stress the pipeline could not be fed
+    to it.
+
+    Same failure shape as the chunker's token budget: a limit chosen far from the
+    quantity it was meant to bound, so it silently governed the wrong thing.
+    Deriving it keeps the two in step as models change.
+    """
+    try:
+        from src.util.core.agent import _detect_provider
+        from src.util.core.context_window import get_context_window
+
+        provider, api_key, _base_url, default_model = _detect_provider()
+        window = get_context_window(provider, model or default_model, api_key=api_key)
+    except Exception as exc:  # network, missing key, unknown model
+        logger.warning(
+            "[Stage 1] could not resolve the context window (%s); falling back to "
+            "a %d-character NL ceiling.",
+            exc,
+            NL_MAX_CHARS_FALLBACK,
+        )
+        return NL_MAX_CHARS_FALLBACK
+    return max(NL_MAX_CHARS_FALLBACK, int(window * _NL_WINDOW_SHARE * _CHARS_PER_TOKEN))
 
 
 async def orchestrate(
@@ -45,10 +92,12 @@ async def orchestrate(
     ablation_config: Optional[AblationConfig] = None,
     trace_collector: Optional[LLMTraceCollector] = None,
 ) -> Tuple[Output, int]:
-    if len(nl_description) > NL_MAX_CHARS:
+    limit = _max_nl_chars(model)
+    if len(nl_description) > limit:
         raise ValueError(
             f"NL description is {len(nl_description)} characters "
-            f"(limit: {NL_MAX_CHARS}). Trim the input before running."
+            f"(limit: {limit}, derived from the model's context window). "
+            "Trim the input before running."
         )
     trace_token = (
         activate_trace_collector(trace_collector)
