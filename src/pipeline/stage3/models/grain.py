@@ -27,6 +27,7 @@ import logging
 from dataclasses import dataclass
 from typing import Dict, FrozenSet, Optional, Tuple, Union
 
+from src.util.schema_model.data_types import DataType
 from src.util.schema_model.schema import Schema, Table, ForeignKey
 from src.util.constraint_model.relation.nodes import (
     Aggregate,
@@ -90,6 +91,25 @@ class _SchemaView:
         for c in t.columns:
             if c.name == column:
                 return c.is_nullable
+        return False
+
+    def is_column_integral(self, table: str, column: str) -> bool:
+        """True iff the column's declared type admits only whole numbers.
+
+        `DataType` is a closed enum and INTEGER is its only integral numeric
+        member, so this is an exact test rather than a name-matching heuristic.
+        Callers use it to step a strict inequality by a whole unit: for an
+        integer column `x > 5` means a lower bound of 6, whereas nudging by an
+        epsilon yields 5.000000001, which is not a value the column can hold.
+        An unknown table or column answers False, i.e. treat as continuous,
+        which keeps the looser (never the wrongly-tight) bound.
+        """
+        t = self.tables.get(table)
+        if t is None:
+            return False
+        for c in t.columns:
+            if c.name == column:
+                return c.data_type is DataType.INTEGER
         return False
 
     def get_fk(self, child_table: str, fk_column: str) -> Optional[ForeignKey]:

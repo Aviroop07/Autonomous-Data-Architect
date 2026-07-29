@@ -414,6 +414,43 @@ def _distribution_to_rich(
     return variables, constraints
 
 
+_FLIPPED_OP = {">=": "<=", ">": "<", "<=": ">=", "<": ">", "=": "=", "==": "=="}
+
+
+def _column_relative_bound(
+    condition: RComparison,
+) -> Tuple[Optional[float], str]:
+    """Normalize a comparison to column-relative form and return (literal, op).
+
+    Both `spread >= 5` and `5 <= spread` state the same lower bound, but only
+    the first spelling was ever recognised -- the second had its bound silently
+    dropped. Reading the literal from whichever side holds it, and flipping the
+    operator when that side is the left, makes the two spellings equivalent.
+
+    Returns (None, op) when neither side is a numeric literal, so the caller can
+    report that rather than silently producing no bound. Booleans are excluded
+    deliberately: `bool` is a subclass of `int` in Python, and a boolean is a
+    category rather than a magnitude, so treating True as 1.0 would invent an
+    ordering the column does not have.
+    """
+
+    def numeric(node: object) -> Optional[float]:
+        if not isinstance(node, RLiteral):
+            return None
+        val = node.value
+        if isinstance(val, bool) or not isinstance(val, (int, float)):
+            return None
+        return float(val)
+
+    right = numeric(condition.right)
+    if right is not None:
+        return right, condition.op
+    left = numeric(condition.left)
+    if left is not None:
+        return left, _FLIPPED_OP.get(condition.op, condition.op)
+    return None, condition.op
+
+
 def _range_constraint_to_rich(
     c: cross_shard.Constraint,
     grain: Grain,
@@ -447,15 +484,35 @@ def _range_constraint_to_rich(
 
     lower_bound = None
     upper_bound = None
-    if isinstance(c.condition, RComparison) and isinstance(c.condition.right, RLiteral):
-        val = c.condition.right.value
-        if isinstance(val, (int, float)):
-            val = float(val)
-            if c.condition.op in (">=", ">"):
-                lower_bound = val if c.condition.op == ">=" else val + 1e-9
-            elif c.condition.op in ("<=", "<"):
-                upper_bound = val if c.condition.op == "<=" else val - 1e-9
-            elif c.condition.op in ("=", "=="):
+    if isinstance(c.condition, RComparison):
+        # Accept the literal on EITHER side. Only column-on-the-left used to be
+        # handled, so `5 <= spread` -- which states a lower bound of 5 just as
+        # plainly as `spread >= 5` -- had its whole interval silently discarded
+        # and the stated bound reached Stage 4 as an unbounded free parameter,
+        # with no log line. Flipping the operator when the literal is on the
+        # left normalizes both spellings to column-relative form.
+        literal, op = _column_relative_bound(c.condition)
+        if literal is None:
+            logger.info(
+                "[ConstraintGraph] Constraint on %s (facts %s) is a comparison "
+                "with no numeric literal on either side, so it yields no bound "
+                "metadata. It remains in the constraint set.",
+                col,
+                list(c.fact_references),
+            )
+        else:
+            val = float(literal)
+            # A strict inequality on an integral quantity steps a WHOLE unit:
+            # for an INTEGER column `x > 5` means 6. Nudging by an epsilon gave
+            # 5.000000001, which the column cannot even hold, so no downstream
+            # integer solver could use it. Continuous columns keep the epsilon.
+            integral = view.is_column_integral(grain.table, col)
+            step = 1.0 if integral else 1e-9
+            if op in (">=", ">"):
+                lower_bound = val if op == ">=" else val + step
+            elif op in ("<=", "<"):
+                upper_bound = val if op == "<=" else val - step
+            elif op in ("=", "=="):
                 lower_bound = val
                 upper_bound = val
 

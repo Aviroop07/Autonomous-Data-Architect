@@ -1385,16 +1385,10 @@ class TestKnownBugs:
         (var,) = variables
         assert (var.lower_bound, var.upper_bound) == expected
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "KNOWN BUG 3 (constraint_graph.py:455-457), integer-column half: "
-            "CREDIT_PRODUCT.maturity is INTEGER, so `maturity > 5` means 6. "
-            "_range_constraint_to_rich never consults the column's declared "
-            "type, so it cannot tell an integer column from a float one and "
-            "emits 5.000000001 for both."
-        ),
-    )
+    # FIXED: _range_constraint_to_rich now consults the column's declared type
+    # via _SchemaView.is_column_integral, so a strict inequality on an INTEGER
+    # column steps a whole unit (6) instead of emitting 5.000000001, which the
+    # column cannot hold and no integer solver could use.
     def test_strict_inequality_on_an_integer_column_steps_a_whole_unit(
         self, fintech_schema
     ):
@@ -1406,16 +1400,9 @@ class TestKnownBugs:
             _flat(PRODUCT, "column_range", "maturity"): (6.0, None)
         }
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "NEW BUG A (constraint_graph.py:450-460): the bound extraction "
-            "only handles column-on-the-left. `5 <= spread` states a lower "
-            "bound of 5, but because condition.right is an RColumnRef the "
-            "whole interval is silently discarded -- a stated bound reaches "
-            "Stage 4 as an unbounded free parameter, with no log line."
-        ),
-    )
+    # FIXED: _column_relative_bound reads the literal from whichever side holds
+    # it and flips the operator when that side is the left, so `5 <= spread` and
+    # `spread >= 5` now state the same bound instead of the former being dropped.
     def test_a_literal_on_the_left_still_yields_the_bound(self, fintech_schema):
         report, _ = analyze_cross_shard_constraints(
             logic=[
