@@ -11,6 +11,7 @@ from src.util.schema_model.data_types import DataType
 # though the rules themselves now live in src/util/naming.py.
 from src.util.naming import is_lower_snake, is_upper_snake
 
+
 class TableRenameSink(Protocol):
     """The only thing this module needs from a fact registry.
 
@@ -24,6 +25,7 @@ class TableRenameSink(Protocol):
     """
 
     def rename_table(self, old_name: str, new_name: str) -> None: ...
+
 
 FORBIDDEN_TABLE_SUFFIXES = {"FACT", "DIM", "ID", "ATTR", "TABLE"}
 
@@ -380,6 +382,45 @@ class ForeignKey(BaseModel):
                 data["referencing_column"] = data.pop("referenced_column")
         return data
 
+    def _resolve_referred_pk_column(self, target_table: "Table") -> Optional["Column"]:
+        """Which primary-key column of the referred table does THIS column target?
+
+        `ForeignKey` carries no `referred_column` -- it points at the referred
+        table's key as a whole -- so with a COMPOSITE key the answer has to be
+        recovered. It used to read `target_table.pk`, which is the lossy
+        convenience returning `primary_key[0]`, so every column of a composite FK
+        was type-checked against the FIRST key column.
+
+        That FABRICATED failures rather than finding them. Measured on two
+        benchmark cases: a weak-entity chain gives INVERTER the composite key
+        (inverter_id INTEGER, name VARCHAR); the dependent REPORT.name was
+        compared against inverter_id, reported as a type mismatch, and the
+        mapper's repair loop exhausted itself trying to fix a schema that was
+        correct -- crashing Stage 2 outright on a legitimate specification.
+
+        Resolution is by NAME, which is the convention the mapper itself uses when
+        it synthesizes one FK column per key column (optionally role-prefixed):
+        exact match first, then suffix, to allow `owner_site_id` -> `site_id`.
+
+        When the key is composite and no column can be matched, this returns None
+        and the caller performs NO type check. Declining to verify is correct
+        here; inventing a comparison against an arbitrary key column is what
+        caused the crash.
+        """
+        pk_cols = [
+            c for c in target_table.columns if c.name in target_table.primary_key
+        ]
+        if not pk_cols:
+            return None
+        if len(pk_cols) == 1:
+            return pk_cols[0]
+        exact = next((c for c in pk_cols if c.name == self.referencing_column), None)
+        if exact is not None:
+            return exact
+        return next(
+            (c for c in pk_cols if self.referencing_column.endswith(c.name)), None
+        )
+
     def _validate(self, tables_map) -> List[str]:
         errors = []
         if self.referencing_table not in tables_map:
@@ -408,9 +449,7 @@ class ForeignKey(BaseModel):
                     (c for c in ref_table.columns if c.name == self.referencing_column),
                     None,
                 )
-                target_pk_col = next(
-                    (c for c in target_table.columns if c.name == target_table.pk), None
-                )
+                target_pk_col = self._resolve_referred_pk_column(target_table)
 
                 if ref_col and target_pk_col:
                     if (
@@ -421,7 +460,7 @@ class ForeignKey(BaseModel):
                         errors.append(
                             f"Type mismatch in Foreign Key: {self.referencing_table}.{self.referencing_column} "
                             f"(type: {ref_col.data_type}) must match referred table {self.referred_table} PK "
-                            f"'{target_table.pk}' (type: {target_pk_col.data_type})."
+                            f"'{target_pk_col.name}' (type: {target_pk_col.data_type})."
                         )
 
         # [HARDENING] Discourage bridge-table targets unless necessary
