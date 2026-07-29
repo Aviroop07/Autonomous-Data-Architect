@@ -5,10 +5,12 @@ Metrics (per column, averaged over all GT columns with schema-recall penalty):
   MRE  -- mean relative error of MLE-estimated distribution parameters
   NLL  -- normalised negative log-likelihood (exp scale so higher = worse)
   KS   -- Kolmogorov-Smirnov statistic against the fitted GT distribution
-  FA   -- fraction of agreement (1 - KS), convenience complement
 
 Missing-column penalty: columns in GT that are absent in the generated data
-receive worst-case scores (MRE=1.0, NLL=0, KS=1.0, FA=0.0).
+receive worst-case scores (MRE=1.0, NLL=0, KS=1.0).
+
+FA was removed: it was defined as 1 - KS, so it carried no information KS did
+not already carry, and reporting both invited reading one number as two.
 """
 
 from __future__ import annotations
@@ -135,7 +137,7 @@ def _parse_gt_dist(spec: Dict[str, Any]) -> Optional[Tuple[str, Dict[str, float]
     distributions.py computes with. The two had drifted apart, and because
     every failure here becomes a worst-case score rather than an error, the
     drift was invisible: this function returned None for EVERY entry in
-    cases.jsonl, so evaluate_column reported mre=1.0/ks=1.0/fa=0.0 even on data
+    cases.jsonl, so evaluate_column reported mre=1.0/ks=1.0 even on data
     drawn exactly from the ground-truth distribution. Two causes, both fixed
     here -- the family lived under "distribution", not "family", and uniform's
     min/max and categorical's weights were never translated to the low/high and
@@ -204,7 +206,7 @@ def _parse_gt_dist(spec: Dict[str, Any]) -> Optional[Tuple[str, Dict[str, float]
     except Exception as exc:
         logger.warning(
             "[data_eval] unparseable ground-truth distribution spec %r: %s: %s "
-            "-- this column will score worst-case (mre=1.0, ks=1.0, fa=0.0).",
+            "-- this column will score worst-case (mre=1.0, ks=1.0).",
             spec,
             type(exc).__name__,
             exc,
@@ -231,24 +233,24 @@ def evaluate_column(
 
     Returns
     -------
-    dict with keys: mre, nll, ks, fa
-    Worst-case values on any failure: mre=1.0, nll=0.0, ks=1.0, fa=0.0
+    dict with keys: mre, nll, ks
+    Worst-case values on any failure: mre=1.0, nll=0.0, ks=1.0
     """
     parsed = _parse_gt_dist(gt_spec)
     if parsed is None:
-        return {"mre": 1.0, "nll": 0.0, "ks": 1.0, "fa": 0.0}
+        return {"mre": 1.0, "nll": 0.0, "ks": 1.0}
 
     family, gt_params = parsed
     arr = np.asarray(data, dtype=float).ravel()
     arr = arr[np.isfinite(arr)]
 
     if len(arr) < 2:
-        return {"mre": 1.0, "nll": 0.0, "ks": 1.0, "fa": 0.0}
+        return {"mre": 1.0, "nll": 0.0, "ks": 1.0}
 
     try:
         pred_params = estimate_params(arr, family)
     except Exception:
-        return {"mre": 1.0, "nll": 0.0, "ks": 1.0, "fa": 0.0}
+        return {"mre": 1.0, "nll": 0.0, "ks": 1.0}
 
     mre = _mre(pred_params, gt_params)
     nll = _nll(arr, family, gt_params)
@@ -258,7 +260,6 @@ def evaluate_column(
         "mre": min(mre, 1.0),
         "nll": max(nll, 0.0),
         "ks": min(ks, 1.0),
-        "fa": max(1.0 - ks, 0.0),
     }
 
 
@@ -266,7 +267,7 @@ def evaluate_column(
 # Case-level evaluator (across all GT columns)
 # ---------------------------------------------------------------------------
 
-WORST_CASE = {"mre": 1.0, "nll": 0.0, "ks": 1.0, "fa": 0.0}
+WORST_CASE = {"mre": 1.0, "nll": 0.0, "ks": 1.0}
 
 
 def evaluate_data(
@@ -285,7 +286,7 @@ def evaluate_data(
     -------
     dict with:
       column_scores  -- per-column breakdown
-      mre, nll, ks, fa  -- macro averages (with missing-column penalty)
+      mre, nll, ks  -- macro averages (with missing-column penalty)
       n_evaluated    -- number of GT columns found in data
       n_missing      -- number of GT columns absent in generated data
     """

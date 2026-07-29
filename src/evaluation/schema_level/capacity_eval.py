@@ -50,10 +50,16 @@ class CapacityResult:
         return 2 * p * r / (p + r) if (p + r) > 0 else 0.0
 
     def as_dict(self) -> Dict[str, float]:
+        # n_required_facts travels WITH the score, for the same reason KDC
+        # reports n_checked: with no facts to check, recall is vacuously 1.0, and
+        # a vacuous 1.0 must never be mistakable for an earned one. The harness
+        # can pass facts=None whenever Stage 1's output is missing.
         return {
             "ic_f1": self.ic_f1,
             "ic_recall": self.ic_recall,
             "ic_precision": self.ic_precision,
+            "ic_n_required_facts": float(self.n_required_facts),
+            "ic_n_elements": float(self.n_elements),
         }
 
 

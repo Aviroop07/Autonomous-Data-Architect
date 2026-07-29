@@ -342,25 +342,51 @@ def test_no_metric_module_contains_a_similarity_threshold() -> None:
     import pathlib
     import re
 
-    banned = re.compile(r"(THRESHOLD|_FLOOR)", re.IGNORECASE)
+    # Two checks, because the first alone was weaker than it looked: it catches a
+    # constant NAMED like a threshold, but an inline `if score >= 0.5` would sail
+    # straight past it. The AST pass closes that.
+    banned_name = re.compile(r"(THRESHOLD|_FLOOR)", re.IGNORECASE)
+    # 0, 1 and 2 are structural (empty checks, arity, harmonic means), not cutoffs.
+    allowed_constants = {0, 1, 2, 0.0, 1.0, 2.0}
+
     root = pathlib.Path(__file__).resolve().parents[2] / "evaluation"
     offenders: List[str] = []
 
     for path in sorted(root.rglob("*.py")):
         source = path.read_text(encoding="utf-8")
         tree = ast.parse(source)
-        # Every line occupied by a string literal -- docstrings included.
+        lines = source.splitlines()
+
+        # Every line occupied by a string literal -- docstrings included --
+        # because DISCUSSING the old cutoff is what these modules should do.
         string_lines: set[int] = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 end = node.end_lineno or node.lineno
                 string_lines.update(range(node.lineno, end + 1))
-        for lineno, line in enumerate(source.splitlines(), start=1):
+
+        for lineno, line in enumerate(lines, start=1):
             if lineno in string_lines:
                 continue
-            code = line.split("#", 1)[0]
-            if banned.search(code):
+            if banned_name.search(line.split("#", 1)[0]):
                 offenders.append(f"{path.name}:{lineno}: {line.strip()}")
 
-    detail = "\n".join(offenders)
-    assert not offenders, f"a threshold crept back into the metrics:\n{detail}"
+        # A numeric comparison against a non-structural constant IS a threshold,
+        # whatever it is called.
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Compare):
+                continue
+            for operand in node.comparators:
+                if (
+                    isinstance(operand, ast.Constant)
+                    and isinstance(operand.value, (int, float))
+                    and not isinstance(operand.value, bool)
+                    and operand.value not in allowed_constants
+                ):
+                    offenders.append(
+                        f"{path.name}:{node.lineno}: compares against "
+                        f"{operand.value!r} -- {lines[node.lineno - 1].strip()}"
+                    )
+
+    detail = chr(10).join(offenders)
+    assert not offenders, f"a threshold crept back into the metrics: {detail}"

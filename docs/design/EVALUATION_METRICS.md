@@ -141,6 +141,14 @@ separately, because they are not equally bad:
 These need Stage 4. They are the strongest claims the system makes, and they are
 entirely name-free because they run against generated rows.
 
+**Implementation status.** NEITHER is implemented. MRE, NLL and KS exist in
+`data_level/` today and are what the harness reports; CSR does not exist at all,
+and DF below describes an intended design, not code. In particular the
+total-variation distance for discrete and nominal families is a DECISION, not a
+built thing -- discrete families currently use a discrete KS (the supremum of
+|F_emp - F_gt| over the observed support), and nominal categoricals still cannot
+be scored, because `distributions.py` coerces category keys with `float()`.
+
 ### 5. Constraint Satisfaction Rate (CSR)
 
 Fraction of the specification's constraints that actually hold in the generated
@@ -152,12 +160,16 @@ cross-column invariant should not look the same as one that does the reverse.
 
 Per column, how close the generated values are to the stated distribution:
 Kolmogorov-Smirnov distance for continuous families, total variation distance for
-discrete and nominal ones. KS over a nominal variable is not meaningful and is
-not used for one.
+discrete and nominal ones. KS over a nominal variable is not meaningful, which is
+why TVD is the intended treatment -- but see the status note above: TVD is not
+built, and the 132 nominal categoricals in the benchmark remain unscorable at the
+data level until it is.
 
 Columns are paired through the schema alignment, never by name.
 
-`FA` is dropped: it was `1 - KS` and carried no information KS did not.
+`FA` has been removed from the code as well as from this list: it was defined
+as `1 - KS`, so it carried no information KS did not, and reporting both
+invited reading one number as two.
 
 ---
 

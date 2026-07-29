@@ -267,7 +267,8 @@ def test_evaluate_column_near_perfect_fit_has_low_ks():
         data, {"family": "normal", "params": {"mean": 50.0, "std": 5.0}}
     )
     assert result["ks"] < 0.1
-    assert result["fa"] > 0.9
+    # FA is gone: it was defined as 1 - KS, so it restated the line above.
+    assert "fa" not in result
 
 
 def test_evaluate_column_bad_fit_has_high_ks():
