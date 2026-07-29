@@ -235,29 +235,25 @@ def test_ic_precision_reflects_the_invented_table(scores: Dict[str, float]) -> N
     assert scores["ic_precision"] == pytest.approx(16 / 19)
 
 
-def test_structural_recall_is_fooled_by_a_same_shaped_invented_table(
+def test_provenance_stops_a_hallucination_absorbing_a_lost_table(
     scores: Dict[str, float],
 ) -> None:
-    """A KNOWN LIMITATION, pinned here so it cannot regress silently.
+    """This used to report a perfect 1.0 for a schema that LOST a table.
 
-    SUPPLIER is missing and PROMO_BANNER is invented, but both are two-column
-    tables with a single-column key, no foreign keys, and -- once VARCHAR and
-    TEXT coarsen to the same family -- identical type multisets. They are
-    structurally indistinguishable, so the optimal assignment pairs them and
-    structural recall reports a perfect 1.0 for a schema that lost a table.
+    SUPPLIER is missing and PROMO_BANNER is invented, and the two are
+    structurally indistinguishable -- both two columns, single-column key, no
+    foreign keys, identical type multisets once VARCHAR and TEXT coarsen
+    together. So the assignment happily paired them and recall read 1.0.
 
-    This is the same ambiguity that pairs MEDICAL_PROCEDURE with MEDICATION on
-    real data: structure alone cannot separate unrelated tables of like shape.
-
-    It is also the argument for reporting several metrics instead of one --
-    information capacity catches exactly what this misses, on the same case:
-    IC-Recall 0.9 flags the lost fact, IC-Precision flags the invention. Neither
-    metric is sufficient alone.
+    PROMO_BANNER cites no facts, so it is now ineligible as a partner: a table
+    claiming no basis in the specification cannot stand in for a real one. Three
+    of four ground-truth tables are recovered and SUPPLIER is correctly left
+    unaligned, giving 0.75.
     """
-    assert scores["table_structural_recall"] == pytest.approx(1.0)
-    # ... while capacity is not fooled:
-    assert scores["ic_recall"] < 1.0
-    assert scores["ic_precision"] < 1.0
+    assert scores["table_structural_recall"] == pytest.approx(0.75, abs=1e-3)
+    r = evaluate_structural(prediction(), ground_truth())
+    assert "SUPPLIER" in r.unaligned_gt
+    assert "PROMO_BANNER" in r.unaligned_pred
 
 
 def test_fk_topology_is_credited_for_what_survived(scores: Dict[str, float]) -> None:
@@ -327,3 +323,44 @@ def test_print_the_scorecard(scores: Dict[str, float]) -> None:
         lines.append(f"    {key:28} {scores[key]:.4f}")
     print("\n".join(lines))
     assert scores  # keeps the test meaningful if printing is ever removed
+
+
+def test_no_metric_module_contains_a_similarity_threshold() -> None:
+    """The suite is threshold-free, and this keeps it that way.
+
+    The metric set this replaced hinged on a 0.6 cosine cutoff that could not
+    separate synonyms from unrelated words at any value. Nothing here should
+    reintroduce that shape of decision -- a constant a score flips across.
+
+    The five structural WEIGHTS are exempt: they are chosen parameters, but no
+    decision flips on crossing them, so they cannot silently reclassify anything.
+
+    Docstrings and comments are excluded, since discussing the old threshold is
+    exactly what these modules should be doing.
+    """
+    import ast
+    import pathlib
+    import re
+
+    banned = re.compile(r"(THRESHOLD|_FLOOR)", re.IGNORECASE)
+    root = pathlib.Path(__file__).resolve().parents[2] / "evaluation"
+    offenders: List[str] = []
+
+    for path in sorted(root.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        # Every line occupied by a string literal -- docstrings included.
+        string_lines: set[int] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                end = node.end_lineno or node.lineno
+                string_lines.update(range(node.lineno, end + 1))
+        for lineno, line in enumerate(source.splitlines(), start=1):
+            if lineno in string_lines:
+                continue
+            code = line.split("#", 1)[0]
+            if banned.search(code):
+                offenders.append(f"{path.name}:{lineno}: {line.strip()}")
+
+    detail = "\n".join(offenders)
+    assert not offenders, f"a threshold crept back into the metrics:\n{detail}"

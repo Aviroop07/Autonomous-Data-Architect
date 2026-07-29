@@ -140,11 +140,15 @@ def test_an_invented_table_shows_up_as_unaligned_predicted() -> None:
 
 
 def test_a_missing_table_costs_structural_recall() -> None:
+    """Recall is SOFT, so the surviving table contributes its own similarity
+    rather than a flat 1. Dropping ORDER also strips the foreign key, so even
+    CUSTOMER no longer matches perfectly -- hence a figure below the 0.5 a
+    count-based recall would have given, which is the more honest reading."""
     gt = _customer_order_schema()
     pred = Schema(tables=[gt.tables[0]], relationships=[])
 
     r = evaluate_structural(pred, gt)
-    assert r.table_structural_recall == 0.5
+    assert 0.0 < r.table_structural_recall < 0.5, r.as_dict()
     assert "ORDER" in r.unaligned_gt
 
 

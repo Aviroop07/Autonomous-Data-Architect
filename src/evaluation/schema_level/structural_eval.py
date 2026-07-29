@@ -86,10 +86,20 @@ _W_PK_ARITY = 2.0
 _W_TYPES = 2.0
 _W_N_COLUMNS = 1.0
 
-# A ground-truth table counts as recovered only if its aligned partner is at
-# least this structurally similar. Without a floor, the assignment always pairs
-# everything with something and recall becomes meaningless.
-_ALIGNMENT_FLOOR = 0.5
+# There is deliberately NO similarity threshold anywhere in this module.
+#
+# A floor of 0.5 used to decide whether an aligned pair "counted", which made the
+# score hinge on an arbitrary constant in exactly the way the name-matching metric
+# it replaced hinged on a 0.6 cosine. Two changes remove the need for it: a
+# predicted table with no provenance is excluded from alignment outright (it
+# claims no basis in the specification, so it cannot stand in for anything), and
+# recall is SOFT -- each ground-truth table contributes its own alignment
+# similarity rather than a 1 or a 0. A poor pairing therefore contributes little
+# on its own terms, with no cutoff deciding for it.
+#
+# The five weights above remain free parameters. They are not thresholds -- no
+# decision flips on crossing them -- but they are chosen, and they are the only
+# tuned numbers in the suite.
 
 
 @dataclass(frozen=True)
@@ -211,6 +221,36 @@ def structural_similarity(a: TableSignature, b: TableSignature) -> float:
     return score / total
 
 
+def _unsupported_tables(schema: Schema) -> Set[str]:
+    """Tables claiming no basis in the specification.
+
+    A table whose own provenance is empty AND every one of whose columns has
+    empty provenance traces to nothing the spec said. Such a table must not be
+    allowed to stand in for a real ground-truth table during alignment: doing so
+    lets a hallucination absorb a genuine table's recall, which is exactly how a
+    fabricated case scored a perfect 1.0 for a schema that had LOST a table --
+    SUPPLIER and an invented PROMO_BANNER were structurally indistinguishable.
+
+    This uses provenance to identify hallucinations, NOT as a reference standard,
+    so it introduces no circularity: nothing here scores the pipeline against its
+    own claims, it only declines to credit a table that claims nothing.
+
+    Returns an empty set when NO table in the schema carries provenance at all --
+    a ground-truth schema has none, and excluding everything would be absurd.
+    """
+    any_provenance = False
+    unsupported: Set[str] = set()
+    for table in schema.tables:
+        cited = bool(table.source_fact_ids) or any(
+            c.source_fact_ids for c in table.columns
+        )
+        if cited:
+            any_provenance = True
+        else:
+            unsupported.add(table.name)
+    return unsupported if any_provenance else set()
+
+
 def align_tables(
     pred: Schema,
     gt: Schema,
@@ -229,27 +269,35 @@ def align_tables(
     """
     pred_sigs = _signatures(pred)
     gt_sigs = _signatures(gt)
-    pred_names = sorted(pred_sigs)
+    # Hallucinated tables are not eligible partners -- see _unsupported_tables.
+    ineligible = _unsupported_tables(pred)
+    pred_names = sorted(n for n in pred_sigs if n not in ineligible)
     gt_names = sorted(gt_sigs)
     if not pred_names or not gt_names:
         return {}, []
 
+    # Two matrices on purpose. `cost` may carry the tiebreak nudge because it only
+    # ever decides WHICH pairing wins; `sim` must not, because it is reported and
+    # summed into recall -- letting 1e-6 leak through produced a recall of
+    # 1.000001, and a recall above 1.0 is meaningless.
     sim = np.zeros((len(gt_names), len(pred_names)), dtype=float)
+    cost = np.zeros_like(sim)
     for i, g in enumerate(gt_names):
         for j, p in enumerate(pred_names):
             s = structural_similarity(gt_sigs[g], pred_sigs[p])
-            if name_tiebreak and g.lower() == p.lower():
-                s += 1e-6
             sim[i, j] = s
+            cost[i, j] = s + (
+                1e-6 if (name_tiebreak and g.lower() == p.lower()) else 0.0
+            )
 
-    rows, cols = linear_sum_assignment(-sim)
+    rows, cols = linear_sum_assignment(-cost)
     mapping: Dict[str, str] = {}
     pairs: List[Tuple[str, str, float]] = []
     for i, j in zip(rows, cols):
-        score = float(sim[i, j])
-        pairs.append((gt_names[i], pred_names[j], score))
-        if score >= _ALIGNMENT_FLOOR:
-            mapping[gt_names[i]] = pred_names[j]
+        # Every assigned pair is kept: there is no cutoff. A weak pairing simply
+        # contributes its weak similarity to the soft recall below.
+        pairs.append((gt_names[i], pred_names[j], float(sim[i, j])))
+        mapping[gt_names[i]] = pred_names[j]
     return mapping, sorted(pairs, key=lambda t: t[0])
 
 
@@ -265,7 +313,16 @@ def evaluate_structural(pred: Schema, gt: Schema) -> StructuralResult:
     gt_names = {t.name for t in gt.tables}
     pred_names = {t.name for t in pred.tables}
 
-    table_recall = len(mapping) / len(gt_names) if gt_names else 0.0
+    # SOFT recall: each ground-truth table contributes how well its partner
+    # actually matches, so nothing hinges on a cutoff. A ground-truth table left
+    # without a partner -- because the eligible predicted tables ran out --
+    # contributes zero, which is the honest reading of "not recovered".
+    pair_score = {g: s for g, _p, s in pairs}
+    table_recall = (
+        sum(pair_score.get(g, 0.0) for g in gt_names) / len(gt_names)
+        if gt_names
+        else 0.0
+    )
 
     # FK topology, translated into predicted-schema names through the alignment.
     gt_edges = _fk_edges(gt)

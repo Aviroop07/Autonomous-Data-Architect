@@ -161,6 +161,35 @@ Columns are paired through the schema alignment, never by name.
 
 ---
 
+## No thresholds
+
+Nothing in this suite has a similarity cutoff. That is a design property, not an
+accident, and a unit test enforces it by scanning the metric modules for one.
+
+The set it replaced turned on a 0.6 cosine threshold that could not separate
+synonyms from unrelated words at ANY value, because the two classes overlap. So
+every metric here is built from set arithmetic, key containment, or a similarity
+that is *summed* rather than *compared*:
+
+| metric | why no cutoff is needed |
+|---|---|
+| IC-Recall / IC-Precision | set intersection over fact IDs |
+| FK topology P/R/F1 | set intersection over translated edges |
+| column type agreement | multiset Jaccard, reported as a value |
+| table structural recall | SOFT -- each table contributes its own similarity |
+| KDC | key containment: `X ⊇ K`, `X ⊂ K`, `X ∩ K = ∅` |
+
+Table structural recall used to have a 0.5 floor deciding whether a pairing
+"counted". Two changes removed the need for it: a predicted table with no
+provenance is excluded from alignment outright, and recall became soft. A weak
+pairing now contributes little on its own terms rather than being classified by a
+constant.
+
+The five structural WEIGHTS (3, 3, 2, 2, 1 over out-degree, in-degree, PK arity,
+type multiset, column count) are the only tuned numbers left. They are not
+thresholds -- no decision flips on crossing them -- but they are chosen, and this
+is the honest place to say so.
+
 ## What is deliberately not here
 
 - **No name matching anywhere.** Not as a primary signal, not as a tiebreak.
