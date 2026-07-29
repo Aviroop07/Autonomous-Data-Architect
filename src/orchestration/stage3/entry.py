@@ -312,7 +312,9 @@ async def orchestrate(
     final_report = Stage3AnalysisReport(
         square_variables=old_report.square_variables,
         loose_variable_probes=old_report.loose_variable_probes,
-        overconstrained_blocks=[],
+        overconstrained_blocks=[
+            b for b in old_report.overconstrained_blocks if b.constraints
+        ],
         derived_cycle_conflicts=remaining_cycles,
         dismissed_conflicts=dismissed,
         conflicts=conflicts,

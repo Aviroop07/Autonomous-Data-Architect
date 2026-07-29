@@ -666,11 +666,11 @@ def _convert_cross_shard_constraints(
 
         on_tables = extract_base_tables(c.on)
 
-        if len(on_tables) == 1:
-            # Single-table constraint -> cardinality
+        if isinstance(c.on, Aggregate) and len(on_tables) == 1:
+            # Genuine COUNT aggregate -> cardinality
             vars, cons = _cardinality_to_rich(c, grain_result, disambiguator=i)
         else:
-            # Multi-table / range constraint
+            # Single-table column bound or multi-table -> range
             vars, cons = _range_constraint_to_rich(
                 c, grain_result, view, registry, disambiguator=i
             )

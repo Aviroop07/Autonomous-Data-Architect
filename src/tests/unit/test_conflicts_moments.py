@@ -8,11 +8,20 @@ from typing import Literal, Optional
 from src.util.schema_model.data_types import DataType
 from src.util.schema_model.schema import Column, Schema, Table
 from src.util.constraint_model.condition.cohesive import Distributed, DistributionFamily
-from src.util.constraint_model.condition.expressions import RAggregateRef, RLiteral
+from src.util.constraint_model.condition.expressions import (
+    RColumnRef,
+    RAggregateRef,
+    RLiteral,
+)
 from src.util.constraint_model.condition.predicates import RComparison
 from src.util.constraint_model.conflicts.moments import check_moment_conflicts
 from src.util.constraint_model.constraint import Constraint
-from src.util.constraint_model.relation.nodes import Aggregate, AggregateFn, BaseTable
+from src.util.constraint_model.relation.nodes import (
+    Aggregate,
+    AggregateFn,
+    BaseTable,
+    Filter,
+)
 
 _ComparisonOp = Literal["<", "<=", "=", "!=", ">=", ">"]
 
@@ -241,6 +250,97 @@ class TestThreeOrMoreOverlappingFacts:
         c2 = _moment("AVG", "=", 150, "a1", 2)
         c3 = _moment("AVG", ">", 100, "a2", 3)
         assert check_moment_conflicts([c1, c2, c3], _schema()) == []
+
+
+class TestFilterConditions:
+    def test_different_filters_on_same_base_do_not_conflict(self):
+        """Two AVG facts on the same column but with mutually exclusive filter
+        conditions describe different populations (disjoint row sets) and must
+        NOT be reported as a conflict. Regression: _moment_population_key was
+        dropping filter_conditions, so both produced the same grouping key."""
+        c1 = Constraint(
+            relation=Filter(
+                source=Aggregate(
+                    source=BaseTable(name="ORDER"),
+                    fn="AVG",
+                    column="total",
+                    alias="a1",
+                ),
+                condition=RComparison(
+                    op="=",
+                    left=RColumnRef(name="tier"),
+                    right=RLiteral(value="premium"),
+                ),
+            ),
+            condition=RComparison(
+                op="=", left=RAggregateRef(alias="a1"), right=RLiteral(value=100)
+            ),
+            fact_references=[1],
+        )
+        c2 = Constraint(
+            relation=Filter(
+                source=Aggregate(
+                    source=BaseTable(name="ORDER"),
+                    fn="AVG",
+                    column="total",
+                    alias="a2",
+                ),
+                condition=RComparison(
+                    op="=",
+                    left=RColumnRef(name="tier"),
+                    right=RLiteral(value="standard"),
+                ),
+            ),
+            condition=RComparison(
+                op="=", left=RAggregateRef(alias="a2"), right=RLiteral(value=200)
+            ),
+            fact_references=[2],
+        )
+        assert check_moment_conflicts([c1, c2], _schema()) == []
+
+    def test_same_filter_on_same_base_still_conflicts(self):
+        """Two AVG facts at the SAME filtered population that disagree ARE
+        a conflict -- the fix must not make all filtered facts incomparable."""
+        c1 = Constraint(
+            relation=Filter(
+                source=Aggregate(
+                    source=BaseTable(name="ORDER"),
+                    fn="AVG",
+                    column="total",
+                    alias="a1",
+                ),
+                condition=RComparison(
+                    op="=",
+                    left=RColumnRef(name="tier"),
+                    right=RLiteral(value="premium"),
+                ),
+            ),
+            condition=RComparison(
+                op="=", left=RAggregateRef(alias="a1"), right=RLiteral(value=100)
+            ),
+            fact_references=[1],
+        )
+        c2 = Constraint(
+            relation=Filter(
+                source=Aggregate(
+                    source=BaseTable(name="ORDER"),
+                    fn="AVG",
+                    column="total",
+                    alias="a2",
+                ),
+                condition=RComparison(
+                    op="=",
+                    left=RColumnRef(name="tier"),
+                    right=RLiteral(value="premium"),
+                ),
+            ),
+            condition=RComparison(
+                op="=", left=RAggregateRef(alias="a2"), right=RLiteral(value=200)
+            ),
+            fact_references=[2],
+        )
+        conflicts = check_moment_conflicts([c1, c2], _schema())
+        assert len(conflicts) == 1
 
     def test_three_facts_one_outlier_flagged(self):
         c1 = _dist("GAUSSIAN", {"mean": 150, "std_dev": 20}, 1)

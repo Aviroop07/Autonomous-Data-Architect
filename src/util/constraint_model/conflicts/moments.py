@@ -236,7 +236,7 @@ def _distributed_observations(cond: Distributed) -> List[Tuple[str, str, _Interv
     return obs
 
 
-_PopKey = Tuple[str, frozenset, frozenset, bool, Tuple[str, ...]]
+_PopKey = Tuple[str, frozenset, frozenset, bool, Tuple[str, ...], Tuple[str, ...]]
 _GroupKey = Tuple[_PopKey, str, str]
 
 
@@ -264,7 +264,14 @@ def _moment_population_key(
     pop, errs = compute_population(base_relation, schema)
     if pop is None:
         return None
-    return (pop.table, pop.pk_columns, pop.edges, pop.narrowed, group_by)
+    return (
+        pop.table,
+        pop.pk_columns,
+        pop.edges,
+        pop.narrowed,
+        group_by,
+        tuple(str(p) for p in pop.filter_conditions),
+    )
 
 
 def _fact_refs(*constraints: Constraint) -> List[int]:

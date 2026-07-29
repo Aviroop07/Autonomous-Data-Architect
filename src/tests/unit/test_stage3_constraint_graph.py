@@ -633,6 +633,25 @@ class TestConservation:
             "report does not account for exactly the variables that were built"
         )
 
+    def test_dof_overconstrained_blocks_carry_constraint_names(self, fintech_schema):
+        """DOF-identified overconstrained blocks must carry their constraint
+        names (non-empty constraints list), distinguishing them from the
+        confirmed_conflicts path (which yields blocks with empty constraints).
+        This is the signal entry.py must plumb through to Stage 4."""
+        report, _ = analyze_cross_shard_constraints(
+            distributions=[
+                _dist("spread", "POISSON", {"lam": 5.0}, facts=[40]),
+                _dist("spread", "POISSON", {"lam": 5.0}, facts=[41]),
+            ],
+            schema=fintech_schema,
+        )
+        assert len(report.overconstrained_blocks) >= 1
+        for block in report.overconstrained_blocks:
+            assert block.constraints, (
+                "DOF-based overconstrained blocks must carry constraint names; "
+                "empty constraints indicates a confirmed_conflict entry instead."
+            )
+
     def test_every_reported_variable_traces_back_to_at_least_one_fact(
         self, fintech_schema
     ):
@@ -1310,17 +1329,9 @@ class TestForkResolution:
 
 
 class TestKnownBugs:
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "KNOWN BUG 2 (constraint_graph.py:591-598): _convert_cross_shard_"
-            "constraints routes ANY single-table `structural` constraint to "
-            "_cardinality_to_rich, so a per-row column bound (spread <= 10 on "
-            "CREDIT_PRODUCT) fabricates a table_cardinality::row_count "
-            "variable bounded above by 10. Routing must key off the ON tree "
-            "actually being a COUNT (Aggregate/Fanout), not off table count."
-        ),
-    )
+    # FIXED: _convert_cross_shard_constraints now routes a single-table
+    # structural constraint to _cardinality_to_rich ONLY when the ON tree
+    # is a COUNT Aggregate; otherwise it goes to _range_constraint_to_rich.
     def test_a_single_table_column_bound_is_not_a_row_count(self, fintech_schema):
         report, _ = analyze_cross_shard_constraints(
             structural=[
