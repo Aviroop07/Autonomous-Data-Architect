@@ -148,3 +148,54 @@ class _ListHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         self.sink.append(record)
+
+
+def test_the_emitted_schema_requires_provenance_only_where_it_is_owed() -> None:
+    """The lever that had never been pulled.
+
+    The prompt asked for provenance in prose while `source_fact_ids` carried
+    `default_factory=list`, so the JSON schema shown to the model advertised it
+    as OPTIONAL in all 13 patch types. Under json_mode the schema is the stronger
+    signal, so a model omitting an optional field is obeying it -- which is why
+    two rounds of prompt wording changed nothing measurable.
+
+    Element-CREATING patches now declare it required. Removals and renames must
+    NOT, or the model gets trained to invent citations for changes that create
+    nothing to attribute.
+    """
+    schema = CritiqueReport.model_json_schema()
+    creating = {"AddTablePatch", "AddColumnPatch", "AddRelationshipPatch"}
+
+    checked = 0
+    for name, defn in schema["$defs"].items():
+        if "Patch" not in name or "properties" not in defn:
+            continue
+        checked += 1
+        required = set(defn.get("required", []))
+        if name in creating:
+            assert "source_fact_ids" in required, (
+                f"{name} creates a schema element, so the model must be told "
+                "its provenance is required"
+            )
+        else:
+            assert "source_fact_ids" not in required, (
+                f"{name} creates nothing to attribute; requiring a citation "
+                "would train the model to invent one"
+            )
+    assert checked >= 13, f"expected all patch types to be checked, saw {checked}"
+
+
+def test_requiring_it_in_the_schema_does_not_make_parsing_reject_it() -> None:
+    """The two levers are deliberately separate. Requiring the field in Python
+    would drop the patch, and measured behaviour is that the model omits the
+    metadata while getting the patch itself right -- so losing the fix to punish
+    the omission is the wrong trade. Parsing stays permissive; the warning is
+    what keeps compliance measurable."""
+    with _capture() as records:
+        r = _report(
+            [{"action": "ADD_TABLE", "reason": "r", "table_definition": _TABLE_DEF}]
+        )
+
+    assert len(r.patches) == 1, "the patch must survive, not be dropped"
+    assert r.patches[0].source_fact_ids == []
+    assert "no source_fact_ids" in " ".join(rec.getMessage() for rec in records)

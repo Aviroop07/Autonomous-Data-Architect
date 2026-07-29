@@ -3,6 +3,7 @@ import re as _re
 from typing import List, Optional, Any, Union, Annotated, Literal, TYPE_CHECKING
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
     TypeAdapter,
     ValidationError,
@@ -21,6 +22,44 @@ logger = logging.getLogger(__name__)
 # metric treats an element no fact supports as a hallucination. A patch that
 # adds structure without citing a fact breaks that chain silently.
 _STRUCTURE_ADDING_TAGS = frozenset({"ADD_TABLE", "ADD_COLUMN", "ADD_RELATIONSHIP"})
+
+
+def _require_provenance_in_emitted_schema(schema: dict[str, Any]) -> None:
+    """Declare `source_fact_ids` REQUIRED to the model, without requiring it in
+    Python.
+
+    The two are separate levers and only one of them was ever pulled. The
+    certifier prompt has asked for provenance in prose, but `source_fact_ids`
+    carries `default_factory=list`, so the emitted JSON schema advertised it as
+    OPTIONAL -- in all 13 patch types. Under `json_mode`, which is the path
+    DeepSeek and Gemini both take, the schema is the stronger signal, so a model
+    that omits an optional field is doing exactly what it was told. That is why
+    two rounds of prompt wording moved nothing measurable: across five live runs
+    provenance was cited on almost no patch.
+
+    Making the field genuinely required in Python was the obvious alternative and
+    is worse: a missing value would then fail validation, the patch would be
+    dropped, and measured behaviour says that would discard mostly-CORRECT schema
+    fixes -- one run emitted an accurate UPSERT_UNIQUE citing fact 89 while
+    omitting other fields entirely. Losing a right answer to punish missing
+    metadata is the wrong trade.
+
+    So the requirement is stated where it changes behaviour (the schema the model
+    sees) and left permissive where it would destroy work (parsing). An omission
+    still logs, so compliance stays measurable either way.
+
+    Applied only to the element-CREATING patches. Removals and renames create
+    nothing to attribute, and demanding a citation for them would train the model
+    to invent one.
+    """
+    required = schema.setdefault("required", [])
+    if "source_fact_ids" not in required:
+        required.append("source_fact_ids")
+
+
+_PROVENANCE_REQUIRED_CONFIG = ConfigDict(
+    json_schema_extra=_require_provenance_in_emitted_schema
+)
 
 
 class ActionTag(str, Enum):
@@ -102,6 +141,8 @@ class ColumnPatch(BasePatch):
 
 
 class AddColumnPatch(ColumnPatch):
+    model_config = _PROVENANCE_REQUIRED_CONFIG
+
     action: Literal[ActionTag.ADD_COLUMN] = ActionTag.ADD_COLUMN
     data_type: str = "VARCHAR"
 
@@ -261,6 +302,8 @@ class RelationshipDefinition(BaseModel):
 
 
 class AddTablePatch(BasePatch):
+    model_config = _PROVENANCE_REQUIRED_CONFIG
+
     action: Literal[ActionTag.ADD_TABLE] = ActionTag.ADD_TABLE
     table_definition: SimplifiedTable
 
@@ -300,6 +343,8 @@ class MergeTablesPatch(BasePatch):
 
 
 class AddRelationshipPatch(BasePatch):
+    model_config = _PROVENANCE_REQUIRED_CONFIG
+
     action: Literal[ActionTag.ADD_RELATIONSHIP] = ActionTag.ADD_RELATIONSHIP
     fk_definition: RelationshipDefinition
 
