@@ -540,15 +540,19 @@ def _cardinality_to_rich(
     lower_bound = None
     upper_bound = None
     pinned = False
-    if isinstance(c.condition, RComparison) and isinstance(c.condition.right, RLiteral):
-        val = c.condition.right.value
-        if isinstance(val, (int, float)):
-            val = float(val)
-            if c.condition.op in (">=", ">"):
-                lower_bound = val if c.condition.op == ">=" else val + 1e-9
-            elif c.condition.op in ("<=", "<"):
-                upper_bound = val if c.condition.op == "<=" else val - 1e-9
-            elif c.condition.op in ("=", "=="):
+    if isinstance(c.condition, RComparison):
+        # Same two fixes as the range path: accept the literal on either side,
+        # and step a strict inequality by a WHOLE unit. A row count needs no
+        # type lookup to know it is integral -- a table cannot hold 5.000000001
+        # rows -- so `row_count > 5` means a lower bound of 6, unconditionally.
+        literal, op = _column_relative_bound(c.condition)
+        if literal is not None:
+            val = float(literal)
+            if op in (">=", ">"):
+                lower_bound = val if op == ">=" else val + 1.0
+            elif op in ("<=", "<"):
+                upper_bound = val if op == "<=" else val - 1.0
+            elif op in ("=", "=="):
                 lower_bound = val
                 upper_bound = val
                 pinned = True

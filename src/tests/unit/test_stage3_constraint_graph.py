@@ -1359,16 +1359,9 @@ class TestKnownBugs:
             _flat(PRODUCT, "column_range", "spread"): (None, 10.0)
         }
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "KNOWN BUG 3 (constraint_graph.py:455 and :491-493): a strict "
-            "inequality becomes val +/- 1e-9. A row count is integral by "
-            "definition, so `row_count > 5` means lower_bound 6, not "
-            "5.000000001 -- and 5.000000001 is not even representable as a "
-            "count, so no downstream integer solver can use it."
-        ),
-    )
+    # FIXED: _cardinality_to_rich now steps a strict inequality by a whole unit.
+    # A row count needs no type lookup to know it is integral -- a table cannot
+    # hold 5.000000001 rows -- so `row_count > 5` means 6, unconditionally.
     @pytest.mark.parametrize(
         "op, value, expected",
         [(">", 5, (6.0, None)), ("<", 10, (None, 9.0))],
