@@ -6,6 +6,7 @@ from src.pipeline.stage1.models.rephrased_nl import AtomicFact
 
 from src.pipeline.stage2.models.corrections import FixHistoryStep
 from src.util.orchestration.loop import AgentLoop
+from src.util.orchestration.rounds import rounds_to_max_iter
 from src.util.orchestration.loop_types import (
     AgentRoleConfig,
     EdgeCondition,
@@ -168,7 +169,7 @@ SHARD_GRAPH_NODE_COUNT = 3
 
 def shard_rounds_to_max_iter(rounds: int) -> int:
     """Convert "N audited rounds" into the raw per-node budget AgentLoop counts."""
-    return max(1, rounds) * SHARD_GRAPH_NODE_COUNT
+    return rounds_to_max_iter(rounds, SHARD_GRAPH_NODE_COUNT)
 
 
 def select_best_shard_model(

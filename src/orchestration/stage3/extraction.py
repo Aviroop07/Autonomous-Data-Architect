@@ -24,6 +24,7 @@ from src.pipeline.stage3.middleware.deterministic_checker import (
 from src.pipeline.stage3.models.cross_shard import UnifiedExtractionOutput
 from src.orchestration.stage3.context import _serialize_context
 from src.util.orchestration.loop import AgentLoop
+from src.util.orchestration.rounds import rounds_to_max_iter as _rounds_to_max_iter
 from src.util.orchestration.loop_types import (
     AgentRoleConfig,
     EdgeCondition,
@@ -54,7 +55,7 @@ GENERATOR_GRAPH_NODE_COUNT = 3
 def rounds_to_max_iter(rounds: int) -> int:
     """Convert "N full audited rounds" into the raw per-node iteration budget
     AgentLoop actually counts. `rounds=1` means one pass and no retry."""
-    return max(1, rounds) * GENERATOR_GRAPH_NODE_COUNT
+    return _rounds_to_max_iter(rounds, GENERATOR_GRAPH_NODE_COUNT)
 
 
 def _build_generator_loop_config(max_iter: int, model: Optional[str]) -> LoopConfig:
