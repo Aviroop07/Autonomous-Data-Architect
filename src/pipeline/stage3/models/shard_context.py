@@ -24,7 +24,13 @@ class Stage3ShardContext(BaseModel):
     read attributes directly.
     """
 
-    schema: Schema
+    # Named shard_schema, not schema: a field called `schema` shadows
+    # BaseModel.schema(), which made every live run emit a UserWarning on import
+    # and made pyright reject the field outright as an incompatible override.
+    # Suppressing either would have left a real footgun -- anyone calling
+    # ctx.schema() expecting pydantic's method would silently get a Schema
+    # object instead -- so the field is renamed rather than the warning silenced.
+    shard_schema: Schema
     fact_ids: List[int]
     facts_map: Dict[int, AtomicFact] = Field(
         default_factory=dict,

@@ -30,7 +30,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Awaitable, Generic, List, Optional, Sequence, TypeVar
+from typing import Any, Awaitable, Generic, List, Optional, Sequence, TypeVar
 
 from src.util.orchestration.loop import AgentLoop
 from src.util.orchestration.loop_types import (
@@ -105,7 +105,7 @@ def _redistribute(
 
 
 async def run_parallel_loops(
-    specs: List[ParallelLoopSpec],
+    specs: Sequence[ParallelLoopSpec[Any]],
 ) -> List[Optional[LoopResult]]:
     """Runs every spec's AgentLoop concurrently. Returns one LoopResult
     per spec (None on failure -- logged, never raised) in the same

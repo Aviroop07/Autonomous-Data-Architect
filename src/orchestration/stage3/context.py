@@ -1,4 +1,4 @@
-"""Rendering schema/facts/constraints into the text an agent actually sees.
+﻿"""Rendering schema/facts/constraints into the text an agent actually sees.
 
 Pure formatting -- no orchestration, no LLM calls. Kept apart from entry.py
 because a change to how a shard is described to the model should not sit in
@@ -71,7 +71,7 @@ def _build_shard_context(
         if fid in facts_map:
             filtered_map[fid] = facts_map[fid]
     return Stage3ShardContext(
-        schema=shard,
+        shard_schema=shard,
         fact_ids=sorted(fact_ids),
         facts_map=filtered_map,
         stub_tables=stub_tables,

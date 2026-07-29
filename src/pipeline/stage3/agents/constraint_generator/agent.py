@@ -1,4 +1,4 @@
-"""Unified constraint-extraction agent for Stage 3.
+﻿"""Unified constraint-extraction agent for Stage 3.
 
 Replaces the 3 separate statistical/structural/logic extractors with one
 Generator node. Deterministic canonicalize() checking has been pulled out
@@ -88,7 +88,7 @@ class ConstraintGeneratorLoopAgent(LoopAgent):
         ctx_data = ctx.initial_context
 
         parts: List[str] = []
-        parts.append(schema_to_prompt_text(ctx_data.schema, ctx_data.stub_tables))
+        parts.append(schema_to_prompt_text(ctx_data.shard_schema, ctx_data.stub_tables))
         parts.append(_facts_to_text(ctx_data.fact_ids, ctx_data.facts_map))
 
         prior_output = ctx.node_outputs.get("generator")

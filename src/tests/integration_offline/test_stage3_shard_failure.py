@@ -227,12 +227,15 @@ def test_a_failed_shard_is_reported_in_the_output_not_only_the_log(
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "KNOWN BUG: `det_errors_exhausted` is set by AgentLoop and, since the fix "
-        "two commits ago, LOGGED by _extract_generator_output -- but consumed "
-        "nowhere. A constraint that never passed canonicalize()/column resolution "
-        "is still merged into Stage3Output and shipped to Stage 4. Fix by having "
-        "Stage 3 drop (or quarantine into the report) the constraints the "
-        "deterministic checker was still rejecting when the budget ran out."
+        "KNOWN BUG, narrower than it first looked. Withholding IS implemented and "
+        "DOES fire in production -- a live subscription_analytics run withheld a "
+        "shard's 10 constraints after 15 iterations with unresolved deterministic "
+        "errors. But it is keyed on `det_errors_exhausted`, and the generator "
+        "config sets error_refresh, so that flag reads bool(state.error_accumulator) "
+        "-- which can be EMPTY on the final pass even though the checker rejected "
+        "constraints on every round, which is exactly this test's scenario. "
+        "Catching it needs the deterministic checker's PER-CONSTRAINT rejections "
+        "driving removal, not the coarse end-of-loop flag."
     ),
 )
 def test_constraints_that_never_passed_the_deterministic_checker_are_not_shipped() -> (

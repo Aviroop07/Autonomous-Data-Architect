@@ -1,4 +1,4 @@
-"""Deterministic canonicalize() checker -- the middle node of Stage 3's
+﻿"""Deterministic canonicalize() checker -- the middle node of Stage 3's
 3-node per-shard loop (generator -> deterministic_checker -> auditor).
 
 Pulled out of the generator's own invoke() (where the 3 old family
@@ -274,7 +274,7 @@ class DeterministicCheckerLoopAgent(LoopAgent):
 
         ctx_data = ctx.initial_context
         if isinstance(ctx_data, Stage3ShardContext):
-            self._schema = ctx_data.schema
+            self._schema = ctx_data.shard_schema
         else:
             # Not being able to check is not the same as a clean pass. This
             # guard was previously a Type-3 Schema-reconstruction ladder that
