@@ -22,16 +22,19 @@ Design doc: docs/design/RELATION_CONDITION_CONSTRAINT_DESIGN.md
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from src.util.constraint_model.relation.nodes import BaseTable, RelationUnion
 from src.util.constraint_model.condition.expressions import RExprUnion
 from src.util.constraint_model.condition.predicates import (
     RPredicateUnion as RPredicate,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +327,48 @@ class DerivedColumnConstraint(BaseModel):
         min_length=1,
         description="All tables whose columns appear in the expression.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_referenced_tables(cls, data: Any) -> Any:
+        """Default a missing `referenced_tables` to just the target table.
+
+        Same reasoning as `_no_duplicates` below, and the same observed cost: on
+        2026-07-23 a live Stage 3 run died with
+        `derived_columns.3.referenced_tables: Field required`, and because that
+        error fails the ENTIRE UnifiedExtractionOutput parse, one omitted field
+        on one derived column threw away every constraint the shard had
+        extracted.
+
+        The value cannot be computed from `expression`, because RColumnRef is
+        deliberately UNQUALIFIED -- it carries a bare column name and is resolved
+        against the enclosing Relation. So the single-table reading is an
+        assumption, not a derivation, and it is the overwhelmingly common shape:
+        a derived column computed from other columns of its own row.
+
+        It is therefore WARNED about rather than applied quietly. If the
+        expression really did span tables, the assumption under-reports and the
+        log line is what makes that findable -- which still beats discarding the
+        whole shard to punish a missing list.
+        """
+        if not isinstance(data, dict):
+            return data
+        target = data.get("target_table")
+        # ABSENT only, never an explicit []. The observed crash was "Field
+        # required" -- an omission. An explicit empty list is a different
+        # statement, "this expression references no tables", which is not
+        # repairable by assumption and stays rejected.
+        if "referenced_tables" not in data and isinstance(target, str) and target:
+            logger.warning(
+                "[DerivedColumnConstraint] '%s.%s' omitted referenced_tables; "
+                "assuming the expression stays within '%s'. If it spans tables, "
+                "this under-reports them.",
+                target,
+                data.get("target_column"),
+                target,
+            )
+            data["referenced_tables"] = [target]
+        return data
 
     @field_validator("fact_references")
     @classmethod

@@ -11,9 +11,9 @@ context explicitly rather than storing it on the node.
 
 from __future__ import annotations
 
-from typing import Annotated, List, Literal, Union
+from typing import Annotated, Any, List, Literal, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field
 
 from src.util.schema_model.data_types import DataType
 
@@ -173,9 +173,34 @@ class RAggregateRef(BaseModel):
         return errors
 
 
+def _coerce_bare_number_to_literal(value: Any) -> Any:
+    """Accept a bare number where an expression node is expected.
+
+    This exists because the surrounding model is internally inconsistent about
+    it and the inconsistency was fatal. `RInSet.values` takes bare scalars
+    (`[1, 2, 3]`), while every RExprUnion position demands a wrapped node
+    (`{"node_type": "literal", "value": 50}`). An extraction agent shown both
+    shapes in one schema reasonably writes `"low": 50` -- and that killed a whole
+    live Stage 3 run on 2026-07-23 with eight
+    `model_attributes_type` errors on `between.low`/`between.high`, losing every
+    constraint in the batch because one operand was unwrapped.
+
+    Numbers and booleans are coerced because they are UNAMBIGUOUS: no column is
+    named `50`. Bare STRINGS are deliberately NOT coerced -- `"credit_score"` is
+    far more likely to mean a column reference than the literal text
+    "credit_score", so silently making it a literal would turn a loud parse
+    failure into a wrong constraint that validates. A rejected string surfaces
+    the mistake; a mis-coerced one hides it.
+    """
+    if isinstance(value, bool) or isinstance(value, (int, float)):
+        return {"node_type": "literal", "value": value}
+    return value
+
+
 RExprUnion = Annotated[
     Union[RLiteral, RColumnRef, RArithmetic, RAggregateRef],
     Field(discriminator="node_type"),
+    BeforeValidator(_coerce_bare_number_to_literal),
 ]
 
 RArithmetic.model_rebuild()
