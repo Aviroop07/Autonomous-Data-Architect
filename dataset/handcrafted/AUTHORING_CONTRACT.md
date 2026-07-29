@@ -177,11 +177,11 @@ Note the key is `"distribution"`, not `"family"`.
 Put distributions only on columns whose spread the text actually says something
 about. 3-6 per case is typical; a large schema may carry more.
 
-Nominal (non-numeric) categorical labels are realistic and allowed. The
-validator warns that such columns cannot yet be scored at the data level -- that
-is a known pipeline gap, not a defect in your case. Use them where they are
-natural, and prefer numeric-coded categoricals (`"1"`, `"2"`, ...) for things
-genuinely measured on a numeric scale, like a 1-5 rating.
+Nominal (non-numeric) categorical labels are realistic, allowed, and fully
+scored: a categorical is compared by total variation distance over its labels,
+which needs no ordering. Use them wherever they are natural. Still prefer
+numeric-coded labels (`"1"`, `"2"`, ...) for something genuinely measured on a
+numeric scale, like a 1-5 rating, because the scale is real information.
 
 ---
 

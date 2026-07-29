@@ -266,7 +266,8 @@ def test_evaluate_column_near_perfect_fit_has_low_ks():
     result = evaluate_column(
         data, {"family": "normal", "params": {"mean": 50.0, "std": 5.0}}
     )
-    assert result["ks"] < 0.1
+    assert result["distance"] < 0.1
+    assert result["distance_kind"] == "ks"
     # FA is gone: it was defined as 1 - KS, so it restated the line above.
     assert "fa" not in result
 
@@ -277,7 +278,7 @@ def test_evaluate_column_bad_fit_has_high_ks():
     result = evaluate_column(
         data, {"family": "normal", "params": {"mean": 1000.0, "std": 1.0}}
     )
-    assert result["ks"] > 0.3
+    assert result["distance"] > 0.3
 
 
 def test_evaluate_column_malformed_spec_returns_worst_case():

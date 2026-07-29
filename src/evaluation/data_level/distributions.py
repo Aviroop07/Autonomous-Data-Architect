@@ -10,6 +10,7 @@ All public functions are stateless and operate on numpy arrays.
 
 from __future__ import annotations
 
+import math
 import warnings
 from typing import Any, Callable, Dict
 
@@ -34,14 +35,82 @@ def canon_label(value: Any) -> str:
 
     An integral numeric label renders without its decimal part ("1", not "1.0");
     any other numeric renders as a plain float; a non-numeric label is returned
-    unchanged, since nominal categories are legitimate even though the
-    data-level metrics cannot yet score them.
+    unchanged, which is what lets nominal categories be scored at all -- see
+    total_variation_distance.
     """
     try:
         f = float(value)
     except TypeError, ValueError:
         return str(value)
     return str(int(f)) if f.is_integer() else str(f)
+
+
+def categorical_pmf(data: Any) -> Dict[str, float]:
+    """Empirical label -> probability, for data of ANY dtype.
+
+    Deliberately does not go through float(). The existing numeric path coerces
+    both the data and the category keys, which works for a 1-5 rating and fails
+    outright for BRONZE/SILVER/GOLD -- and roughly three quarters of the
+    categorical ground truth in the benchmark is nominal like that. Labels are
+    compared as canonical strings instead, so "1" and 1.0 still agree while
+    "BRONZE" survives.
+    """
+    values = np.asarray(data, dtype=object).ravel()
+    counts: Dict[str, int] = {}
+    total = 0
+    for v in values:
+        if v is None:
+            continue
+        # NaN is not a category. Checked without float() so strings are safe.
+        if isinstance(v, float) and math.isnan(v):
+            continue
+        counts[canon_label(v)] = counts.get(canon_label(v), 0) + 1
+        total += 1
+    if total == 0:
+        return {}
+    return {k: c / total for k, c in counts.items()}
+
+
+def total_variation_distance(
+    observed: Dict[str, float], expected: Dict[str, float]
+) -> float:
+    """TVD = (1/2) * sum over the union of labels of |p_obs(k) - p_exp(k)|.
+
+    The right distance for a categorical, and specifically the right one for a
+    NOMINAL categorical, where Kolmogorov-Smirnov is not merely awkward but
+    undefined: KS is a supremum over a cumulative distribution, and a cumulative
+    distribution needs an ordering that nominal labels do not have. Ranking
+    BRONZE below SILVER is an arbitrary choice that changes the statistic.
+
+    TVD needs no ordering, lands in [0, 1], and reads the same direction as KS --
+    0 for a perfect match, 1 for disjoint supports -- so it slots into the same
+    "lower is better" reporting without special-casing.
+
+    A label present in one map and absent from the other contributes its full
+    mass, which is correct: predicting a category that should not exist, or
+    missing one that should, is exactly the error being measured.
+    """
+    labels = set(observed) | set(expected)
+    if not labels:
+        return 1.0
+    total = sum(abs(observed.get(k, 0.0) - expected.get(k, 0.0)) for k in labels)
+    return float(min(max(0.5 * total, 0.0), 1.0))
+
+
+def categorical_log_pmf(data: Any, params: Dict[str, float]) -> np.ndarray:
+    """Log probability of each observation under a label-keyed categorical.
+
+    Label-based twin of log_pdf's categorical branch, which cannot be used for
+    nominal categories because it formats observations with str(float(x)).
+    """
+    probs = {k[2:]: v for k, v in params.items() if k.startswith("p_")}
+    values = np.asarray(data, dtype=object).ravel()
+    out = np.full(values.shape, -np.inf, dtype=float)
+    for i, v in enumerate(values):
+        p = probs.get(canon_label(v), 0.0)
+        if p > 0:
+            out[i] = math.log(p)
+    return out
 
 
 def _clean(data: np.ndarray) -> np.ndarray:

@@ -6,7 +6,7 @@ Runs the full pipeline on every case in a dataset and computes published metrics
                  table recall, column types), KDC (normalisation) --
                  all name-blind.
                  See docs/design/EVALUATION_METRICS.md
-  Data-level   : MRE, NLL, KS
+  Data-level   : MRE, NLL, DISTANCE (KS or TVD)
   Smoke test   : pass rate
 
 Usage examples
@@ -24,7 +24,7 @@ Usage examples
   python run_evaluation.py --dataset handcrafted --output-dir eval_results/
 
 Stage 4 does not exist yet. Its metrics (smoke pass rate, and the data-level
-MRE/NLL/KS that need generated data) are reported as their empty defaults
+MRE/NLL/DISTANCE that need generated data) are reported as their empty defaults
 until it lands; Stages 1-3 are scored normally.
 """
 
@@ -320,7 +320,7 @@ def _data_metrics(
         return {
             "mre": 1.0,
             "nll": 0.0,
-            "ks": 1.0,
+            "distance": 1.0,
             "n_evaluated": 0,
             "n_missing": 0,
         }
@@ -366,7 +366,7 @@ def compute_aggregate_metrics(case_results: List[Dict[str, Any]]) -> Dict[str, A
         "data": {
             "mre": _aggregate(data_scores, "mre"),
             "nll": _aggregate(data_scores, "nll"),
-            "ks": _aggregate(data_scores, "ks"),
+            "distance": _aggregate(data_scores, "distance"),
         },
         "smoke_pass_rate": (
             sum(1 for r in smoke_results if r is True) / len(smoke_results)
@@ -405,7 +405,8 @@ def _print_aggregate(agg: Dict[str, Any], label: str = "ScribbleDB") -> None:
     print("  Data")
     print(f"    MRE             : {d['mre']:.3f}")
     print(f"    NLL             : {d['nll']:.3f}")
-    print(f"    KS              : {d['ks']:.3f}")
+    print(f"    Distance        : {d['distance']:.3f}"
+          "   (KS for continuous, TVD for categorical)")
     print(f"  Smoke pass rate   : {agg['smoke_pass_rate']:.2%}")
     print(f"{'=' * 62}\n")
 
@@ -526,7 +527,7 @@ async def evaluate(args: argparse.Namespace) -> None:
                 result["data_metrics"] = {
                     "mre": 1.0,
                     "nll": 0.0,
-                    "ks": 1.0,
+                    "distance": 1.0,
                             "n_evaluated": 0,
                     "n_missing": 0,
                 }
@@ -537,7 +538,7 @@ async def evaluate(args: argparse.Namespace) -> None:
                 f"  ic_f1={sm.get('ic_f1', 0):.2f}  "
                 f"struct={sm.get('structural_score', 0):.2f}  "
                 f"mre={dm.get('mre', 1):.2f}  "
-                f"ks={dm.get('ks', 1):.2f}  "
+                f"dist={dm.get('distance', 1):.2f}  "
                 f"smoke={'P' if smoke_passed else 'F'}  "
                 f"({elapsed:.1f}s)"
             )

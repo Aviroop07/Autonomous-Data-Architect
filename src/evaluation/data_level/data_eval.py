@@ -4,10 +4,14 @@ Data-level evaluation metrics for ScribbleDB.
 Metrics (per column, averaged over all GT columns with schema-recall penalty):
   MRE  -- mean relative error of MLE-estimated distribution parameters
   NLL  -- normalised negative log-likelihood (exp scale so higher = worse)
-  KS   -- Kolmogorov-Smirnov statistic against the fitted GT distribution
+  DISTANCE -- statistical distance from the stated distribution, reported with
+              the KIND used: Kolmogorov-Smirnov for continuous and ordered
+              discrete families, total variation for categoricals, where a
+              cumulative distribution would need an ordering nominal labels
+              do not have. Both are in [0, 1] and 0 is a perfect match.
 
 Missing-column penalty: columns in GT that are absent in the generated data
-receive worst-case scores (MRE=1.0, NLL=0, KS=1.0).
+receive worst-case scores (MRE=1.0, NLL=0, DISTANCE=1.0).
 
 FA was removed: it was defined as 1 - KS, so it carried no information KS did
 not already carry, and reporting both invited reading one number as two.
@@ -16,6 +20,7 @@ not already carry, and reporting both invited reading one number as two.
 from __future__ import annotations
 
 import logging
+import math
 import warnings
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -25,10 +30,13 @@ from scipy import stats
 
 from src.evaluation.data_level.distributions import (
     canon_label,
+    categorical_log_pmf,
+    categorical_pmf,
     cdf_func,
     estimate_params,
     log_pdf,
     max_density_point,
+    total_variation_distance,
 )
 
 # KS as scipy computes it assumes a CONTINUOUS reference CDF. For a discrete
@@ -137,7 +145,7 @@ def _parse_gt_dist(spec: Dict[str, Any]) -> Optional[Tuple[str, Dict[str, float]
     distributions.py computes with. The two had drifted apart, and because
     every failure here becomes a worst-case score rather than an error, the
     drift was invisible: this function returned None for EVERY entry in
-    cases.jsonl, so evaluate_column reported mre=1.0/ks=1.0 even on data
+    cases.jsonl, so evaluate_column reported mre=1.0/distance=1.0 even on data
     drawn exactly from the ground-truth distribution. Two causes, both fixed
     here -- the family lived under "distribution", not "family", and uniform's
     min/max and categorical's weights were never translated to the low/high and
@@ -206,7 +214,7 @@ def _parse_gt_dist(spec: Dict[str, Any]) -> Optional[Tuple[str, Dict[str, float]
     except Exception as exc:
         logger.warning(
             "[data_eval] unparseable ground-truth distribution spec %r: %s: %s "
-            "-- this column will score worst-case (mre=1.0, ks=1.0).",
+            "-- this column will score worst-case (mre=1.0, distance=1.0).",
             spec,
             type(exc).__name__,
             exc,
@@ -234,23 +242,34 @@ def evaluate_column(
     Returns
     -------
     dict with keys: mre, nll, ks
-    Worst-case values on any failure: mre=1.0, nll=0.0, ks=1.0
+    Worst-case values on any failure: mre=1.0, nll=0.0, distance=1.0
     """
     parsed = _parse_gt_dist(gt_spec)
     if parsed is None:
-        return {"mre": 1.0, "nll": 0.0, "ks": 1.0}
+        return dict(WORST_CASE)
 
     family, gt_params = parsed
+
+    # A categorical is scored by LABEL, never coerced through float(). That
+    # coercion is what made nominal categories -- BRONZE/SILVER/GOLD, LOW/HIGH,
+    # roughly three quarters of the categorical ground truth -- impossible to
+    # score at all, since float("BRONZE") raises and the failure became a
+    # worst-case number. It also routes to total variation distance rather than
+    # KS, because KS is a supremum over a CUMULATIVE distribution and nominal
+    # labels have no ordering to accumulate along.
+    if family == "categorical":
+        return _evaluate_categorical(data, gt_params)
+
     arr = np.asarray(data, dtype=float).ravel()
     arr = arr[np.isfinite(arr)]
 
     if len(arr) < 2:
-        return {"mre": 1.0, "nll": 0.0, "ks": 1.0}
+        return dict(WORST_CASE)
 
     try:
         pred_params = estimate_params(arr, family)
     except Exception:
-        return {"mre": 1.0, "nll": 0.0, "ks": 1.0}
+        return dict(WORST_CASE)
 
     mre = _mre(pred_params, gt_params)
     nll = _nll(arr, family, gt_params)
@@ -259,7 +278,42 @@ def evaluate_column(
     return {
         "mre": min(mre, 1.0),
         "nll": max(nll, 0.0),
-        "ks": min(ks, 1.0),
+        "distance": min(ks, 1.0),
+        "distance_kind": "ks",
+    }
+
+
+def _evaluate_categorical(data: Any, gt_params: Dict[str, float]) -> Dict[str, Any]:
+    """MRE, NLL and TVD for a categorical of any label type."""
+    observed = categorical_pmf(data)
+    if not observed:
+        return dict(WORST_CASE)
+
+    expected = {k[2:]: v for k, v in gt_params.items() if k.startswith("p_")}
+    if not expected:
+        return dict(WORST_CASE)
+
+    # MRE over the probabilities themselves, matched by label. Comparing the
+    # estimated pmf to the stated pmf IS the parameter comparison here -- a
+    # categorical has no parameters other than its category probabilities.
+    pred_params = {f"p_{k}": v for k, v in observed.items()}
+    mre = _mre(pred_params, {f"p_{k}": v for k, v in expected.items()})
+
+    # NLL by label, normalised against the most probable category, mirroring the
+    # continuous case where it is normalised against the mode.
+    log_p = categorical_log_pmf(data, gt_params)
+    finite = log_p[np.isfinite(log_p)]
+    if len(finite) == 0:
+        nll = 0.0
+    else:
+        best = max(expected.values())
+        nll = float(np.exp(float(np.mean(finite)) - math.log(best))) if best > 0 else 0.0
+
+    return {
+        "mre": min(mre, 1.0),
+        "nll": max(nll, 0.0),
+        "distance": total_variation_distance(observed, expected),
+        "distance_kind": "tvd",
     }
 
 
@@ -267,7 +321,12 @@ def evaluate_column(
 # Case-level evaluator (across all GT columns)
 # ---------------------------------------------------------------------------
 
-WORST_CASE = {"mre": 1.0, "nll": 0.0, "ks": 1.0}
+WORST_CASE: Dict[str, Any] = {
+    "mre": 1.0,
+    "nll": 0.0,
+    "distance": 1.0,
+    "distance_kind": "none",
+}
 
 
 def evaluate_data(
@@ -286,7 +345,7 @@ def evaluate_data(
     -------
     dict with:
       column_scores  -- per-column breakdown
-      mre, nll, ks  -- macro averages (with missing-column penalty)
+      mre, nll, distance  -- macro averages (with missing-column penalty)
       n_evaluated    -- number of GT columns found in data
       n_missing      -- number of GT columns absent in generated data
     """
@@ -317,15 +376,16 @@ def evaluate_data(
             "column_scores": {},
             "mre": 1.0,
             "nll": 0.0,
-            "ks": 1.0,
-            "fa": 0.0,
+            "distance": 1.0,
             "n_evaluated": 0,
             "n_missing": 0,
         }
 
     scores_list = list(column_scores.values())
     n_missing = sum(
-        1 for s in scores_list if s["ks"] == 1.0 and s["mre"] == 1.0 and s["nll"] == 0.0
+        1
+        for s in scores_list
+        if s["distance"] == 1.0 and s["mre"] == 1.0 and s["nll"] == 0.0
     )
     n_evaluated = len(scores_list) - n_missing
 
@@ -333,8 +393,13 @@ def evaluate_data(
         "column_scores": column_scores,
         "mre": float(np.mean([s["mre"] for s in scores_list])),
         "nll": float(np.mean([s["nll"] for s in scores_list])),
-        "ks": float(np.mean([s["ks"] for s in scores_list])),
-        "fa": float(np.mean([s["fa"] for s in scores_list])),
+        "distance": float(np.mean([s["distance"] for s in scores_list])),
+        # Which distance each column used, so a mean over mixed kinds is never
+        # reported as if it were homogeneous.
+        "distance_kinds": {
+            kind: sum(1 for s in scores_list if s.get("distance_kind") == kind)
+            for kind in sorted({s.get("distance_kind", "none") for s in scores_list})
+        },
         "n_evaluated": n_evaluated,
         "n_missing": n_missing,
     }

@@ -3,7 +3,7 @@
 These two vocabularies had silently drifted apart. cases.jsonl names the family
 under "distribution"; _parse_gt_dist read spec["family"]. It therefore returned
 None for EVERY entry, and because a parse failure becomes a worst-case score
-rather than an error, evaluate_column reported mre=1.0/ks=1.0/fa=0.0 on data
+rather than an error, evaluate_column reported mre=1.0/distance=1.0 on data
 drawn exactly from the ground-truth distribution. Nothing surfaced it, because
 the data-level metrics cannot run until Stage 4 exists -- so the numbers would
 have looked computed the moment Stage 4 landed, while being floor values.
@@ -27,9 +27,9 @@ from src.evaluation.data_level.data_eval import _parse_gt_dist, evaluate_column
 
 CASES = pathlib.Path("dataset/handcrafted/cases.jsonl")
 
-# Families whose ground-truth parameters name a sampleable numeric distribution.
-# Nominal categorical (string labels) is deliberately excluded -- see
-# test_nominal_categorical_is_a_known_unsupported_shape.
+# Every family in the contract is sampleable and scoreable, nominal
+# categoricals included: they go through total variation distance rather than
+# KS, so no ordering of their labels is required.
 _SAMPLEABLE = {
     "normal",
     "lognormal",
@@ -94,8 +94,9 @@ def _sample(spec: Dict[str, Any], n: int = 8000) -> Optional[np.ndarray]:
         labels = list(weights)
         probs = np.array([float(weights[k]) for k in labels], dtype=float)
         probs /= probs.sum()
-        drawn = rng.choice(labels, size=n, p=probs)
-        return np.array([float(x) for x in drawn])
+        # Labels stay labels. Coercing them with float() is precisely what made
+        # nominal categoricals unscorable, so the sampler must not do it either.
+        return np.asarray(rng.choice(labels, size=n, p=probs), dtype=object)
     return None
 
 
@@ -122,7 +123,7 @@ def test_every_ground_truth_spec_parses(
 
 @pytest.mark.parametrize(
     "case_id,column,spec",
-    [t for t in _gt_dists() if not _is_nominal_categorical(t[2])],
+    _gt_dists(),
     ids=lambda v: str(v) if isinstance(v, int) else None,
 )
 def test_perfect_data_does_not_score_worst_case(
@@ -141,25 +142,37 @@ def test_perfect_data_does_not_score_worst_case(
     assert data is not None
 
     result = evaluate_column(data, spec)
-    assert not (result["ks"] >= 0.99 and result["mre"] >= 0.99), (
+    assert not (result["distance"] >= 0.99 and result["mre"] >= 0.99), (
         f"case {case_id} column {column} ({family}) scores worst-case on data drawn "
         f"from its own ground truth: {result}"
     )
-    assert result["ks"] < 0.5, f"case {case_id} {column}: ks={result['ks']:.3f}"
+    assert result["distance"] < 0.5, (
+        f"case {case_id} {column}: {result['distance_kind']}="
+        f"{result['distance']:.3f}"
+    )
 
 
-def test_nominal_categorical_is_a_known_unsupported_shape() -> None:
-    """Records a real gap rather than hiding it.
+def test_nominal_categoricals_are_scored_by_total_variation() -> None:
+    """Previously impossible, and the largest single gap in the data metrics.
 
-    distributions.py's categorical path does float(k[2:]) on category keys and
-    str(float(xi)) on the data, so it can only score categories that are
-    numbers. Five ground-truth columns are nominal (loyalty tiers, severities,
-    plan names), and those cannot be scored at the data level as things stand --
-    KS over a nominal variable is not meaningful anyway, so this needs a decision
-    about the metric, not a coercion.
+    The categorical path used to coerce both category keys and observations with
+    float(), so a nominal label raised, and because a raise inside
+    evaluate_column becomes a worst-case score the failure was invisible. That
+    affected the clear majority of the benchmark's categoricals.
+
+    They are now scored with total variation distance, which needs no ordering --
+    unlike KS, whose supremum is taken over a cumulative distribution that nominal
+    labels cannot form.
     """
     nominal = [t for t in _gt_dists() if _is_nominal_categorical(t[2])]
-    assert nominal, "expected the known nominal-categorical columns to still exist"
-    # They must at least PARSE, so the gap is confined to scoring.
+    assert len(nominal) > 50, (
+        f"expected the benchmark's many nominal categoricals, found {len(nominal)}"
+    )
+
     for case_id, column, spec in nominal:
         assert _parse_gt_dist(spec) is not None, f"case {case_id} {column}"
+        data = _sample(spec, n=2000)
+        assert data is not None
+        result = evaluate_column(data, spec)
+        assert result["distance_kind"] == "tvd", f"case {case_id} {column}: {result}"
+        assert result["distance"] < 0.5, f"case {case_id} {column}: {result}"

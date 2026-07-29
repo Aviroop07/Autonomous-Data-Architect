@@ -17,8 +17,7 @@ Usage
 
 Exit code is non-zero when any ERROR is found, so this works as a gate.
 Warnings never fail the run: they flag things worth a human look (a nominal
-categorical that cannot be scored at the data level, a table with no foreign
-keys) that are not necessarily wrong.
+categorical, a table with no foreign keys) that are not necessarily wrong.
 """
 
 from __future__ import annotations
@@ -322,9 +321,9 @@ def _check_dist_values(
         if _is_nominal(weights):
             f.warn(
                 where,
-                f"distribution on '{key}' is a NOMINAL categorical. The data-level "
-                "evaluator coerces category keys with float(), so this column cannot "
-                "be scored on MRE/NLL/KS as things stand.",
+                f"distribution on '{key}' is a NOMINAL categorical. Scored with "
+                "total variation distance rather than KS, since nominal labels have "
+                "no ordering to accumulate along. Informational only.",
             )
         return
 
