@@ -23,6 +23,7 @@ categorical, a table with no foreign keys) that are not necessarily wrong.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -445,11 +446,15 @@ def _walk_condition(
             f.error(where, f"{label}: rhs_expr is not an object")
             return
         if expr.get("op") not in ("+", "-", "*", "/"):
-            f.error(where, f"{label}: rhs_expr.op {expr.get('op')!r} is not one of + - * /")
+            f.error(
+                where, f"{label}: rhs_expr.op {expr.get('op')!r} is not one of + - * /"
+            )
         e_tbl = expr.get("table_ref") or tbl
         e_col = expr.get("column")
         if e_tbl not in tables:
-            f.error(where, f"{label}: rhs_expr.table_ref '{e_tbl}' is not in the schema")
+            f.error(
+                where, f"{label}: rhs_expr.table_ref '{e_tbl}' is not in the schema"
+            )
         elif e_col not in tables[e_tbl]:
             f.error(where, f"{label}: rhs_expr column '{e_tbl}.{e_col}' does not exist")
         operands = [k for k in ("value", "rhs_column") if k in expr]
@@ -501,6 +506,7 @@ def _check_join(
                 where,
                 f"{label}: {field_name}.{side} names unknown column '{jt}.{jc}'",
             )
+
 
 def _check_constraints(
     where: str, constraints: Any, tables: Dict[str, Dict[str, str]], f: Findings
@@ -719,12 +725,97 @@ def coverage(cases: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def cross_file_integrity(paths: List[Path]) -> List[str]:
+    """Catch contamination BETWEEN batch files, which per-file validation cannot.
+
+    Authoring is split across concurrent agents that share a scratchpad, and one
+    run genuinely did overwrite another's staging file and briefly assemble the
+    wrong batch's cases into batch_04.jsonl. It was caught and restored, but
+    only because someone looked -- nothing in the gate would have said so, since
+    each file was independently well-formed the whole time. That is the failure
+    this checks for: valid files holding the wrong contents.
+
+    Three signatures, cheapest first:
+      * an id outside the range its filename implies (batch_04 owns 31-40)
+      * the same id in more than one file
+      * two cases sharing an nl_description -- the direct signature of a copy,
+        since 150 independently authored specifications cannot collide
+    """
+    errors: List[str] = []
+    by_id: Dict[int, List[str]] = {}
+    by_nl: Dict[str, List[str]] = {}
+
+    for p in sorted(paths):
+        stem = p.stem
+        expected: Optional[range] = None
+        if stem.startswith("batch_"):
+            try:
+                n = int(stem.split("_")[1])
+                expected = range((n - 1) * 10 + 1, n * 10 + 1)
+            except IndexError, ValueError:
+                expected = None
+
+        cases, load_errs = load_cases(p)
+        errors.extend(f"{p.name}: {e}" for e in load_errs)
+
+        for c in cases:
+            cid = c.get("id")
+            if isinstance(cid, int):
+                by_id.setdefault(cid, []).append(p.name)
+                if expected is not None and cid not in expected:
+                    errors.append(
+                        f"{p.name}: case id {cid} is outside this file's range "
+                        f"{expected.start}-{expected.stop - 1}. A file holding "
+                        "another batch's cases is the signature of a clobbered "
+                        "staging file, not a numbering slip."
+                    )
+            nl = (c.get("nl_description") or "").strip()
+            if nl:
+                digest = hashlib.sha256(nl.encode("utf-8")).hexdigest()
+                by_nl.setdefault(digest, []).append(f"{p.name}#{cid}")
+
+    for cid, where in sorted(by_id.items()):
+        if len(where) > 1:
+            errors.append(f"case id {cid} appears in {len(where)} files: {where}")
+    for where in by_nl.values():
+        if len(where) > 1:
+            errors.append(
+                "identical nl_description shared by "
+                f"{len(where)} cases: {sorted(where)}. Independently authored "
+                "specifications do not collide; this is a copy."
+            )
+    return errors
+
+
 def main(argv: Optional[List[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
     ap.add_argument("--cases", type=Path, default=DEFAULT_CASES)
     ap.add_argument("--coverage", action="store_true", help="print the coverage report")
     ap.add_argument("--quiet", action="store_true", help="suppress warnings")
+    ap.add_argument(
+        "--cross-check",
+        nargs="+",
+        type=Path,
+        metavar="FILE",
+        help=(
+            "check these files against EACH OTHER for contamination (ids out of "
+            "range, duplicated ids, copied nl_description) instead of validating "
+            "one file's contents. Per-file validation cannot see this class of "
+            "fault, because every file stays independently well-formed."
+        ),
+    )
     args = ap.parse_args(argv)
+
+    if args.cross_check:
+        errs = cross_file_integrity(list(args.cross_check))
+        print(f"cross-file integrity over {len(args.cross_check)} file(s)")
+        for e in errs:
+            print(f"  - {e}")
+        if errs:
+            print(f"\nFAILED: {len(errs)} integrity error(s)")
+            return 1
+        print("\nOK: no cross-file contamination detected")
+        return 0
 
     cases, load_errors = load_cases(args.cases)
     f = validate(cases)
