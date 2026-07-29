@@ -1,0 +1,159 @@
+# ScribbleDB evaluation metrics
+
+This is the whole metric set. There is no secondary "legacy" table, and the
+name-matching metrics that used to be here are gone, not demoted.
+
+## Why the previous set was replaced
+
+`Table F1`, `Attr F1`, `PK Acc`, `FK Acc`, `DT Acc` were all keyed on names.
+Table F1 matched table names; Attr F1 matched column names; PK, FK and DT
+accuracy were computed only over pairs that had already matched by name. So the
+most arbitrary property of a schema decided every number, and a fuzzy matcher had
+to carry the weight.
+
+That matcher cannot do it. Measured on its own implementation over 12 true
+synonym pairs and 12 genuinely distinct pairs:
+
+| | cosine range |
+|---|---|
+| true synonyms | 0.235 - 0.839 |
+| unrelated pairs | 0.216 - 0.608 |
+
+The ranges overlap across most of their width, so no threshold separates them. At
+the 0.6 in use, `DOCTOR`/`NURSE` were merged (0.608) while the real synonyms
+`MEMBER`/`PATRON` (0.505) and `PRODUCT`/`STYLE` (0.382) were counted as misses.
+Tuning the threshold trades one error for the other; it cannot remove both.
+
+Two further defects, both demonstrated on live runs rather than argued:
+
+- **Structure was barely measured.** The FK metric ran only over tables that had
+  already matched by name, so a wrong foreign-key topology could score well.
+- **Valid re-normalisation was punished.** One hospital run produced 12 tables
+  and another 11, with *identical* 100% fact coverage -- a junction decomposed
+  differently. Name-set F1 read that as a regression. It is not one.
+
+A schema is not a bag of strings. Two schemas are equivalent when they can
+represent the same set of database states -- relative information capacity -- and
+that is the frame these metrics work in.
+
+---
+
+## The schema metrics
+
+All four are name-independent: renaming every table and column in a schema cannot
+change any of them.
+
+**Implementation status.** IC-R and IC-P are implemented and wired into
+`run_evaluation.py` (`capacity_eval.py`). RSC is partially implemented as the
+structural score in `structural_eval.py` -- table alignment and FK topology are
+live, but reversed-versus-missing are not yet counted separately and optionality
+is not checked. KDC is NOT implemented: it needs functional dependencies in the
+ground truth, which `cases.jsonl` does not currently carry. Nothing here is
+reported as a number until it is actually computed.
+
+### 1. Information Capacity Recall (IC-R)
+
+**Question:** can the predicted schema hold every fact the specification states?
+
+Each fact extracted from the NL is checked for a home in the schema: a table, a
+column of an appropriate type, or a foreign key that realises it. A fact with no
+home is capacity that was lost.
+
+This subsumes what table and attribute recall were reaching for, and is immune to
+both naming and normalisation -- a junction split two ways still carries the same
+facts either way.
+
+Type appropriateness belongs to this question in principle -- money stored as
+`FLOAT` cannot represent the stated amounts exactly, so it is a capacity failure
+rather than a cosmetic one, which is what `DT Acc` was gesturing at without the
+justification. In the current implementation it is measured instead by
+`column_type_agreement` in the structural metric, over coarse type families.
+Judging a type against what a fact *needs* requires reading the fact's semantics
+and is not done yet; a keyword rule for 'money' would be exactly the brittle
+kind of check this project forbids.
+
+### 2. Information Capacity Precision (IC-P)
+
+**Question:** is there structure in the schema that nothing in the specification
+asks for?
+
+Tables, columns and foreign keys with no supporting fact are hallucinations. A
+schema that invents an audit trail nobody mentioned is not better than one that
+does not, and IC-R alone would reward it.
+
+`IC-F1` is the harmonic mean, and is the closest thing here to a single headline
+number for schema content.
+
+### 3. Key and Dependency Correctness (KDC)
+
+**Question:** do the declared keys actually determine the rows, and is every
+stated functional dependency enforced by the key structure?
+
+This is normalisation, checked deterministically rather than by eye:
+
+- every stated FD's determinant is a key or a superkey of the table holding it;
+- no non-key attribute depends on part of a composite key (no partial
+  dependency, i.e. 2NF);
+- no non-key attribute depends on another non-key attribute (no transitive
+  dependency, i.e. 3NF);
+- a natural key stated in the specification is used, rather than a surrogate
+  silently replacing it.
+
+A veteran weights this above everything else on this list, because a partial
+dependency is what produces update anomalies in production, long after the schema
+review passed.
+
+### 4. Referential Structure Correctness (RSC)
+
+**Question:** is every relationship the specification describes realised as a
+foreign key, pointing the right way, with the right optionality?
+
+Scored over a name-blind alignment of tables (structural role plus, once the
+dataset carries them, the NL spans each element cites). Three failures counted
+separately, because they are not equally bad:
+
+- **missing** -- the relationship is not represented at all;
+- **reversed** -- the FK is on the wrong side, which changes the cardinality the
+  schema can express and is a genuine modelling error;
+- **mis-optional** -- nullability contradicts stated mandatory or optional
+  participation.
+
+---
+
+## The data metrics
+
+These need Stage 4. They are the strongest claims the system makes, and they are
+entirely name-free because they run against generated rows.
+
+### 5. Constraint Satisfaction Rate (CSR)
+
+Fraction of the specification's constraints that actually hold in the generated
+instance. Reported separately for range, cross-column and conditional
+constraints, because a system that satisfies simple bounds while violating every
+cross-column invariant should not look the same as one that does the reverse.
+
+### 6. Distribution Fidelity (DF)
+
+Per column, how close the generated values are to the stated distribution:
+Kolmogorov-Smirnov distance for continuous families, total variation distance for
+discrete and nominal ones. KS over a nominal variable is not meaningful and is
+not used for one.
+
+Columns are paired through the schema alignment, never by name.
+
+`FA` is dropped: it was `1 - KS` and carried no information KS did not.
+
+---
+
+## What is deliberately not here
+
+- **No name matching anywhere.** Not as a primary signal, not as a tiebreak.
+- **No single composite score across the four.** They fail in qualitatively
+  different ways and a weighted sum hides which one occurred. `IC-F1` covers
+  content; the structural score sits beside it, not folded in. (`structural_score`
+  is itself a product of topology and column agreement -- a deliberate exception,
+  because topology alone is gameable: reversing the only FK in a two-table schema
+  makes it its own mirror image and topology then scores a perfect 1.0.)
+- **No accuracy-style all-or-nothing metrics.** `Table Acc` and `Attr Acc` were
+  1.0 only on a perfect set match, which is why they read 0.000 while F1 was
+  0.75. A metric that is almost always zero measures nothing.

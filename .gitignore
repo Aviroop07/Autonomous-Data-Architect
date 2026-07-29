@@ -23,6 +23,10 @@ requirements.txt
 # They survived the rename from .txt only because git mv staged them; without
 # this negation the next NEW prompt.md would be silently untracked.
 !src/**/prompt.md
+# Architecture/design specs are artifacts too -- CLAUDE.md already directs
+# readers to docs/design/STAGE3_PHASE2_DESIGN.md, which a clone could not see.
+# Only docs/design/, not the whole docs/ tree.
+!docs/design/*.md
 *.json
 *.pdf
 !paper/*.pdf

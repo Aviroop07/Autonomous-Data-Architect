@@ -2,7 +2,9 @@
 ScribbleDB -- Evaluation Harness
 
 Runs the full pipeline on every case in a dataset and computes published metrics:
-  Schema-level : Table F1/Acc, Attr F1/Acc, PK Acc, FK Acc, DT Acc
+  Schema-level : IC F1 (recall/precision), Structural score (FK topology,
+                 table recall, column types) -- all name-blind.
+                 See docs/design/EVALUATION_METRICS.md
   Data-level   : MRE, NLL, KS, FA
   Smoke test   : pass rate
 
@@ -218,9 +220,12 @@ async def run_case(
 # ---------------------------------------------------------------------------
 
 
-def _schema_metrics(pred_schema: Any, gt_case: Dict[str, Any]) -> Dict[str, Any]:
+def _schema_metrics(
+    pred_schema: Any, gt_case: Dict[str, Any], facts: Any = None
+) -> Dict[str, Any]:
     """Compute schema-level metrics for one case."""
-    from src.evaluation.schema_level.schema_eval import SchemaEvaluator
+    from src.evaluation.schema_level.capacity_eval import evaluate_capacity
+    from src.evaluation.schema_level.structural_eval import evaluate_structural
     from src.util.schema_model.data_types import DataType
     from src.util.schema_model.schema import Schema, Table, Column, ForeignKey
 
@@ -239,7 +244,6 @@ def _schema_metrics(pred_schema: Any, gt_case: Dict[str, Any]) -> Dict[str, Any]
 
         # Build GT Schema object + type maps for DT Acc
         gt_tables = []
-        gt_col_types: Dict[str, str] = {}
         for t in gt_raw.get("tables", []):
             t_name: str = t["name"]
             default_pk = t_name.lower() + "_id"
@@ -247,7 +251,6 @@ def _schema_metrics(pred_schema: Any, gt_case: Dict[str, Any]) -> Dict[str, Any]
             for c in t.get("columns", []):
                 dt = c.get("data_type") or "VARCHAR"
                 cols.append(Column(name=c["name"], data_type=_as_data_type(dt)))
-                gt_col_types[f"{t_name}.{c['name']}"] = str(dt)
             # Table's field is `primary_key: List[str]`, not `pk: str`.
             raw_pk = t.get("pk") or t.get("primary_key") or default_pk
             primary_key = [raw_pk] if isinstance(raw_pk, str) else list(raw_pk)
@@ -268,20 +271,14 @@ def _schema_metrics(pred_schema: Any, gt_case: Dict[str, Any]) -> Dict[str, Any]
         ]
         gt_schema = Schema(tables=gt_tables, relationships=gt_rels)
 
-        # Extract type map from predicted schema
-        pred_col_types: Dict[str, str] = {
-            f"{t.name}.{c.name}": (c.data_type or "VARCHAR")
-            for t in pred_schema.tables
-            for c in t.columns
-        }
-
-        evaluator = SchemaEvaluator()
-        return evaluator.evaluate_schema(
-            pred_schema,
-            gt_schema,
-            gt_col_types=gt_col_types,
-            pred_col_types=pred_col_types,
-        )
+        # Name-blind: structural alignment for shape, provenance for capacity.
+        # See docs/design/EVALUATION_METRICS.md.
+        out: Dict[str, Any] = dict(evaluate_structural(pred_schema, gt_schema).as_dict())
+        capacity = evaluate_capacity(pred_schema, facts or [])
+        out.update(capacity.as_dict())
+        out["uncovered_fact_ids"] = capacity.uncovered_fact_ids
+        out["unsupported_elements"] = capacity.unsupported_elements
+        return out
     except Exception as e:
         return {"error": str(e)}
 
@@ -327,13 +324,15 @@ def compute_aggregate_metrics(case_results: List[Dict[str, Any]]) -> Dict[str, A
     agg: Dict[str, Any] = {
         "n_cases": len(case_results),
         "schema": {
-            "table_f1": _aggregate(schema_scores, "table_f1"),
-            "table_acc": _aggregate(schema_scores, "table_acc"),
-            "attr_f1": _aggregate(schema_scores, "attr_f1"),
-            "attr_acc": _aggregate(schema_scores, "attr_acc"),
-            "pk_acc": _aggregate(schema_scores, "pk_acc"),
-            "fk_acc": _aggregate(schema_scores, "fk_acc"),
-            "dt_acc": _aggregate(schema_scores, "dt_acc"),
+"structural_score": _aggregate(schema_scores, "structural_score"),
+            "fk_topology_f1": _aggregate(schema_scores, "fk_topology_f1"),
+            "table_structural_recall": _aggregate(
+                schema_scores, "table_structural_recall"
+            ),
+            "column_type_agreement": _aggregate(schema_scores, "column_type_agreement"),
+            "ic_f1": _aggregate(schema_scores, "ic_f1"),
+            "ic_recall": _aggregate(schema_scores, "ic_recall"),
+            "ic_precision": _aggregate(schema_scores, "ic_precision"),
         },
         "data": {
             "mre": _aggregate(data_scores, "mre"),
@@ -357,13 +356,13 @@ def _print_aggregate(agg: Dict[str, Any], label: str = "ScribbleDB") -> None:
     s = agg["schema"]
     d = agg["data"]
     print("  Schema")
-    print(f"    Table F1 / Acc  : {s['table_f1']:.3f} / {s['table_acc']:.3f}")
-    print(f"    Attr  F1 / Acc  : {s['attr_f1']:.3f} / {s['attr_acc']:.3f}")
-    print(f"    PK Acc          : {s['pk_acc']:.3f}")
-    print(f"    FK Acc          : {s['fk_acc']:.3f}")
-    print(
-        f"    DT Acc          : {s['dt_acc'] if s['dt_acc'] == s['dt_acc'] else 'N/A'}"
-    )
+    print(f"    IC F1           : {s['ic_f1']:.3f}")
+    print(f"      recall        : {s['ic_recall']:.3f}   (facts the schema can hold)")
+    print(f"      precision     : {s['ic_precision']:.3f}   (structure a fact supports)")
+    print(f"    Structural      : {s['structural_score']:.3f}")
+    print(f"      FK topology F1: {s['fk_topology_f1']:.3f}")
+    print(f"      table recall  : {s['table_structural_recall']:.3f}")
+    print(f"      column types  : {s['column_type_agreement']:.3f}")
     print("  Data")
     print(f"    MRE             : {d['mre']:.3f}")
     print(f"    NLL             : {d['nll']:.3f}")
@@ -446,16 +445,18 @@ async def evaluate(args: argparse.Namespace) -> None:
                     s2_out, "merged_schema", None
                 )
             if pred_schema is not None and case.get("ground_truth_schema"):
-                result["schema_metrics"] = _schema_metrics(pred_schema, case)
+                result["schema_metrics"] = _schema_metrics(
+                    pred_schema, case, getattr(s1_out, "final_facts", None)
+                )
             else:
                 result["schema_metrics"] = {
-                    "table_f1": 0.0,
-                    "table_acc": 0.0,
-                    "attr_f1": 0.0,
-                    "attr_acc": 0.0,
-                    "pk_acc": 0.0,
-                    "fk_acc": 0.0,
-                    "dt_acc": None,
+                    "structural_score": 0.0,
+                    "fk_topology_f1": 0.0,
+                    "table_structural_recall": 0.0,
+                    "column_type_agreement": 0.0,
+                    "ic_f1": 0.0,
+                    "ic_recall": 0.0,
+                    "ic_precision": 0.0,
                 }
 
             # Smoke test + data metrics
@@ -492,8 +493,8 @@ async def evaluate(args: argparse.Namespace) -> None:
             sm = result["schema_metrics"]
             dm = result["data_metrics"]
             print(
-                f"  table_f1={sm.get('table_f1', 0):.2f}  "
-                f"attr_f1={sm.get('attr_f1', 0):.2f}  "
+                f"  ic_f1={sm.get('ic_f1', 0):.2f}  "
+                f"struct={sm.get('structural_score', 0):.2f}  "
                 f"mre={dm.get('mre', 1):.2f}  "
                 f"ks={dm.get('ks', 1):.2f}  "
                 f"smoke={'P' if smoke_passed else 'F'}  "

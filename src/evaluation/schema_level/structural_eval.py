@@ -1,8 +1,8 @@
 """Name-blind structural schema evaluation.
 
-Every metric in schema_eval.py is keyed on NAMES: Table F1 matches table names,
-Attr F1 matches column names, and PK/FK/DT accuracy are all computed over pairs
-that already matched by name. So the most arbitrary property of a schema decides
+The metrics this replaces were all keyed on NAMES: Table F1 matched table names,
+Attr F1 matched column names, and PK/FK/DT accuracy were computed only over pairs
+that had already matched by name. So the most arbitrary property of a schema decides
 every number, and the fuzzy name matcher that props this up demonstrably cannot
 separate synonyms from unrelated words -- measured on its own matcher,
 DRUG/MEDICATION scores 0.839 and matches while MEMBER/PATRON scores 0.505 and
@@ -23,21 +23,59 @@ stating:
     differently. Name-set F1 read that as a regression; structural alignment
     charges only for the topology that actually differs.
 
-Deliberately NOT a replacement for the name-based metrics. Those stay, for
-comparability against prior work that reports them. This is what the pipeline
-should be judged on; those are what lets anyone compare it to a baseline.
+This REPLACES the name-based metrics rather than supplementing them; they have
+been deleted. See docs/design/EVALUATION_METRICS.md for the whole metric set.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from src.evaluation.schema_level.schema_eval import coarsen_dt
 from src.util.schema_model.schema import Schema
+
+# Lifted from the deleted name-based evaluator: coarsening a declared type to a
+# family is the one part of it that never read a name.
+COARSE_DT_MAP: Dict[str, str] = {
+    "INT": "NUMERIC",
+    "INTEGER": "NUMERIC",
+    "BIGINT": "NUMERIC",
+    "SMALLINT": "NUMERIC",
+    "TINYINT": "NUMERIC",
+    "FLOAT": "NUMERIC",
+    "DOUBLE": "NUMERIC",
+    "REAL": "NUMERIC",
+    "DECIMAL": "NUMERIC",
+    "NUMERIC": "NUMERIC",
+    "NUMBER": "NUMERIC",
+    "VARCHAR": "TEXT",
+    "CHAR": "TEXT",
+    "TEXT": "TEXT",
+    "STRING": "TEXT",
+    "NVARCHAR": "TEXT",
+    "DATE": "DATETIME",
+    "DATETIME": "DATETIME",
+    "TIMESTAMP": "DATETIME",
+    "TIME": "DATETIME",
+    "BLOB": "BINARY",
+    "BINARY": "BINARY",
+    "BYTEA": "BINARY",
+    "VARBINARY": "BINARY",
+    "BOOLEAN": "BOOL",
+    "BOOL": "BOOL",
+    "BIT": "BOOL",
+}
+
+
+def coarsen_dt(dt: Optional[str]) -> str:
+    if not dt:
+        return "TEXT"
+    base = str(dt).upper().split("(")[0].strip()
+    return COARSE_DT_MAP.get(base, "TEXT")
+
 
 # Feature weights for the alignment cost. Topology is weighted above size
 # because a table's position in the FK graph identifies it far more reliably
