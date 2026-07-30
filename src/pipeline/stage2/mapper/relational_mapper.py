@@ -199,6 +199,547 @@ def _unsafe_key_columns(
     return [col for col in candidate if owners.get(col, set()) - {entity_name}]
 
 
+def _enforce_validation_postcondition(schema: Schema) -> None:
+    """Validate the mapped schema and run the bounded deterministic repair loop.
+
+    Extracted verbatim from map_conceptual_to_relational, which had grown to 880
+    lines in one function. Its only input is the schema -- every other name in
+    here was already local -- so it lifts out without threading state, which is
+    why it was the first phase to move.
+
+    Raises ValueError when repair cannot converge, exactly as before: a schema
+    that fails its own validation must not be returned silently.
+    """
+    errors = schema._validate()
+    if errors:
+        logger.warning(
+            "  [Mapper] Generated schema failed validation with %d error(s):",
+            len(errors),
+        )
+        for e in errors[:5]:
+            logger.warning("    - %s", e)
+
+        # Bounded deterministic repair loop
+        for _ in range(3):
+            if not schema._validate():
+                break
+
+            # Column dedup: if a table has duplicate column names, merge them
+            # by keeping the first occurrence and extending its source_fact_ids.
+            # This fixes the case where an MVA table's value column coincides
+            # with a parent PK column name.
+            for table in schema.tables:
+                seen_col_names: Set[str] = set()
+                deduped = []
+                for col in table.columns:
+                    if col.name not in seen_col_names:
+                        seen_col_names.add(col.name)
+                        deduped.append(col)
+                    else:
+                        existing = next(c for c in deduped if c.name == col.name)
+                        existing.source_fact_ids = list(
+                            set(existing.source_fact_ids) | set(col.source_fact_ids)
+                        )
+                if len(deduped) != len(table.columns):
+                    logger.info(
+                        "  [Mapper] Repair: deduplicated %d duplicate column(s) in table '%s'.",
+                        len(table.columns) - len(deduped),
+                        table.name,
+                    )
+                    table.columns = deduped
+
+            # FK-target tables are legitimate parent/lookup entities -- never drop them
+            # as "hollow" even if they only have a PK (dropping orphans referencing FKs).
+            referred = {r.referred_table for r in (schema.relationships or [])}
+
+            # Facts that some OTHER table also carries. A hollow table whose facts
+            # all appear elsewhere is genuinely redundant; one holding the only
+            # copy of a fact is not, and dropping it deletes that fact from the
+            # schema entirely.
+            #
+            # Measured on a live run: the extractor emitted a PACKAGE entity with
+            # no attributes and no identifier, from two facts -- one asserting the
+            # entity exists, one asserting a parent contains several of them --
+            # but did NOT emit the containing relationship, so nothing referenced
+            # PACKAGE and the FK-target exemption above did not apply. PACKAGE was
+            # dropped, and Stage 3 then could not extract the fanout that second
+            # fact states. A Stage 2 cleanup silently cost a Stage 3 constraint.
+            #
+            # The root cause is upstream (the relationship should have been
+            # extracted), but this is the deterministic backstop for the whole
+            # class: never let a cleanup step be the reason a fact vanishes.
+            facts_held_elsewhere: Dict[str, Set[int]] = {}
+            for t in schema.tables:
+                own = set(t.source_fact_ids or [])
+                for c in t.columns:
+                    own.update(c.source_fact_ids or [])
+                facts_held_elsewhere[t.name] = own
+            all_fact_ids: Set[int] = set()
+            for ids in facts_held_elsewhere.values():
+                all_fact_ids |= ids
+
+            seen_t = set()
+            unique_tables = []
+            for t in schema.tables:
+                # Every drop below is logged. These were bare `continue`s, so a
+                # table extracted from the spec could disappear between the
+                # conceptual model and the shipped schema with no trace, and
+                # the fact registry was never told -- leaving FK provenance and
+                # uncovered_fact_ids describing tables that no longer exist.
+                if not t.columns or not t.primary_key:
+                    logger.warning(
+                        "  [Mapper] Dropping table '%s': %s. Its source facts are "
+                        "no longer represented in the schema.",
+                        t.name,
+                        "no columns" if not t.columns else "no primary key",
+                    )
+                    continue
+
+                # Identify hollow tables (PK-only), exempting composite-PK junctions,
+                # FK-target tables, and FK-referencing tables (tables that hold a FK
+                # pointing to another table -- e.g. MVA tables -- serve a structural
+                # purpose even without descriptive columns).
+                fk_referencing = {
+                    r.referencing_table for r in (schema.relationships or [])
+                }
+                non_pk_cols = [c for c in t.columns if c.name not in t.pk_set]
+                if (
+                    not t.is_composite_pk
+                    and t.name not in referred
+                    and t.name not in fk_referencing
+                    and not non_pk_cols
+                    and len(schema.tables) > 1
+                ):
+                    own_facts = facts_held_elsewhere.get(t.name, set())
+                    elsewhere: Set[int] = set()
+                    for other_name, ids in facts_held_elsewhere.items():
+                        if other_name != t.name:
+                            elsewhere |= ids
+                    exclusive = own_facts - elsewhere
+                    if exclusive:
+                        # Deliberately still dropped, and deliberately noisy about
+                        # it. KEEPING it was tried and is worse: Schema._validate()
+                        # rejects a primary-key-only table outright, so this drop
+                        # is what SATISFIES validation -- retaining the table turns
+                        # a silent constraint loss into a hard mapper failure.
+                        # Fixing it here is the wrong layer; the real fix is
+                        # upstream, where the relationship that would have given
+                        # this table a foreign-key column should have been
+                        # extracted. Until then, say exactly which facts are being
+                        # deleted so the loss is diagnosable in one log line
+                        # instead of surfacing as a missing Stage 3 constraint.
+                        logger.warning(
+                            "  [Mapper] Dropping hollow table '%s' DESTROYS the only "
+                            "representation of fact(s) %s -- no other table carries "
+                            "them, and no constraint referencing this table can be "
+                            "extracted downstream. It has only a primary key because "
+                            "the extraction gave it neither attributes nor a "
+                            "relationship.",
+                            t.name,
+                            sorted(exclusive),
+                        )
+                    else:
+                        logger.warning(
+                            "  [Mapper] Dropping hollow table '%s': primary key only, "
+                            "no other columns, nothing references it, and its fact(s) "
+                            "%s are carried by other tables.",
+                            t.name,
+                            sorted(own_facts) or "[]",
+                        )
+                    continue
+
+                if t.name in seen_t:
+                    logger.warning(
+                        "  [Mapper] Dropping duplicate table '%s'; keeping the first "
+                        "occurrence. Columns unique to this copy are lost.",
+                        t.name,
+                    )
+                if t.name not in seen_t:
+                    seen_t.add(t.name)
+                    unique_tables.append(t)
+
+            schema.tables = unique_tables
+
+            valid_t_names = {t.name for t in schema.tables}
+            seen_r = set()
+            unique_rels = []
+            for r in schema.relationships or []:
+                r_key = (r.referencing_table, r.referencing_column, r.referred_table)
+                if (
+                    r_key not in seen_r
+                    and r.referencing_table in valid_t_names
+                    and r.referred_table in valid_t_names
+                ):
+                    ref_table = next(
+                        (t for t in schema.tables if t.name == r.referencing_table),
+                        None,
+                    )
+                    if ref_table and any(
+                        c.name == r.referencing_column for c in ref_table.columns
+                    ):
+                        seen_r.add(r_key)
+                        unique_rels.append(r)
+            schema.relationships = unique_rels
+            schema.normalize()
+            # Re-run FK type alignment inside the repair loop: dropping/deduping tables
+            # and columns above can leave a referencing column whose type no longer matches
+            # the referred PK. align is idempotent and must run every iteration so the
+            # type-mismatch postcondition can actually converge (it was previously only
+            # run once before the loop, so a surviving mismatch could never be repaired).
+            schema.align_fk_column_types()
+            # NOTE: table isolation is a non-blocking advisory (see Schema._style_warnings),
+            # NOT a structural error -- we deliberately do NOT prune isolated tables here,
+            # because that silently deleted legitimately extracted entities.
+
+        final_errors = schema._validate()
+        if final_errors:
+            raise ValueError(
+                f"RelationalMapper failed to repair schema. Remaining errors: {final_errors}"
+            )
+
+
+def _map_relationships(
+    cm: ConceptualModel,
+    tables: List[Table],
+    relationships_to_add: List[ForeignKey],
+    entity_tables: Dict[str, Table],
+    used_names: Set[str],
+) -> None:
+    """Map conceptual relationships to foreign keys and junction tables.
+
+    The largest phase of the mapper (319 lines) and the last to be lifted out
+    of what had become an 880-line function. Extracted verbatim: its only
+    inputs are the model plus the four collections it appends to, so the split
+    is mechanical and an equivalence gate over four real conceptual models
+    confirms the mapping stays byte-identical.
+
+    Mutates `tables`, `relationships_to_add` and `used_names` in place, and
+    reads `entity_tables` to resolve participants. Kept as in-place mutation
+    rather than returning new lists so the extraction changes nothing about
+    the order things are created in -- that order decides junction naming and
+    FK column naming, so preserving it is the point.
+    """
+    for rel in cm.relationships:
+        if not rel.participants:
+            continue
+
+        if rel.degree == "n-ary" or rel.kind == "M:N":
+            # Resolve participant tables first -- needed for both naming and FK columns.
+            participant_tables: List[Table] = []
+            for p in rel.participants:
+                p_t = entity_tables.get(p.entity.lower())
+                if p_t and p_t not in participant_tables:
+                    participant_tables.append(p_t)
+            if not participant_tables:
+                continue
+
+            # Deterministic, noun-based junction name (avoids verb/plural names like OPERATES).
+            t_name = _derive_junction_name(rel, participant_tables, used_names)
+            columns = []
+            pk_cols = []
+            fk_names_in_junction: Set[str] = set()
+
+            for attr in rel.attributes:
+                if attr.is_derived or attr.is_multivalued:
+                    continue
+                c_name = to_snake_case(attr.name).lower()
+                if not any(c.name == c_name for c in columns):
+                    columns.append(
+                        Column(
+                            name=c_name,
+                            data_type=attr.type,
+                            # A relationship attribute is NOT part of the junction's
+                            # primary key (the participant FKs are), so its declared
+                            # nullability is real information and must survive the
+                            # mapping. Omitting it silently defaulted every such
+                            # column to NOT NULL, which cost a membership's optional
+                            # `date_left` and left the schema unable to represent a
+                            # CURRENT member -- an information-capacity loss with no
+                            # error anywhere. The entity-attribute path above already
+                            # passes this through.
+                            is_nullable=attr.is_nullable,
+                            source_fact_ids=attr.source_fact_ids,
+                        )
+                    )
+
+            for position, p in enumerate(rel.participants, start=1):
+                p_t = entity_tables.get(p.entity.lower())
+                if not p_t:
+                    continue
+                role_prefix = f"{to_snake_case(p.role).lower()}_" if p.role else ""
+
+                for pk_c in p_t.primary_key:
+                    fk_col_name = f"{role_prefix}{pk_c}"
+                    # A SELF-REFERENTIAL relationship without roles sends both
+                    # ends through here with the identical column name, so the
+                    # dedup check below collapsed them into ONE foreign key. The
+                    # resulting single-FK junction was then classified hollow and
+                    # dropped, deleting the relationship outright -- verified on a
+                    # self-referencing M:N, which produced zero foreign keys.
+                    # These are common (prerequisite, supersedes, manager-of,
+                    # part-of), so losing them silently is expensive.
+                    #
+                    # Roles are the proper disambiguator and are used when
+                    # present. Falling back to the participant's position is
+                    # deterministic and domain-free; it keeps both ends, which
+                    # matters far more than the column being prettily named.
+                    # Participants are the outer loop and this table's primary-key
+                    # members the inner one, so a name already present can only
+                    # have come from a DIFFERENT participant -- i.e. exactly the
+                    # self-reference case.
+                    #
+                    # HOWEVER: the name could also collide with a RELATIONSHIP
+                    # ATTRIBUTE (e.g. an M:N `ENROLMENT` carrying attribute
+                    # `student_id` whose name matches the FK from STUDENT's PK).
+                    # In that case we must disambiguate by role/position rather
+                    # than silently renaming the FK to a non-position name and
+                    # leaving the attribute looking like an FK for the auto-wirer.
+                    if fk_col_name in fk_names_in_junction:
+                        fk_col_name = f"{pk_c}_{position}"
+                        logger.info(
+                            "  [Mapper] Junction '%s' has two participants resolving "
+                            "to table '%s' with no distinguishing roles; naming this "
+                            "end's foreign key '%s' by position. Supplying roles on "
+                            "the relationship would give it a meaningful name.",
+                            t_name,
+                            p_t.name,
+                            fk_col_name,
+                        )
+                    elif any(c.name == fk_col_name for c in columns):
+                        # Relationship attribute owns the name -- prefix by entity
+                        # name so the FK does not clash with the attribute, without
+                        # using the self-reference positional suffix pattern that
+                        # would mislead downstream diagnostic logic.
+                        entity_prefix = to_snake_case(p.entity).lower()
+                        fk_col_name = f"{entity_prefix}_{pk_c}"
+                        logger.info(
+                            "  [Mapper] Junction '%s' FK column '%s' collides with a "
+                            "relationship attribute; naming this FK '%s' by position "
+                            "to disambiguate.",
+                            t_name,
+                            fk_col_name.rsplit("_", 1)[0] if role_prefix else pk_c,
+                            fk_col_name,
+                        )
+                    parent_col = _resolve_pk_column(
+                        p_t.columns,
+                        pk_c,
+                        table_name=p_t.name,
+                        purpose="a junction-table FK",
+                    )
+                    if parent_col is None:
+                        continue
+
+                    if not any(c.name == fk_col_name for c in columns):
+                        columns.append(
+                            Column(
+                                name=fk_col_name,
+                                data_type=parent_col.data_type,
+                                source_fact_ids=rel.source_fact_ids,
+                            )
+                        )
+
+                    if fk_col_name not in pk_cols:
+                        pk_cols.append(fk_col_name)
+                    fk_names_in_junction.add(fk_col_name)
+
+                    relationships_to_add.append(
+                        ForeignKey(
+                            referencing_table=t_name,
+                            referencing_column=fk_col_name,
+                            referred_table=p_t.name,
+                            source_fact_ids=rel.source_fact_ids,
+                        )
+                    )
+
+            tables.append(
+                Table(
+                    name=t_name,
+                    primary_key=pk_cols,
+                    columns=columns,
+                    source_fact_ids=rel.source_fact_ids,
+                )
+            )
+            used_names.add(t_name)
+
+        elif rel.kind == "1:N" and len(rel.participants) == 2:
+            p1, p2 = rel.participants
+            if p1.cardinality_max != 1:
+                child_p, parent_p = p1, p2
+            else:
+                child_p, parent_p = p2, p1
+
+            child_t = entity_tables.get(child_p.entity.lower())
+            parent_t = entity_tables.get(parent_p.entity.lower())
+
+            if child_t and parent_t:
+                if child_t.name == parent_t.name:
+                    role_prefix = (
+                        f"{to_snake_case(parent_p.role).lower()}_"
+                        if parent_p.role
+                        else f"{to_snake_case(rel.name).lower()}_"
+                    )
+                else:
+                    role_prefix = (
+                        f"{to_snake_case(parent_p.role).lower()}_"
+                        if parent_p.role
+                        else ""
+                    )
+
+                # child_p.cardinality_min == 0 means an instance of the child
+                # entity need not participate in this relationship at all
+                # (e.g. a PATIENT need not have INSURANCE) -- the synthesized
+                # FK is nullable in exactly that case, never inferred from
+                # naming. Unspecified (None) defaults to required (False),
+                # the existing safe default for a schema with no cardinality
+                # info at all.
+                fk_is_nullable = child_p.cardinality_min == 0
+                for pk_c in parent_t.primary_key:
+                    fk_col_name = f"{role_prefix}{pk_c}"
+                    parent_col = _resolve_pk_column(
+                        parent_t.columns,
+                        pk_c,
+                        table_name=parent_t.name,
+                        purpose="a foreign key",
+                    )
+                    if parent_col is None:
+                        continue
+                    if not any(c.name == fk_col_name for c in child_t.columns):
+                        child_t.columns.append(
+                            Column(
+                                name=fk_col_name,
+                                data_type=parent_col.data_type,
+                                is_nullable=fk_is_nullable,
+                                source_fact_ids=rel.source_fact_ids,
+                            )
+                        )
+
+                    relationships_to_add.append(
+                        ForeignKey(
+                            referencing_table=child_t.name,
+                            referencing_column=fk_col_name,
+                            referred_table=parent_t.name,
+                            source_fact_ids=rel.source_fact_ids,
+                        )
+                    )
+            else:
+                logger.warning(
+                    "  [Mapper] 1:N relationship '%s' between '%s' and '%s': "
+                    "could not resolve one or both entity tables; no FK was "
+                    "generated. Facts %s are unrepresented.",
+                    rel.name,
+                    child_p.entity,
+                    parent_p.entity,
+                    rel.source_fact_ids or "[]",
+                )
+
+        elif rel.kind == "1:1" and len(rel.participants) == 2:
+            p1, p2 = rel.participants
+            if p1.cardinality_min == 1 and p2.cardinality_min != 1:
+                child_p, parent_p = p1, p2
+            elif p2.cardinality_min == 1 and p1.cardinality_min != 1:
+                child_p, parent_p = p2, p1
+            else:
+                if p1.entity.lower() > p2.entity.lower():
+                    child_p, parent_p = p1, p2
+                else:
+                    child_p, parent_p = p2, p1
+
+            child_t = entity_tables.get(child_p.entity.lower())
+            parent_t = entity_tables.get(parent_p.entity.lower())
+
+            if child_t and parent_t:
+                fk_cols_added = []
+                # Same rule as the 1:N branch above -- cardinality_min == 0 on
+                # whichever participant ended up as child_p (including via the
+                # alphabetical tiebreak, when cardinality info didn't clearly
+                # pick a side) means that side's participation is optional, so
+                # its FK is nullable. Unspecified/None or 1 both default to
+                # required (False), matching the tiebreak's own "assume
+                # required unless told otherwise" stance.
+                fk_is_nullable = child_p.cardinality_min == 0
+                for pk_c in parent_t.primary_key:
+                    fk_col_name = pk_c
+                    if child_t.name == parent_t.name:
+                        role_prefix = (
+                            f"{to_snake_case(parent_p.role).lower()}_"
+                            if parent_p.role
+                            else f"{to_snake_case(rel.name).lower()}_"
+                        )
+                        fk_col_name = f"{role_prefix}{pk_c}"
+                    else:
+                        role_prefix = (
+                            f"{to_snake_case(parent_p.role).lower()}_"
+                            if parent_p.role
+                            else ""
+                        )
+                        fk_col_name = f"{role_prefix}{pk_c}"
+
+                    parent_col = _resolve_pk_column(
+                        parent_t.columns,
+                        pk_c,
+                        table_name=parent_t.name,
+                        purpose="a foreign key",
+                    )
+                    if parent_col is None:
+                        continue
+                    if not any(c.name == fk_col_name for c in child_t.columns):
+                        child_t.columns.append(
+                            Column(
+                                name=fk_col_name,
+                                data_type=parent_col.data_type,
+                                is_nullable=fk_is_nullable,
+                                source_fact_ids=rel.source_fact_ids,
+                            )
+                        )
+
+                    fk_cols_added.append(fk_col_name)
+                    relationships_to_add.append(
+                        ForeignKey(
+                            referencing_table=child_t.name,
+                            referencing_column=fk_col_name,
+                            referred_table=parent_t.name,
+                            source_fact_ids=rel.source_fact_ids,
+                        )
+                    )
+
+                if fk_cols_added:
+                    if child_t.unique is None:
+                        child_t.unique = []
+                    child_t.unique.append(CompositeUnique(columns=fk_cols_added))
+            else:
+                logger.warning(
+                    "  [Mapper] 1:1 relationship '%s' between '%s' and '%s': "
+                    "could not resolve one or both entity tables; no FK was "
+                    "generated. Facts %s are unrepresented.",
+                    rel.name,
+                    child_p.entity,
+                    parent_p.entity,
+                    rel.source_fact_ids or "[]",
+                )
+
+        else:
+            # The three branches above cover n-ary/M:N, binary 1:N and binary
+            # 1:1. Anything else fell off the end of the chain and vanished
+            # with no trace. Two ways to get here, both reachable:
+            #   - a `kind` outside the Literal, which the adjudicator could
+            #     previously write (now blocked at its source, but the mapper
+            #     should not depend on that being the only writer);
+            #   - a NON-n-ary relationship declared 1:N or 1:1 with a
+            #     participant count other than two, which no branch matches.
+            # Logged rather than repaired: guessing a cardinality would invent
+            # a foreign key the specification never stated.
+            logger.warning(
+                "  [Mapper] Relationship '%s' matched no mapping rule "
+                "(kind=%r, degree=%r, %d participant(s)); no foreign key was "
+                "generated for it. Facts %s are unrepresented.",
+                rel.name,
+                rel.kind,
+                rel.degree,
+                len(rel.participants),
+                rel.source_fact_ids or "[]",
+            )
+
+
 def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
     tables: List[Table] = []
     relationships_to_add: List[ForeignKey] = []
@@ -562,325 +1103,9 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
             used_names.add(mva_t_name)
 
     # 4, 5, 6, 7. Relationships
-    for rel in cm.relationships:
-        if not rel.participants:
-            continue
-
-        if rel.degree == "n-ary" or rel.kind == "M:N":
-            # Resolve participant tables first -- needed for both naming and FK columns.
-            participant_tables: List[Table] = []
-            for p in rel.participants:
-                p_t = entity_tables.get(p.entity.lower())
-                if p_t and p_t not in participant_tables:
-                    participant_tables.append(p_t)
-            if not participant_tables:
-                continue
-
-            # Deterministic, noun-based junction name (avoids verb/plural names like OPERATES).
-            t_name = _derive_junction_name(rel, participant_tables, used_names)
-            columns = []
-            pk_cols = []
-            fk_names_in_junction: Set[str] = set()
-
-            for attr in rel.attributes:
-                if attr.is_derived or attr.is_multivalued:
-                    continue
-                c_name = to_snake_case(attr.name).lower()
-                if not any(c.name == c_name for c in columns):
-                    columns.append(
-                        Column(
-                            name=c_name,
-                            data_type=attr.type,
-                            # A relationship attribute is NOT part of the junction's
-                            # primary key (the participant FKs are), so its declared
-                            # nullability is real information and must survive the
-                            # mapping. Omitting it silently defaulted every such
-                            # column to NOT NULL, which cost a membership's optional
-                            # `date_left` and left the schema unable to represent a
-                            # CURRENT member -- an information-capacity loss with no
-                            # error anywhere. The entity-attribute path above already
-                            # passes this through.
-                            is_nullable=attr.is_nullable,
-                            source_fact_ids=attr.source_fact_ids,
-                        )
-                    )
-
-            for position, p in enumerate(rel.participants, start=1):
-                p_t = entity_tables.get(p.entity.lower())
-                if not p_t:
-                    continue
-                role_prefix = f"{to_snake_case(p.role).lower()}_" if p.role else ""
-
-                for pk_c in p_t.primary_key:
-                    fk_col_name = f"{role_prefix}{pk_c}"
-                    # A SELF-REFERENTIAL relationship without roles sends both
-                    # ends through here with the identical column name, so the
-                    # dedup check below collapsed them into ONE foreign key. The
-                    # resulting single-FK junction was then classified hollow and
-                    # dropped, deleting the relationship outright -- verified on a
-                    # self-referencing M:N, which produced zero foreign keys.
-                    # These are common (prerequisite, supersedes, manager-of,
-                    # part-of), so losing them silently is expensive.
-                    #
-                    # Roles are the proper disambiguator and are used when
-                    # present. Falling back to the participant's position is
-                    # deterministic and domain-free; it keeps both ends, which
-                    # matters far more than the column being prettily named.
-                    # Participants are the outer loop and this table's primary-key
-                    # members the inner one, so a name already present can only
-                    # have come from a DIFFERENT participant -- i.e. exactly the
-                    # self-reference case.
-                    #
-                    # HOWEVER: the name could also collide with a RELATIONSHIP
-                    # ATTRIBUTE (e.g. an M:N `ENROLMENT` carrying attribute
-                    # `student_id` whose name matches the FK from STUDENT's PK).
-                    # In that case we must disambiguate by role/position rather
-                    # than silently renaming the FK to a non-position name and
-                    # leaving the attribute looking like an FK for the auto-wirer.
-                    if fk_col_name in fk_names_in_junction:
-                        fk_col_name = f"{pk_c}_{position}"
-                        logger.info(
-                            "  [Mapper] Junction '%s' has two participants resolving "
-                            "to table '%s' with no distinguishing roles; naming this "
-                            "end's foreign key '%s' by position. Supplying roles on "
-                            "the relationship would give it a meaningful name.",
-                            t_name,
-                            p_t.name,
-                            fk_col_name,
-                        )
-                    elif any(c.name == fk_col_name for c in columns):
-                        # Relationship attribute owns the name -- prefix by entity
-                        # name so the FK does not clash with the attribute, without
-                        # using the self-reference positional suffix pattern that
-                        # would mislead downstream diagnostic logic.
-                        entity_prefix = to_snake_case(p.entity).lower()
-                        fk_col_name = f"{entity_prefix}_{pk_c}"
-                        logger.info(
-                            "  [Mapper] Junction '%s' FK column '%s' collides with a "
-                            "relationship attribute; naming this FK '%s' by position "
-                            "to disambiguate.",
-                            t_name,
-                            fk_col_name.rsplit("_", 1)[0] if role_prefix else pk_c,
-                            fk_col_name,
-                        )
-                    parent_col = _resolve_pk_column(
-                        p_t.columns,
-                        pk_c,
-                        table_name=p_t.name,
-                        purpose="a junction-table FK",
-                    )
-                    if parent_col is None:
-                        continue
-
-                    if not any(c.name == fk_col_name for c in columns):
-                        columns.append(
-                            Column(
-                                name=fk_col_name,
-                                data_type=parent_col.data_type,
-                                source_fact_ids=rel.source_fact_ids,
-                            )
-                        )
-
-                    if fk_col_name not in pk_cols:
-                        pk_cols.append(fk_col_name)
-                    fk_names_in_junction.add(fk_col_name)
-
-                    relationships_to_add.append(
-                        ForeignKey(
-                            referencing_table=t_name,
-                            referencing_column=fk_col_name,
-                            referred_table=p_t.name,
-                            source_fact_ids=rel.source_fact_ids,
-                        )
-                    )
-
-            tables.append(
-                Table(
-                    name=t_name,
-                    primary_key=pk_cols,
-                    columns=columns,
-                    source_fact_ids=rel.source_fact_ids,
-                )
-            )
-            used_names.add(t_name)
-
-        elif rel.kind == "1:N" and len(rel.participants) == 2:
-            p1, p2 = rel.participants
-            if p1.cardinality_max != 1:
-                child_p, parent_p = p1, p2
-            else:
-                child_p, parent_p = p2, p1
-
-            child_t = entity_tables.get(child_p.entity.lower())
-            parent_t = entity_tables.get(parent_p.entity.lower())
-
-            if child_t and parent_t:
-                if child_t.name == parent_t.name:
-                    role_prefix = (
-                        f"{to_snake_case(parent_p.role).lower()}_"
-                        if parent_p.role
-                        else f"{to_snake_case(rel.name).lower()}_"
-                    )
-                else:
-                    role_prefix = (
-                        f"{to_snake_case(parent_p.role).lower()}_"
-                        if parent_p.role
-                        else ""
-                    )
-
-                # child_p.cardinality_min == 0 means an instance of the child
-                # entity need not participate in this relationship at all
-                # (e.g. a PATIENT need not have INSURANCE) -- the synthesized
-                # FK is nullable in exactly that case, never inferred from
-                # naming. Unspecified (None) defaults to required (False),
-                # the existing safe default for a schema with no cardinality
-                # info at all.
-                fk_is_nullable = child_p.cardinality_min == 0
-                for pk_c in parent_t.primary_key:
-                    fk_col_name = f"{role_prefix}{pk_c}"
-                    parent_col = _resolve_pk_column(
-                        parent_t.columns,
-                        pk_c,
-                        table_name=parent_t.name,
-                        purpose="a foreign key",
-                    )
-                    if parent_col is None:
-                        continue
-                    if not any(c.name == fk_col_name for c in child_t.columns):
-                        child_t.columns.append(
-                            Column(
-                                name=fk_col_name,
-                                data_type=parent_col.data_type,
-                                is_nullable=fk_is_nullable,
-                                source_fact_ids=rel.source_fact_ids,
-                            )
-                        )
-
-                    relationships_to_add.append(
-                        ForeignKey(
-                            referencing_table=child_t.name,
-                            referencing_column=fk_col_name,
-                            referred_table=parent_t.name,
-                            source_fact_ids=rel.source_fact_ids,
-                        )
-                    )
-            else:
-                logger.warning(
-                    "  [Mapper] 1:N relationship '%s' between '%s' and '%s': "
-                    "could not resolve one or both entity tables; no FK was "
-                    "generated. Facts %s are unrepresented.",
-                    rel.name,
-                    child_p.entity,
-                    parent_p.entity,
-                    rel.source_fact_ids or "[]",
-                )
-
-        elif rel.kind == "1:1" and len(rel.participants) == 2:
-            p1, p2 = rel.participants
-            if p1.cardinality_min == 1 and p2.cardinality_min != 1:
-                child_p, parent_p = p1, p2
-            elif p2.cardinality_min == 1 and p1.cardinality_min != 1:
-                child_p, parent_p = p2, p1
-            else:
-                if p1.entity.lower() > p2.entity.lower():
-                    child_p, parent_p = p1, p2
-                else:
-                    child_p, parent_p = p2, p1
-
-            child_t = entity_tables.get(child_p.entity.lower())
-            parent_t = entity_tables.get(parent_p.entity.lower())
-
-            if child_t and parent_t:
-                fk_cols_added = []
-                # Same rule as the 1:N branch above -- cardinality_min == 0 on
-                # whichever participant ended up as child_p (including via the
-                # alphabetical tiebreak, when cardinality info didn't clearly
-                # pick a side) means that side's participation is optional, so
-                # its FK is nullable. Unspecified/None or 1 both default to
-                # required (False), matching the tiebreak's own "assume
-                # required unless told otherwise" stance.
-                fk_is_nullable = child_p.cardinality_min == 0
-                for pk_c in parent_t.primary_key:
-                    fk_col_name = pk_c
-                    if child_t.name == parent_t.name:
-                        role_prefix = (
-                            f"{to_snake_case(parent_p.role).lower()}_"
-                            if parent_p.role
-                            else f"{to_snake_case(rel.name).lower()}_"
-                        )
-                        fk_col_name = f"{role_prefix}{pk_c}"
-                    else:
-                        role_prefix = (
-                            f"{to_snake_case(parent_p.role).lower()}_"
-                            if parent_p.role
-                            else ""
-                        )
-                        fk_col_name = f"{role_prefix}{pk_c}"
-
-                    parent_col = _resolve_pk_column(
-                        parent_t.columns,
-                        pk_c,
-                        table_name=parent_t.name,
-                        purpose="a foreign key",
-                    )
-                    if parent_col is None:
-                        continue
-                    if not any(c.name == fk_col_name for c in child_t.columns):
-                        child_t.columns.append(
-                            Column(
-                                name=fk_col_name,
-                                data_type=parent_col.data_type,
-                                is_nullable=fk_is_nullable,
-                                source_fact_ids=rel.source_fact_ids,
-                            )
-                        )
-
-                    fk_cols_added.append(fk_col_name)
-                    relationships_to_add.append(
-                        ForeignKey(
-                            referencing_table=child_t.name,
-                            referencing_column=fk_col_name,
-                            referred_table=parent_t.name,
-                            source_fact_ids=rel.source_fact_ids,
-                        )
-                    )
-
-                if fk_cols_added:
-                    if child_t.unique is None:
-                        child_t.unique = []
-                    child_t.unique.append(CompositeUnique(columns=fk_cols_added))
-            else:
-                logger.warning(
-                    "  [Mapper] 1:1 relationship '%s' between '%s' and '%s': "
-                    "could not resolve one or both entity tables; no FK was "
-                    "generated. Facts %s are unrepresented.",
-                    rel.name,
-                    child_p.entity,
-                    parent_p.entity,
-                    rel.source_fact_ids or "[]",
-                )
-
-        else:
-            # The three branches above cover n-ary/M:N, binary 1:N and binary
-            # 1:1. Anything else fell off the end of the chain and vanished
-            # with no trace. Two ways to get here, both reachable:
-            #   - a `kind` outside the Literal, which the adjudicator could
-            #     previously write (now blocked at its source, but the mapper
-            #     should not depend on that being the only writer);
-            #   - a NON-n-ary relationship declared 1:N or 1:1 with a
-            #     participant count other than two, which no branch matches.
-            # Logged rather than repaired: guessing a cardinality would invent
-            # a foreign key the specification never stated.
-            logger.warning(
-                "  [Mapper] Relationship '%s' matched no mapping rule "
-                "(kind=%r, degree=%r, %d participant(s)); no foreign key was "
-                "generated for it. Facts %s are unrepresented.",
-                rel.name,
-                rel.kind,
-                rel.degree,
-                len(rel.participants),
-                rel.source_fact_ids or "[]",
-            )
+    _map_relationships(
+        cm, tables, relationships_to_add, entity_tables, used_names
+    )
 
     schema = Schema(tables=tables, relationships=relationships_to_add)
     schema.normalize()
@@ -888,192 +1113,7 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
     schema.align_fk_column_types()
 
     # A2: Enforce validation postcondition
-    errors = schema._validate()
-    if errors:
-        logger.warning(
-            "  [Mapper] Generated schema failed validation with %d error(s):",
-            len(errors),
-        )
-        for e in errors[:5]:
-            logger.warning("    - %s", e)
-
-        # Bounded deterministic repair loop
-        for _ in range(3):
-            if not schema._validate():
-                break
-
-            # Column dedup: if a table has duplicate column names, merge them
-            # by keeping the first occurrence and extending its source_fact_ids.
-            # This fixes the case where an MVA table's value column coincides
-            # with a parent PK column name.
-            for table in schema.tables:
-                seen_col_names: Set[str] = set()
-                deduped = []
-                for col in table.columns:
-                    if col.name not in seen_col_names:
-                        seen_col_names.add(col.name)
-                        deduped.append(col)
-                    else:
-                        existing = next(c for c in deduped if c.name == col.name)
-                        existing.source_fact_ids = list(
-                            set(existing.source_fact_ids) | set(col.source_fact_ids)
-                        )
-                if len(deduped) != len(table.columns):
-                    logger.info(
-                        "  [Mapper] Repair: deduplicated %d duplicate column(s) in table '%s'.",
-                        len(table.columns) - len(deduped),
-                        table.name,
-                    )
-                    table.columns = deduped
-
-            # FK-target tables are legitimate parent/lookup entities -- never drop them
-            # as "hollow" even if they only have a PK (dropping orphans referencing FKs).
-            referred = {r.referred_table for r in (schema.relationships or [])}
-
-            # Facts that some OTHER table also carries. A hollow table whose facts
-            # all appear elsewhere is genuinely redundant; one holding the only
-            # copy of a fact is not, and dropping it deletes that fact from the
-            # schema entirely.
-            #
-            # Measured on a live run: the extractor emitted a PACKAGE entity with
-            # no attributes and no identifier, from two facts -- one asserting the
-            # entity exists, one asserting a parent contains several of them --
-            # but did NOT emit the containing relationship, so nothing referenced
-            # PACKAGE and the FK-target exemption above did not apply. PACKAGE was
-            # dropped, and Stage 3 then could not extract the fanout that second
-            # fact states. A Stage 2 cleanup silently cost a Stage 3 constraint.
-            #
-            # The root cause is upstream (the relationship should have been
-            # extracted), but this is the deterministic backstop for the whole
-            # class: never let a cleanup step be the reason a fact vanishes.
-            facts_held_elsewhere: Dict[str, Set[int]] = {}
-            for t in schema.tables:
-                own = set(t.source_fact_ids or [])
-                for c in t.columns:
-                    own.update(c.source_fact_ids or [])
-                facts_held_elsewhere[t.name] = own
-            all_fact_ids: Set[int] = set()
-            for ids in facts_held_elsewhere.values():
-                all_fact_ids |= ids
-
-            seen_t = set()
-            unique_tables = []
-            for t in schema.tables:
-                # Every drop below is logged. These were bare `continue`s, so a
-                # table extracted from the spec could disappear between the
-                # conceptual model and the shipped schema with no trace, and
-                # the fact registry was never told -- leaving FK provenance and
-                # uncovered_fact_ids describing tables that no longer exist.
-                if not t.columns or not t.primary_key:
-                    logger.warning(
-                        "  [Mapper] Dropping table '%s': %s. Its source facts are "
-                        "no longer represented in the schema.",
-                        t.name,
-                        "no columns" if not t.columns else "no primary key",
-                    )
-                    continue
-
-                # Identify hollow tables (PK-only), exempting composite-PK junctions,
-                # FK-target tables, and FK-referencing tables (tables that hold a FK
-                # pointing to another table -- e.g. MVA tables -- serve a structural
-                # purpose even without descriptive columns).
-                fk_referencing = {
-                    r.referencing_table for r in (schema.relationships or [])
-                }
-                non_pk_cols = [c for c in t.columns if c.name not in t.pk_set]
-                if (
-                    not t.is_composite_pk
-                    and t.name not in referred
-                    and t.name not in fk_referencing
-                    and not non_pk_cols
-                    and len(schema.tables) > 1
-                ):
-                    own_facts = facts_held_elsewhere.get(t.name, set())
-                    elsewhere: Set[int] = set()
-                    for other_name, ids in facts_held_elsewhere.items():
-                        if other_name != t.name:
-                            elsewhere |= ids
-                    exclusive = own_facts - elsewhere
-                    if exclusive:
-                        # Deliberately still dropped, and deliberately noisy about
-                        # it. KEEPING it was tried and is worse: Schema._validate()
-                        # rejects a primary-key-only table outright, so this drop
-                        # is what SATISFIES validation -- retaining the table turns
-                        # a silent constraint loss into a hard mapper failure.
-                        # Fixing it here is the wrong layer; the real fix is
-                        # upstream, where the relationship that would have given
-                        # this table a foreign-key column should have been
-                        # extracted. Until then, say exactly which facts are being
-                        # deleted so the loss is diagnosable in one log line
-                        # instead of surfacing as a missing Stage 3 constraint.
-                        logger.warning(
-                            "  [Mapper] Dropping hollow table '%s' DESTROYS the only "
-                            "representation of fact(s) %s -- no other table carries "
-                            "them, and no constraint referencing this table can be "
-                            "extracted downstream. It has only a primary key because "
-                            "the extraction gave it neither attributes nor a "
-                            "relationship.",
-                            t.name,
-                            sorted(exclusive),
-                        )
-                    else:
-                        logger.warning(
-                            "  [Mapper] Dropping hollow table '%s': primary key only, "
-                            "no other columns, nothing references it, and its fact(s) "
-                            "%s are carried by other tables.",
-                            t.name,
-                            sorted(own_facts) or "[]",
-                        )
-                    continue
-
-                if t.name in seen_t:
-                    logger.warning(
-                        "  [Mapper] Dropping duplicate table '%s'; keeping the first "
-                        "occurrence. Columns unique to this copy are lost.",
-                        t.name,
-                    )
-                if t.name not in seen_t:
-                    seen_t.add(t.name)
-                    unique_tables.append(t)
-
-            schema.tables = unique_tables
-
-            valid_t_names = {t.name for t in schema.tables}
-            seen_r = set()
-            unique_rels = []
-            for r in schema.relationships or []:
-                r_key = (r.referencing_table, r.referencing_column, r.referred_table)
-                if (
-                    r_key not in seen_r
-                    and r.referencing_table in valid_t_names
-                    and r.referred_table in valid_t_names
-                ):
-                    ref_table = next(
-                        (t for t in schema.tables if t.name == r.referencing_table),
-                        None,
-                    )
-                    if ref_table and any(
-                        c.name == r.referencing_column for c in ref_table.columns
-                    ):
-                        seen_r.add(r_key)
-                        unique_rels.append(r)
-            schema.relationships = unique_rels
-            schema.normalize()
-            # Re-run FK type alignment inside the repair loop: dropping/deduping tables
-            # and columns above can leave a referencing column whose type no longer matches
-            # the referred PK. align is idempotent and must run every iteration so the
-            # type-mismatch postcondition can actually converge (it was previously only
-            # run once before the loop, so a surviving mismatch could never be repaired).
-            schema.align_fk_column_types()
-            # NOTE: table isolation is a non-blocking advisory (see Schema._style_warnings),
-            # NOT a structural error -- we deliberately do NOT prune isolated tables here,
-            # because that silently deleted legitimately extracted entities.
-
-        final_errors = schema._validate()
-        if final_errors:
-            raise ValueError(
-                f"RelationalMapper failed to repair schema. Remaining errors: {final_errors}"
-            )
+    _enforce_validation_postcondition(schema)
 
     # Non-blocking naming/quality advisories (plural names, isolated tables): surfaced, never fatal.
     for w in schema._style_warnings():
