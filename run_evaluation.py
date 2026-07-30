@@ -281,7 +281,9 @@ def _schema_metrics(
 
         # Name-blind: structural alignment for shape, provenance for capacity.
         # See docs/design/EVALUATION_METRICS.md.
-        out: Dict[str, Any] = dict(evaluate_structural(pred_schema, gt_schema).as_dict())
+        out: Dict[str, Any] = dict(
+            evaluate_structural(pred_schema, gt_schema).as_dict()
+        )
         capacity = evaluate_capacity(pred_schema, facts or [])
         out.update(capacity.as_dict())
         out["uncovered_fact_ids"] = capacity.uncovered_fact_ids
@@ -312,22 +314,76 @@ def _data_metrics(
     smoke_dfs: Dict[str, Any],
     gt_case: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Compute data-level metrics for one case."""
+    """Compute data-level metrics for one case: distribution fidelity and CSR.
+
+    The two answer different questions and neither substitutes for the other.
+    Distribution fidelity asks whether a column's VALUES are distributed as
+    specified; CSR asks whether the RELATIONSHIPS between columns hold -- a
+    discharge never before an admission, a discount never above a quarter of the
+    total. Data can match every marginal distribution perfectly and still violate
+    every business rule in the specification.
+    """
+    from src.evaluation.data_level.constraint_satisfaction import (
+        GeneratedData,
+        constraint_satisfaction_rate,
+    )
     from src.evaluation.data_level.data_eval import evaluate_data
 
     gt_dists = gt_case.get("ground_truth_distributions", {})
     if not gt_dists or not smoke_dfs:
-        return {
+        out: Dict[str, Any] = {
             "mre": 1.0,
             "nll": 0.0,
             "distance": 1.0,
             "n_evaluated": 0,
             "n_missing": 0,
         }
+    else:
+        try:
+            out = dict(evaluate_data(smoke_dfs, gt_dists))
+        except Exception as e:
+            out = {"error": str(e)}
+
+    gt_constraints = gt_case.get("ground_truth_constraints") or []
+    if not gt_constraints or not smoke_dfs:
+        # csr=None, NOT 1.0. A case with no data or no rules has no satisfaction
+        # rate, and reporting a perfect score for "nothing was checked" is the
+        # exact failure this project already hit once, when a parse error made
+        # every distribution score worst-case in silence.
+        out["csr"] = None
+        out["csr_n_evaluated"] = 0
+        return out
+
     try:
-        return evaluate_data(smoke_dfs, gt_dists)
+        report = constraint_satisfaction_rate(
+            gt_constraints, GeneratedData(_rows_by_table(smoke_dfs))
+        )
+        csr = report.as_dict()
+        out["csr"] = csr["csr"]
+        out["csr_n_evaluated"] = csr["n_evaluated"]
+        out["csr_n_vacuous"] = csr["n_vacuous"]
+        out["csr_n_unevaluable"] = csr["n_unevaluable"]
+        out["csr_applicable_rows"] = csr["applicable_rows"]
+        out["csr_violated_rows"] = csr["violated_rows"]
     except Exception as e:
-        return {"error": str(e)}
+        out["csr_error"] = str(e)
+    return out
+
+
+def _rows_by_table(smoke_dfs: Dict[str, Any]) -> Dict[str, list]:
+    """Normalise whatever the generator handed back into row mappings.
+
+    Accepts a DataFrame per table (what the smoke-run path produces) or a plain
+    list of row dicts, so CSR does not force a pandas dependency on callers that
+    do not already have one.
+    """
+    out: Dict[str, list] = {}
+    for name, frame in (smoke_dfs or {}).items():
+        if hasattr(frame, "to_dict"):
+            out[name] = frame.to_dict(orient="records")
+        elif isinstance(frame, list):
+            out[name] = frame
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +404,7 @@ def compute_aggregate_metrics(case_results: List[Dict[str, Any]]) -> Dict[str, A
     agg: Dict[str, Any] = {
         "n_cases": len(case_results),
         "schema": {
-"structural_score": _aggregate(schema_scores, "structural_score"),
+            "structural_score": _aggregate(schema_scores, "structural_score"),
             "fk_topology_f1": _aggregate(schema_scores, "fk_topology_f1"),
             "table_structural_recall": _aggregate(
                 schema_scores, "table_structural_recall"
@@ -386,7 +442,9 @@ def _print_aggregate(agg: Dict[str, Any], label: str = "ScribbleDB") -> None:
     print("  Schema")
     print(f"    IC F1           : {s['ic_f1']:.3f}")
     print(f"      recall        : {s['ic_recall']:.3f}   (facts the schema can hold)")
-    print(f"      precision     : {s['ic_precision']:.3f}   (structure a fact supports)")
+    print(
+        f"      precision     : {s['ic_precision']:.3f}   (structure a fact supports)"
+    )
     print(f"    Structural      : {s['structural_score']:.3f}")
     print(f"      FK topology F1: {s['fk_topology_f1']:.3f}")
     print(f"      table recall  : {s['table_structural_recall']:.3f}")
@@ -405,8 +463,10 @@ def _print_aggregate(agg: Dict[str, Any], label: str = "ScribbleDB") -> None:
     print("  Data")
     print(f"    MRE             : {d['mre']:.3f}")
     print(f"    NLL             : {d['nll']:.3f}")
-    print(f"    Distance        : {d['distance']:.3f}"
-          "   (KS for continuous, TVD for categorical)")
+    print(
+        f"    Distance        : {d['distance']:.3f}"
+        "   (KS for continuous, TVD for categorical)"
+    )
     print(f"  Smoke pass rate   : {agg['smoke_pass_rate']:.2%}")
     print(f"{'=' * 62}\n")
 
@@ -528,7 +588,7 @@ async def evaluate(args: argparse.Namespace) -> None:
                     "mre": 1.0,
                     "nll": 0.0,
                     "distance": 1.0,
-                            "n_evaluated": 0,
+                    "n_evaluated": 0,
                     "n_missing": 0,
                 }
 
