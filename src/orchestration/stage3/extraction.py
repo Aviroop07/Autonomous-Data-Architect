@@ -161,6 +161,10 @@ class ShardExtractionResult:
     lost_reason: Optional[LostShardReason] = None
     detail: str = ""
     withheld_constraint_count: int = 0
+    # The deterministic checker's unresolved complaints -- WHY the shard was
+    # withheld. Defaulted to an empty tuple rather than a list so the dataclass
+    # stays frozen-hashable and no caller can mutate a shared default.
+    errors: tuple[str, ...] = ()
 
 
 def _extract_generator_output(
@@ -205,13 +209,23 @@ def _extract_generator_output(
         )
     if result.det_errors_exhausted:
         withheld = _count_constraints(output)
+        # Carry the checker's own complaints out with the result. The loop
+        # archives them internally and nothing ever surfaced them, so a live run
+        # that produced ZERO constraints reported only that a shard was withheld
+        # -- with no way to learn why short of adding logging and re-running.
+        checker_output = result.node_outputs.get("det_checker")
+        checker_errors: tuple[str, ...] = tuple(
+            str(e) for e in (getattr(checker_output, "errors", None) or [])
+        )
         logger.error(
             "[Stage 3] Shard extraction exhausted its retry budget with "
             "UNRESOLVED deterministic errors after %d iteration(s); "
             "WITHHOLDING its %d constraint(s) rather than shipping constraints "
-            "that never passed canonicalization or column resolution.",
+            "that never passed canonicalization or column resolution. "
+            "Unresolved: %s",
             result.iteration_count,
             withheld,
+            checker_errors or "(the checker reported none on its final pass)",
         )
         return ShardExtractionResult(
             output=UnifiedExtractionOutput(),
@@ -222,6 +236,7 @@ def _extract_generator_output(
                 f"{result.iteration_count} iteration(s)."
             ),
             withheld_constraint_count=withheld,
+            errors=checker_errors,
         )
     return ShardExtractionResult(output=output, tokens=result.total_tokens)
 

@@ -257,6 +257,7 @@ async def orchestrate(
                     detail=extraction.detail,
                     fact_references=list(ss.fact_ids),
                     withheld_constraint_count=extraction.withheld_constraint_count,
+                    errors=list(extraction.errors),
                 )
             )
             # Also surfaced in `unsupported`, whose contract is "not conflicts,
@@ -264,10 +265,15 @@ async def orchestrate(
             # shard is. `lost_shards` carries the structure for Stage 4;
             # this line means a consumer reading only the human-facing list
             # still learns the run was incomplete.
+            why = (
+                f" Unresolved: {'; '.join(extraction.errors)}"
+                if extraction.errors
+                else ""
+            )
             lost_shard_notes.append(
                 f"shard {ss.index} contributed no constraints "
-                f"({extraction.lost_reason.value}): {extraction.detail} "
-                f"Facts left unrepresented: {sorted(ss.fact_ids)}."
+                f"({extraction.lost_reason.value}): {extraction.detail}"
+                f"{why} Facts left unrepresented: {sorted(ss.fact_ids)}."
             )
 
     logger.info(

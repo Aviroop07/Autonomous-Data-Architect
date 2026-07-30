@@ -163,6 +163,14 @@ class LostShard(BaseModel):
         description="How many constraints were quarantined rather than shipped. "
         "0 for EXTRACTION_FAILED, since nothing was ever produced.",
     )
+    errors: list[str] = Field(
+        default_factory=list,
+        description="The deterministic checker's own unresolved complaints -- "
+        "WHY the shard was withheld, not merely that it was. Without these a "
+        "run that yields zero constraints is undiagnosable: the loop archives "
+        "these errors internally and they were never surfaced anywhere, so the "
+        "only way to learn the cause was to add logging and re-run.",
+    )
 
 
 class Stage3AnalysisReport(BaseModel):
