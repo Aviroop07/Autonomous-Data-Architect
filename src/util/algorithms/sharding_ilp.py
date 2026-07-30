@@ -7,6 +7,12 @@ import concurrent.futures
 import logging
 import time
 
+from src.util.core.token_budget import (
+    CHARS_PER_TOKEN,
+    DEFAULT_CONTEXT_SAFETY_MARGIN,
+    DEFAULT_PROMPT_OVERHEAD_TOKENS,
+)
+
 logger = logging.getLogger(__name__)
 
 # Per-solve wall-clock cap handed to CP-SAT. Measured on a real 12-table /
@@ -543,7 +549,7 @@ def _estimate_prompt_tokens_per_table(columns_by_table: Dict[str, List[str]]) ->
     avg_cols = sum(len(cols) for cols in columns_by_table.values()) / len(
         columns_by_table
     )
-    return (10 + avg_cols * 35) / 4.0
+    return (10 + avg_cols * 35) / CHARS_PER_TOKEN
 
 
 def _derive_max_shards(
@@ -603,8 +609,8 @@ def shard_schema_auto(
     provider: str,
     model: str,
     api_key: str = "",
-    fixed_prompt_overhead_tokens: int = 6000,
-    context_window_safety_margin: float = 0.6,
+    fixed_prompt_overhead_tokens: int = DEFAULT_PROMPT_OVERHEAD_TOKENS,
+    context_window_safety_margin: float = DEFAULT_CONTEXT_SAFETY_MARGIN,
 ):
     """The one entry point live pipeline code should call -- no
     max_shards, max_tables_per_shard, or weight parameter is ever exposed

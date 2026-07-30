@@ -26,6 +26,7 @@ from src.pipeline.stage1.models.rephrased_nl import (
 )
 from src.util.config.ablation import AblationConfig
 from src.util.core.agent_provider import AgentProvider
+from src.util.core.token_budget import CHARS_PER_TOKEN as _CHARS_PER_TOKEN
 from src.util.observability.llm_trace import (
     LLMTraceCollector,
     activate_trace_collector,
@@ -48,10 +49,6 @@ NL_MAX_CHARS_FALLBACK = 50_000
 # system prompt, the tool schema, and the structured output, all of which are
 # larger than the input for this stage.
 _NL_WINDOW_SHARE = 0.25
-
-# Rough English chars-per-token. Only used to turn a token budget into a
-# character budget for a guard-rail check, so precision does not matter.
-_CHARS_PER_TOKEN = 4
 
 
 def _max_nl_chars(model: Optional[str]) -> int:

@@ -48,18 +48,20 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from src.pipeline.stage1.models.rephrased_nl import AtomicFact
+from src.util.core.token_budget import (
+    CHARS_PER_TOKEN as _CHARS_PER_TOKEN,
+)
+from src.util.core.token_budget import (
+    DEFAULT_CONTEXT_SAFETY_MARGIN as _DEFAULT_SAFETY_MARGIN,
+)
+from src.util.core.token_budget import (
+    DEFAULT_PROMPT_OVERHEAD_TOKENS as _DEFAULT_PROMPT_OVERHEAD_TOKENS,
+)
 from src.pipeline.stage2.models.chunk import ChunkedPlan
 
 logger = logging.getLogger(__name__)
 
-# Chars per token. The same crude divisor sharding_ilp.py uses for its own
-# budget arithmetic -- deliberately consistent with it rather than independently
-# "better", so the two budget calculations cannot silently disagree.
-_CHARS_PER_TOKEN = 4.0
 
-# What the ER-extraction prompt costs before any fact is added: the system
-# prompt, the schema-so-far, and the output-format block.
-_DEFAULT_PROMPT_OVERHEAD_TOKENS = 6000
 
 # How much fact material ONE er_extraction call can faithfully model, which is a
 # completely different quantity from what fits in a prompt and is the one that
@@ -169,7 +171,6 @@ def _resolve_default_capacity() -> int:
 _DEFAULT_EXTRACTION_CAPACITY_TOKENS = _resolve_default_capacity()
 
 # Leaves room for the model's own OUTPUT, which shares the context window.
-_DEFAULT_SAFETY_MARGIN = 0.6
 
 
 def estimate_fact_tokens(fact: AtomicFact) -> int:
