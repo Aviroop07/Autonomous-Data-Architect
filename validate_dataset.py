@@ -663,7 +663,13 @@ def _check_fds(
                     f.error(where, f"{label}.{side} names unknown column '{ref}'")
 
 
-_MOMENT_AGGREGATES = {"avg", "sum", "count", "min", "max"}
+# min/max are deliberately EXCLUDED. Prose states bounds ("slope is 55 to 155",
+# "never more than 3 million"), which constrain every row; they do not say what
+# the extreme of the generated column will BE, and data whose smallest value is
+# 100 satisfies "55 to 155" while contradicting a minimum of 55. An authoring
+# pass that allowed them produced 380 such entries, 307 of which merely restated
+# a `range` constraint the benchmark already carried.
+_MOMENT_AGGREGATES = {"avg", "sum", "count"}
 
 
 def _check_moments(
@@ -730,6 +736,66 @@ def _check_moments(
                     f"{label}.evidence is not a verbatim phrase of nl_description: "
                     f"{evidence[:60]!r}",
                 )
+            else:
+                _check_moment_reading(where, label, m, evidence, f)
+
+    # A mix stated over one column ("80% attended, 13% cancelled, 8% DNA") is a
+    # categorical distribution, not a mean. Verbatim evidence cannot catch it,
+    # because each fragment really is in the text -- only the disagreement is
+    # visible, and only across moments rather than within one.
+    by_key: Dict[Any, set] = {}
+    for m in moments:
+        if not isinstance(m, dict):
+            continue
+        by_key.setdefault(
+            (m.get("table"), m.get("column"), m.get("aggregate")), set()
+        ).add(m.get("value"))
+    for (table, column, agg), values in by_key.items():
+        if len(values) > 1:
+            f.error(
+                where,
+                f"ground_truth_moments assert {agg}({table}.{column}) at "
+                f"{sorted(values, key=str)} -- a categorical mix, not a moment",
+            )
+
+
+def _check_moment_reading(
+    where: str, label: str, m: Dict[str, Any], evidence: str, f: Findings
+) -> None:
+    """Reject readings the verbatim gate cannot see.
+
+    The evidence check proves the QUOTE is real. It cannot prove the NUMBER was
+    read correctly out of it, and that is where every surviving error in the
+    first authoring pass lived -- a log-space parameter taken as an average, a
+    percentage taken as a row count, a fanout taken as the mean of an id.
+    """
+    text = evidence.lower()
+
+    # exp-space: "log-normal, log-mean 1.1" has mean exp(1.1 + variance/2).
+    if ("log-mean" in text or "log mean" in text) or (
+        "log space" in text and "mean" in text
+    ):
+        f.error(
+            where,
+            f"{label} reads a log-space parameter as an average: {evidence[:60]!r}",
+        )
+
+    if m.get("aggregate") == "count" and ("per cent" in text or "percent" in text):
+        digits = str(m.get("value")).rstrip("0").rstrip(".")
+        if digits not in text.replace(",", ""):
+            f.error(
+                where,
+                f"{label} records a percentage as a row count: {evidence[:60]!r}",
+            )
+
+    column = m.get("column")
+    if m.get("aggregate") == "avg" and isinstance(column, str):
+        if column.lower().endswith("_id"):
+            f.error(
+                where,
+                f"{label} averages an identifier -- that is a fanout between "
+                f"tables, not a moment on '{m.get('table')}.{column}'",
+            )
 
 
 def coverage(cases: List[Dict[str, Any]]) -> str:
