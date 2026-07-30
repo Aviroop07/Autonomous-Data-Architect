@@ -339,11 +339,15 @@ async def _orchestrate_impl(
     else:
         from src.pipeline.stage1.middleware.budget_chunker import BudgetChunker
 
-        # An explicit budget is an ABLATION knob, not tuning: the live-queried
-        # budget exceeds the fact volume of even the most complex measured
-        # specification by ~317x, so a faithful run always takes the
-        # single-chunk path and Stage 2's shard-and-merge is never entered.
-        # AblationConfig.forced_multi_chunk() exists to reach it.
+        # An explicit budget remains an ABLATION knob, not tuning -- but the
+        # claim that used to stand here, that a faithful run "always takes the
+        # single-chunk path so Stage 2's shard-and-merge is never entered", is no
+        # longer true and was the bug rather than a property of the domain. The
+        # context-window budget does exceed real fact volume by ~200x, which is
+        # exactly why chunking by it never split anything; BudgetChunker now also
+        # applies an extraction-CAPACITY ceiling (how much one ER call can model,
+        # a far smaller number), so multi-chunk is the normal path for a
+        # large-schema spec and forced_multi_chunk() is no longer the only way in.
         budget_override = (
             ablation_config.chunk_budget_tokens if ablation_config is not None else None
         )
@@ -354,7 +358,10 @@ async def _orchestrate_impl(
                 budget_override,
             )
         else:
-            logger.info("[Stage 1] Chunking facts to fit the model's context budget...")
+            logger.info(
+                "[Stage 1] Chunking facts to the smaller of the model's context "
+                "budget and its per-call extraction capacity..."
+            )
         plan = BudgetChunker(budget_tokens=budget_override, model=model).fit(
             tagged_facts
         )

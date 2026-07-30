@@ -7,7 +7,6 @@ so searching a lowered copy produces corrupted indices.
 
 from __future__ import annotations
 
-import re
 
 from src.pipeline.stage1.agents.fact_extractor.agent import FactExtractorLoopAgent
 from src.pipeline.stage1.models.rephrased_nl import RephrasedOutput

@@ -196,12 +196,10 @@ def test_update_pk_to_nonexistent_column_is_rejected():
         table_name="T", column_name=["does_not_exist"], reason="test"
     )
     report = CritiqueReport(agent_name="test", patches=[bad_patch])  # type: ignore[arg-type]
-    validation_errors = report._validate(schema)
-    # UpdatePKPatch has no _validate override, so no pre-apply validation.
-    # Post-apply normalize+validate catches it.
-    import copy
-
-    pre = copy.deepcopy(schema)
+    # UpdatePKPatch has no _validate override, so nothing catches this BEFORE
+    # apply -- asserted rather than merely commented, since that absence is the
+    # whole reason the post-apply check below has to exist.
+    assert report._validate(schema) == []
     apply_patches(schema, [bad_patch])
     schema.normalize()
     post_errors = schema._validate()

@@ -16,7 +16,7 @@ provides the history summary; infrastructure overwrites unresolved_issues after.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 from src.util.orchestration.loop_types import (
     AgentRoleConfig,

@@ -178,7 +178,6 @@ def test_from_raw_preserves_every_rawfact_field():
     """Iterates RawFact.model_fields GENERICALLY so a newly added field is
     covered automatically. The bug that motivated this silently dropped
     addresses_gap and evidence_refs at the Stage 1 output boundary."""
-    from pydantic import Field as PydanticField
 
     raw = RawFact(
         id=42,

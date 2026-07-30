@@ -7,10 +7,12 @@ artifacts, the most complex saved run produced 88 facts totalling 1,963
 fact-tokens against a budget of roughly 623,000 -- a factor of ~317. A genuine
 second chunk would require a specification yielding some 28,000 facts.
 
-So every faithful run takes the single-chunk path, and the merge machinery is
-never entered on a real run. `AblationConfig.forced_multi_chunk()` is the only
-way to exercise it; these tests pin that the knob reaches the chunker and that
-a run without it is unchanged.
+That factor is why chunking by the context window alone never split anything --
+a defect, not a property of the inputs. BudgetChunker now also applies a
+per-call extraction-capacity ceiling, so a large-schema spec shards on the
+faithful path too and this knob is no longer the only way in. These tests still
+pin what they always did: that the ablation knob reaches the chunker, and that
+its stated budget is honoured rather than being clamped by the capacity default.
 """
 
 from __future__ import annotations

@@ -21,10 +21,18 @@ tuning problem:
     entity segments drawn from ONE domain document sit in a narrow similarity
     band (0.53-0.84 measured) -- there is no structure at that signal to find.
 
-Crucially, one chunk was the RIGHT answer for the specs measured. This module
-reaches the same answer in microseconds, for a reason that can be stated in one
-line, and it degrades correctly in both directions: 1 fact needs no packing,
-and a spec ten times the context window gets ceil(tokens/budget) chunks.
+One chunk was the right answer for the SMALL specs originally measured (935-2318
+chars, 3-13 tables), and this module reaches it in microseconds for a reason that
+can be stated in one line.
+
+It was the WRONG answer at scale, and that was a defect in the criterion rather
+than in the sampler it replaced. "Does this fit in one prompt" is not the same
+question as "can one call model this much", and on a 41-table spec the two differ
+by 208x: a single chunk produced 9 tables and left 86 of 121 facts unrepresented,
+while chunking the same facts by extraction capacity produced 41. So this module
+now applies BOTH ceilings and the smaller binds -- see
+_DEFAULT_EXTRACTION_CAPACITY_TOKENS for the sweep, and note that the capacity one
+is MODEL-SPECIFIC (docs/design/MODEL_DEPENDENT_CONSTANTS.md).
 
 bayesian_chunker.py is retained and still selectable, since it is the paper's
 original method: set AblationConfig.use_bayesian_chunker (or use

@@ -55,12 +55,17 @@ class AblationConfig(BaseModel):
     def forced_multi_chunk(cls, chunk_budget_tokens: int) -> "AblationConfig":
         """Shrink the per-chunk budget until extraction genuinely shards.
 
-        Stage 2's shard-and-merge cannot otherwise run: the real context budget
-        exceeds the fact volume of even the most complex measured specification
-        by ~317x, so every faithful run takes the single-chunk path and the
-        parallel extract-then-merge machinery is never entered. This is the only
-        way to exercise it, which makes any result obtained under it an ABLATION
-        measurement and not a headline one -- the budget is artificial.
+        No longer the ONLY way to reach shard-and-merge, and the claim that used
+        to stand here -- that the context budget exceeds real fact volume by
+        ~317x so every faithful run is single-chunk -- described a defect rather
+        than a property of the inputs. BudgetChunker now also bounds a chunk by
+        per-call extraction CAPACITY, so a large-schema spec shards on the
+        faithful path too.
+
+        This knob remains useful for two things: setting a budget the capacity
+        default would not choose (calibration sweeps), and reproducing the old
+        single-chunk behaviour for comparison. A budget set here is still
+        ARTIFICIAL, so a result obtained under it is an ablation measurement.
 
         For reference, on the 88-fact / 1,963-token complex run: 981 tokens
         yields 3 chunks, 490 yields 5, and 245 yields 9.
