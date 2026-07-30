@@ -65,7 +65,52 @@ def _compute_uncovered_facts(
             f"  [Stage 2] WARNING: {len(uncovered)} required facts not represented "
             f"in final schema: {uncovered}"
         )
+        _warn_if_extraction_saturated(len(uncovered), len(required_ids))
     return uncovered
+
+
+# Above this share of required facts going unrepresented, the likeliest cause is
+# not a modelling slip but the extraction call being handed more domain than it
+# can hold. Grounded in the chunk-budget sweep rather than picked: on one fixed
+# fact set, a single over-large chunk left 86 of 121 facts unrepresented (71%),
+# while every adequately-chunked run left 3-20 (2-17%). A third cleanly separates
+# those, and this is a diagnostic log rather than a metric, so being approximately
+# right is the whole requirement.
+_SATURATION_UNCOVERED_SHARE = 1 / 3
+
+
+def _warn_if_extraction_saturated(n_uncovered: int, n_required: int) -> None:
+    """Flag the model-INDEPENDENT symptom of a mis-tuned chunk budget.
+
+    The per-call extraction capacity that drives chunking
+    (budget_chunker._DEFAULT_EXTRACTION_CAPACITY_TOKENS) was measured on one
+    model, and capacity is a property of the model, so that default is wrong by
+    some margin for any other model -- and when it is too large the failure is
+    SILENT: the extractor simply models a fraction of the domain and every stage
+    downstream succeeds on the fragment.
+
+    This is the observable consequence, and it needs no knowledge of which model
+    is in use: a large share of required facts finding no home in the schema.
+    Saying so here means a model swap that invalidates the calibration announces
+    itself in the log instead of being discovered by reading a small schema and
+    wondering why.
+    """
+    if n_required <= 0:
+        return
+    share = n_uncovered / n_required
+    if share < _SATURATION_UNCOVERED_SHARE:
+        return
+    logger.warning(
+        "  [Stage 2] %d of %d required facts (%.0f%%) are unrepresented. At this "
+        "share the usual cause is the ER extraction being given more domain than "
+        "one call can model, which happens when the chunk budget is too large for "
+        "the model in use. The built-in extraction capacity was calibrated on a "
+        "different model than yours may be; lower it with EXTRACTION_CAPACITY_TOKENS "
+        "(smaller value -> more, smaller chunks) and see whether coverage recovers.",
+        n_uncovered,
+        n_required,
+        100 * share,
+    )
 
 
 def apply_adjudicator_patches(cm: ConceptualModel, patches: List) -> ConceptualModel:

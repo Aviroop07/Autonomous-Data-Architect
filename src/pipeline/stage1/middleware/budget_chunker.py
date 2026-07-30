@@ -35,6 +35,7 @@ longer the default path.
 from __future__ import annotations
 
 import logging
+import os
 from collections import defaultdict
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -51,6 +52,113 @@ _CHARS_PER_TOKEN = 4.0
 # What the ER-extraction prompt costs before any fact is added: the system
 # prompt, the schema-so-far, and the output-format block.
 _DEFAULT_PROMPT_OVERHEAD_TOKENS = 6000
+
+# How much fact material ONE er_extraction call can faithfully model, which is a
+# completely different quantity from what fits in a prompt and is the one that
+# actually binds.
+#
+# MEASURED BY SWEEP. Stage 1 held fixed (the same 121 facts from a 41-table
+# cycling-club spec), varying ONLY this number, so chunking is the sole variable.
+# Ground truth is 41 tables; one run per point:
+#
+#   budget  chunks  facts/chunk  tables  unrepresented  Stage 2 tokens
+#     2992       1          121       9       86 / 121      (baseline)
+#     1800       2       73, 48      41        7 / 121        252,862
+#     1100       3   46, 40, 35      32       20 / 121        283,589
+#      900       4   39,34,31,17     43        3 / 121        369,921
+#      700       5   31,27,26,25,12  41        3 / 121        447,335
+#
+# ONE effect here is large and unambiguous: putting all 121 facts in a single
+# call collapses the schema to 9 tables, and ANY split recovers 32-43. Where
+# recall looks complete, it is: every ground-truth table not matched by exact
+# name is a pure synonym of a predicted one (AUDIT_LOG/AUDIT_ENTRY,
+# COMPONENT/BIKE_COMPONENT, PLANNED_WORKOUT/WORKOUT, KIT_ORDER/ORDER, ...). So
+# the er_extractor was never weak -- it was handed a 41-entity domain in one
+# call, and one call saturates near 9-16 entities however much material it gets.
+#
+# The sweep does NOT identify an optimum, and it would be wrong to read one off
+# this table. The results are NON-MONOTONIC -- 2 chunks beat 3 on both coverage
+# and cost -- which at one run per point means the differences between 2, 3, 4
+# and 5 chunks are not separable from run-to-run variance. Independent evidence
+# that the variance is large: the SAME spec yielded 15 facts on one Stage 1 run
+# and 121 on another.
+#
+# So 900 is a DEFENSIBLE CHOICE, not a calibrated optimum: it gave the best
+# measured coverage (3 unrepresented) and sits mid-range, comfortably clear of
+# the one-call failure. Cost is the live tradeoff -- 2 chunks did nearly as well
+# for 32% fewer tokens -- and settling that properly needs repeats per point,
+# which has not been done. The failure mode of setting this too HIGH is silent
+# under-modelling that raises no error whatsoever, so it should move on measured
+# evidence only.
+#
+# THIS NUMBER IS MODEL-SPECIFIC, and that is the important caveat. It was
+# measured on gemini-2.5-flash on 2026-07-30. Extraction capacity is a property
+# of the MODEL's ability to hold a domain in one structured answer, so a
+# different model -- a larger one, a reasoning one, a quantized self-hosted one
+# -- will have a different ceiling, and this default will be wrong for it in
+# whichever direction.
+#
+# Deliberately NOT expressed as a fraction of the context window, tempting as
+# that is for auto-scaling: capacity is about modelling ability, not window
+# size. The measurement above is the counter-example -- gemini-2.5-flash has a
+# ~1M-token window and still saturates near 9-16 entities, so window size
+# predicts capacity badly and scaling off it would silently reintroduce the exact
+# bug this constant fixes.
+#
+# Three things keep the model-dependence honest rather than hidden:
+#   1. it is overridable per deployment via EXTRACTION_CAPACITY_TOKENS;
+#   2. the resolved value and its origin are logged on every run;
+#   3. Stage 2 warns when the unrepresented-fact fraction is high, which is the
+#      model-INDEPENDENT symptom of this value being too large for the model in
+#      use (see _compute_uncovered_facts).
+# The principled long-term fix is to stop hardcoding it at all and re-chunk
+# adaptively on that coverage signal, which needs no per-model calibration.
+_MEASURED_ON = "gemini-2.5-flash, 2026-07-30"
+_FALLBACK_EXTRACTION_CAPACITY_TOKENS = 900
+_CAPACITY_ENV_VAR = "EXTRACTION_CAPACITY_TOKENS"
+
+
+def _resolve_default_capacity() -> int:
+    """The configured per-call extraction capacity, env override winning.
+
+    Read once at import: a run does not change its own environment, and this
+    keeps the value a plain int so callers can still pass an explicit one.
+    """
+    raw = os.getenv(_CAPACITY_ENV_VAR)
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            logger.warning(
+                "[BudgetChunker] %s=%r is not an integer; using the measured "
+                "default of %d tokens instead.",
+                _CAPACITY_ENV_VAR,
+                raw,
+                _FALLBACK_EXTRACTION_CAPACITY_TOKENS,
+            )
+            return _FALLBACK_EXTRACTION_CAPACITY_TOKENS
+        if value <= 0:
+            logger.info(
+                "[BudgetChunker] %s=%d disables the extraction-capacity ceiling; "
+                "chunking falls back to the context window alone, which is the "
+                "pre-2026-07-30 behaviour and never splits in practice.",
+                _CAPACITY_ENV_VAR,
+                value,
+            )
+            return value
+        logger.info(
+            "[BudgetChunker] extraction capacity overridden to %d tokens via %s "
+            "(built-in default %d was measured on %s).",
+            value,
+            _CAPACITY_ENV_VAR,
+            _FALLBACK_EXTRACTION_CAPACITY_TOKENS,
+            _MEASURED_ON,
+        )
+        return value
+    return _FALLBACK_EXTRACTION_CAPACITY_TOKENS
+
+
+_DEFAULT_EXTRACTION_CAPACITY_TOKENS = _resolve_default_capacity()
 
 # Leaves room for the model's own OUTPUT, which shares the context window.
 _DEFAULT_SAFETY_MARGIN = 0.6
@@ -133,6 +241,7 @@ class BudgetChunker:
         api_key: str = "",
         prompt_overhead_tokens: int = _DEFAULT_PROMPT_OVERHEAD_TOKENS,
         safety_margin: float = _DEFAULT_SAFETY_MARGIN,
+        extraction_capacity_tokens: Optional[int] = _DEFAULT_EXTRACTION_CAPACITY_TOKENS,
     ) -> None:
         self._explicit_budget = budget_tokens
         self._provider = provider
@@ -140,13 +249,34 @@ class BudgetChunker:
         self._api_key = api_key
         self._overhead = prompt_overhead_tokens
         self._margin = safety_margin
+        self._capacity = extraction_capacity_tokens
 
     def _resolve_budget(self) -> Optional[int]:
-        """Tokens available for FACTS in one prompt, or None if it cannot be
-        determined -- in which case the caller falls back to a single chunk,
-        which is what the pipeline did before this module existed."""
+        """Tokens available for FACTS in one prompt.
+
+        Two independent ceilings, and the SMALLER one binds:
+
+          context window   -- can this prompt be sent at all?
+          extraction capacity -- can one call model this much at once?
+
+        Only the first existed before, and it is the wrong one to chunk by: it
+        was measured at 623,145 tokens against a 2,992-token input, so it never
+        split anything and the whole shard-and-merge path was unreachable. See
+        _DEFAULT_EXTRACTION_CAPACITY_TOKENS for the measurement that motivates
+        the second.
+
+        An explicit `budget_tokens` still wins outright and is NOT capped: it is
+        how ablations and calibration sweeps address this module directly, and
+        silently clamping a caller's stated budget would make those experiments
+        measure something other than what they asked for.
+
+        Returns None only when NEITHER ceiling is knowable, in which case the
+        caller falls back to a single chunk as it did before this module existed.
+        """
         if self._explicit_budget is not None:
             return self._explicit_budget if self._explicit_budget > 0 else None
+
+        context_budget: Optional[int] = None
         try:
             from src.util.core.agent import _detect_provider
             from src.util.core.context_window import get_context_window
@@ -157,15 +287,31 @@ class BudgetChunker:
                 self._model or default_model,
                 api_key=self._api_key or api_key,
             )
+            candidate = int(window * self._margin) - self._overhead
+            context_budget = candidate if candidate > 0 else None
         except Exception as exc:  # network, missing key, unknown model
+            # No longer fatal: the capacity ceiling below does not need the
+            # network, so an unknown context window degrades to "chunk by
+            # capacity" rather than to one unbounded chunk.
             logger.warning(
                 "[BudgetChunker] could not determine the context window (%s); "
-                "falling back to a single chunk.",
+                "falling back to the extraction-capacity ceiling alone.",
                 exc,
             )
+
+        capacity = self._capacity if self._capacity and self._capacity > 0 else None
+        candidates = [b for b in (context_budget, capacity) if b is not None]
+        if not candidates:
             return None
-        budget = int(window * self._margin) - self._overhead
-        return budget if budget > 0 else None
+        budget = min(candidates)
+        if capacity is not None and budget == capacity and context_budget is not None:
+            logger.debug(
+                "[BudgetChunker] extraction capacity (%d tokens) binds, well "
+                "inside the context budget (%d).",
+                capacity,
+                context_budget,
+            )
+        return budget
 
     def fit(self, facts: List[AtomicFact]) -> ChunkedPlan:
         if len(facts) <= 1:

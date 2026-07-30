@@ -109,9 +109,7 @@ async def get_response(
     logger.debug(f"[invoke] Query preview (first 300 chars):\n{query[:300]}...")
 
     input_messages: list[BaseMessage] = [HumanMessage(content=query)]
-    reply = await _ainvoke_with_backoff(
-        agent, AgentRequest(messages=input_messages)
-    )
+    reply = await _ainvoke_with_backoff(agent, AgentRequest(messages=input_messages))
 
     # Extract structured response or fallback to last message content
     parsed: Union[BaseModel, str, None]
@@ -140,7 +138,10 @@ async def get_response(
 
     # Extract token usage from AI messages' metadata
     total_tokens = _extract_token_usage(reply.messages)
-    logger.info(f"[invoke] Response received from '{agent_name}'. Tokens used: {total_tokens}")
+    logger.info(
+        f"[invoke] Response received from '{agent_name}'. Tokens used: {total_tokens}"
+    )
+    _warn_if_truncated(reply.messages, agent_name)
     logger.debug(f"[invoke] Parsed structure: {type(parsed).__name__}")
 
     collector = get_active_trace_collector()
@@ -160,6 +161,56 @@ async def get_response(
 
     assert parsed is not None
     return parsed, total_tokens
+
+
+# finish_reason values that mean "the model ran out of room", across the
+# providers this project targets. OpenAI-compatible endpoints (which is every
+# provider here, Gemini and DeepSeek included) report "length"; Gemini's native
+# vocabulary is "MAX_TOKENS". Compared case-insensitively so a new provider
+# spelling it differently in case still matches.
+_TRUNCATION_FINISH_REASONS = frozenset({"length", "max_tokens", "model_length"})
+
+
+def _finish_reason(msg) -> str:
+    if isinstance(msg, BaseMessage):
+        meta = getattr(msg, "response_metadata", {}) or {}
+    elif isinstance(msg, dict):
+        meta = msg.get("response_metadata") or {}
+    else:
+        return ""
+    return str(meta.get("finish_reason") or "")
+
+
+def _warn_if_truncated(messages: list, agent_name: str) -> None:
+    """Warn when a reply was cut off for length rather than completed.
+
+    Nothing in this project caps output tokens, so truncation is entirely at the
+    provider's discretion and was previously INVISIBLE: finish_reason was read
+    nowhere. That silence is expensive here specifically because of what happens
+    next -- a truncated structured response fails to parse, the retry loop feeds
+    the failure back as a validation error, and the measured response to
+    validation errors is for the model to emit LESS (Stage 1's extractor shed
+    7,631 -> 4,653 output tokens as its error count fell 20 -> 2). So output
+    pressure would be converted into silent under-modelling instead of a loud
+    failure, and the resulting small schema looks like a modelling choice rather
+    than a truncation.
+
+    A warning cannot fix that, but it makes the two distinguishable, which is
+    the difference between diagnosing this in one log line and in a day of
+    bisecting.
+    """
+    for msg in messages:
+        reason = _finish_reason(msg)
+        if reason and reason.lower() in _TRUNCATION_FINISH_REASONS:
+            logger.warning(
+                "[invoke] '%s' reply was TRUNCATED by the provider "
+                "(finish_reason=%r). The output hit a token limit, so anything "
+                "downstream is working from a partial response -- treat a small "
+                "or incomplete result here as truncation, not as a decision.",
+                agent_name,
+                reason,
+            )
+            return
 
 
 def _tokens_from_message(msg) -> int:
