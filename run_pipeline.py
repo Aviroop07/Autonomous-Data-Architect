@@ -104,6 +104,7 @@ def _load_stage_artifact(resume_dir: Path, filename: str, model_cls, label: str)
 
 async def run(args: argparse.Namespace) -> int:
     from src.orchestration.stage1.entry import orchestrate as stage1
+    from src.orchestration.stage2.adaptive import orchestrate_adaptive
     from src.orchestration.stage2.entry import orchestrate as stage2
     from src.orchestration.stage3.entry import orchestrate as stage3
 
@@ -154,14 +155,49 @@ async def run(args: argparse.Namespace) -> int:
     if 2 in stages:
         banner("STAGE 2 -- Schema Generation")
         t0 = time.time()
-        s2_out, s2_tokens, registry = await stage2(
+
+        # Wrapped in the adaptive re-chunker rather than called directly. The
+        # per-call extraction capacity behind the chunk budget is a MODEL
+        # property, so the default is wrong for some model, and when it is too
+        # large the failure is silent -- a fraction of the domain modelled, every
+        # later stage succeeding on the fragment. orchestrate_adaptive detects
+        # that from the share of required facts left unrepresented (a signal
+        # needing no per-model calibration) and pays for ONE finer-grained retry
+        # when it fires. On a healthy run it costs nothing and calls stage2 once.
+        async def _run_stage2(plan):
+            return await stage2(
+                plan=plan,
+                facts=s1_out.final_facts,
+                domain=s1_out.domain,
+                analytical_goal=s1_out.analytical_goal,
+                nl_query=nl,
+                model=args.model,
+                artifact_dir=out_dir if args.dump_artifacts else None,
+            )
+
+        def _rechunk(n_chunks_wanted: int):
+            """Finer plan for the retry, by halving the per-chunk budget.
+
+            Derived from the CURRENT plan's own token size rather than from the
+            capacity constant, so the retry shrinks relative to what actually
+            saturated -- the constant is the thing under suspicion when we get
+            here, so it is the wrong thing to re-derive from.
+            """
+            from src.pipeline.stage1.middleware.budget_chunker import (
+                BudgetChunker,
+                estimate_fact_tokens,
+            )
+
+            total = sum(estimate_fact_tokens(f) for f in s1_out.final_facts)
+            return BudgetChunker(budget_tokens=max(1, total // n_chunks_wanted)).fit(
+                s1_out.final_facts
+            )
+
+        s2_out, s2_tokens, registry = await orchestrate_adaptive(
             plan=s1_out.plan,
             facts=s1_out.final_facts,
-            domain=s1_out.domain,
-            analytical_goal=s1_out.analytical_goal,
-            nl_query=nl,
-            model=args.model,
-            artifact_dir=out_dir if args.dump_artifacts else None,
+            run=_run_stage2,
+            rechunk=_rechunk,
         )
         total_tokens += s2_tokens
         logger.info("Stage 2 done in %.1fs | tokens=%d", time.time() - t0, s2_tokens)
