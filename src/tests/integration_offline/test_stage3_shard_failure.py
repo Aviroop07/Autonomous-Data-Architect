@@ -224,20 +224,12 @@ def test_a_failed_shard_is_reported_in_the_output_not_only_the_log(
     assert any("shard" in text.lower() for text in report.unsupported)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "KNOWN BUG, narrower than it first looked. Withholding IS implemented and "
-        "DOES fire in production -- a live subscription_analytics run withheld a "
-        "shard's 10 constraints after 15 iterations with unresolved deterministic "
-        "errors. But it is keyed on `det_errors_exhausted`, and the generator "
-        "config sets error_refresh, so that flag reads bool(state.error_accumulator) "
-        "-- which can be EMPTY on the final pass even though the checker rejected "
-        "constraints on every round, which is exactly this test's scenario. "
-        "Catching it needs the deterministic checker's PER-CONSTRAINT rejections "
-        "driving removal, not the coarse end-of-loop flag."
-    ),
-)
+# FIXED: the deterministic checker now reports WHICH item it refused
+# (RejectedItem), and extraction drops exactly those -- regardless of whether
+# the retry budget was exhausted. Keying removal on `det_errors_exhausted` alone
+# could not work here: the generator config sets error_refresh, so that flag
+# reads bool(state.error_accumulator), which can be EMPTY on the final pass even
+# though the checker rejected constraints every round.
 def test_constraints_that_never_passed_the_deterministic_checker_are_not_shipped() -> (
     None
 ):

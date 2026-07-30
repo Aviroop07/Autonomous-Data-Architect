@@ -147,6 +147,37 @@ def _count_constraints(output: UnifiedExtractionOutput) -> int:
     return total
 
 
+def _drop_rejected(output: UnifiedExtractionOutput, rejected: list) -> int:
+    """Remove exactly the items the deterministic checker refused, in place.
+
+    Returns how many were dropped. Deletes by descending index within each list
+    so earlier indices stay valid as later ones are removed -- rejections carry
+    the index the checker saw, and removing front-to-back would shift the rest.
+
+    Several rejections can name the SAME item (one constraint can fail column
+    resolution and be vacuous at once), hence the de-duplication: double-counting
+    would misreport how much was dropped.
+    """
+    by_list: dict[str, set[int]] = {}
+    for item in rejected:
+        list_name = getattr(item, "list_name", "")
+        index = getattr(item, "index", None)
+        if not list_name or index is None:
+            continue
+        by_list.setdefault(list_name, set()).add(int(index))
+
+    dropped = 0
+    for list_name, indices in by_list.items():
+        target = getattr(output, list_name, None)
+        if not isinstance(target, list):
+            continue
+        for index in sorted(indices, reverse=True):
+            if 0 <= index < len(target):
+                del target[index]
+                dropped += 1
+    return dropped
+
+
 @dataclass(frozen=True)
 class ShardExtractionResult:
     """What one shard's generator loop produced, plus whether it was lost.
@@ -207,16 +238,56 @@ def _extract_generator_output(
                 "UnifiedExtractionOutput."
             ),
         )
-    if result.det_errors_exhausted:
-        withheld = _count_constraints(output)
-        # Carry the checker's own complaints out with the result. The loop
-        # archives them internally and nothing ever surfaced them, so a live run
-        # that produced ZERO constraints reported only that a shard was withheld
-        # -- with no way to learn why short of adding logging and re-running.
-        checker_output = result.node_outputs.get("det_checker")
-        checker_errors: tuple[str, ...] = tuple(
-            str(e) for e in (getattr(checker_output, "errors", None) or [])
+    checker_output = result.node_outputs.get("det_checker")
+    checker_errors: tuple[str, ...] = tuple(
+        str(e) for e in (getattr(checker_output, "errors", None) or [])
+    )
+    rejected = list(getattr(checker_output, "rejected", None) or [])
+
+    # Drop ONLY the items the checker actually refused, and do it regardless of
+    # whether the retry budget was exhausted. A constraint the deterministic
+    # checker refused on the final pass must not ship either way -- it may
+    # reference a column that does not exist, and Stage 4 generating data
+    # against it is worse than Stage 4 not having it.
+    #
+    # This used to withhold the ENTIRE shard, which on a live
+    # university_hospital_messy run meant ZERO constraints out of 159k tokens
+    # because ONE of three was vacuous (`child_count >= 0`, which cannot be
+    # false since a count is never negative). The other two were fine. The
+    # checker always knew which item it refused; that was simply never expressed
+    # in a form a caller could act on.
+    dropped = _drop_rejected(output, rejected)
+    if dropped and not result.det_errors_exhausted:
+        logger.warning(
+            "[Stage 3] Dropping %d constraint(s) the deterministic checker "
+            "refused on its final pass; %d survive. Refused: %s",
+            dropped,
+            _count_constraints(output),
+            checker_errors,
         )
+
+    if result.det_errors_exhausted:
+        if dropped and _count_constraints(output):
+            logger.error(
+                "[Stage 3] Shard extraction exhausted its retry budget after "
+                "%d iteration(s). DROPPING the %d constraint(s) the "
+                "deterministic checker refused and keeping the %d that passed. "
+                "Refused: %s",
+                result.iteration_count,
+                dropped,
+                _count_constraints(output),
+                checker_errors,
+            )
+            return ShardExtractionResult(
+                output=output,
+                tokens=result.total_tokens,
+                withheld_constraint_count=dropped,
+                errors=checker_errors,
+            )
+
+        # Nothing survived (or the checker gave no actionable rejections), so
+        # the shard really did contribute nothing.
+        withheld = dropped or _count_constraints(output)
         logger.error(
             "[Stage 3] Shard extraction exhausted its retry budget with "
             "UNRESOLVED deterministic errors after %d iteration(s); "

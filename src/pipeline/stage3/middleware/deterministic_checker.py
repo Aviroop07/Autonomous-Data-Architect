@@ -1,4 +1,4 @@
-﻿"""Deterministic canonicalize() checker -- the middle node of Stage 3's
+"""Deterministic canonicalize() checker -- the middle node of Stage 3's
 3-node per-shard loop (generator -> deterministic_checker -> auditor).
 
 Pulled out of the generator's own invoke() (where the 3 old family
@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import logging
 from typing import List, Optional
+
+from pydantic import BaseModel
 
 from src.pipeline.stage3.agents.extraction_outputs import UnifiedOutput
 from src.pipeline.stage3.models.shard_context import Stage3ShardContext
@@ -49,11 +51,33 @@ from src.util.orchestration.loop_types import (
 logger = logging.getLogger(__name__)
 
 
+class RejectedItem(BaseModel):
+    """One extraction item the deterministic checker refused, identified
+    structurally rather than by parsing its error string.
+
+    `list_name` is the UnifiedOutput attribute holding the item, so a caller
+    can act on the rejection -- dropping just the offender -- without knowing
+    how the message was formatted. Before this existed, the only record of
+    WHICH item failed was the "{Label}[{index}]" prefix inside a free-text
+    error, so the whole shard had to be withheld when any single item failed.
+    """
+
+    label: str
+    index: int
+    list_name: str
+    reason: str
+
+    @property
+    def message(self) -> str:
+        return f"{self.label}[{self.index}] {self.reason}"
+
+
 class DetCheckOutput(LoopOutputModel):
     """Output of the deterministic checker node. `errors` IS get_errors()'s
     return value -- this node's whole purpose is to produce that list."""
 
     errors: List[str] = []
+    rejected: List[RejectedItem] = []
 
     def get_errors(self) -> List[str]:
         return self.errors
@@ -161,7 +185,13 @@ class DeterministicCheckerLoopAgent(LoopAgent):
         self._schema: Optional[Schema] = None
 
     def _canonicalize_list(
-        self, items: list, label: str, schema: Schema, view: _SchemaView
+        self,
+        items: list,
+        label: str,
+        schema: Schema,
+        view: _SchemaView,
+        list_name: str = "",
+        rejected: Optional[List[RejectedItem]] = None,
     ) -> List[str]:
         """Normalizes (replacing any ONSubquery with its structured
         equivalent, in place on `item.on`), canonicalizes every item's ON
@@ -171,57 +201,85 @@ class DeterministicCheckerLoopAgent(LoopAgent):
         columns, partition_by, sequence_column, order_by) actually resolves
         unambiguously against that Grain. One error string per failure."""
         errors: List[str] = []
+
+        def reject(index: int, reason: str) -> None:
+            """Record one rejection in both forms: the free-text error the retry
+            loop feeds back to the generator, and the structured record a caller
+            needs to drop just this item instead of the whole shard."""
+            errors.append(f"{label}[{index}] {reason}")
+            if rejected is not None:
+                rejected.append(
+                    RejectedItem(
+                        label=label,
+                        index=index,
+                        list_name=list_name,
+                        reason=reason,
+                    )
+                )
+
         for i, item in enumerate(items):
             normalized, norm_err = normalize_on(item.on)
             if normalized is None:
-                errors.append(f"{label}[{i}] ON normalization failed: {norm_err}")
+                reject(i, f"ON normalization failed: {norm_err}")
                 continue
             item.on = normalized
             result = canonicalize(item.on, schema)
             if isinstance(result, CanonicalizationFailure):
-                errors.append(
-                    f"{label}[{i}] ON canonicalization failed: {result.reason}"
-                )
+                reject(i, f"ON canonicalization failed: {result.reason}")
                 continue
             for col in _columns_to_validate(item):
                 col_err = result.validate_column(col, view)
                 if col_err is not None:
-                    errors.append(f"{label}[{i}] column '{col}' invalid: {col_err}")
+                    reject(i, f"column '{col}' invalid: {col_err}")
             non_negative = _non_negative_columns(item)
             for cond in _conditions_of(item):
                 for msg in _vacuous_comparisons(cond, non_negative):
-                    errors.append(f"{label}[{i}] vacuous constraint: {msg}")
+                    reject(i, f"vacuous constraint: {msg}")
         return errors
 
-    def _canonicalize_all(self, output: UnifiedOutput, schema: Schema) -> List[str]:
+    # (label, UnifiedOutput attribute) for every list this node checks. Kept in
+    # one place so a new extraction shape cannot be added to UnifiedOutput and
+    # silently go unchecked, which is how derived_columns ended up validated by
+    # nothing at all.
+    _CHECKED_LISTS: List[tuple[str, str]] = [
+        ("Distribution", "distributions"),
+        ("MomentTarget", "moment_targets"),
+        ("Correlation", "correlations"),
+        ("Structural", "structural_constraints"),
+        ("Logic", "logic_constraints"),
+        ("StateSequence", "state_sequences"),
+    ]
+
+    def _canonicalize_all(
+        self,
+        output: UnifiedOutput,
+        schema: Schema,
+        rejected: Optional[List[RejectedItem]] = None,
+    ) -> List[str]:
         view = _SchemaView.from_schema(schema)
         errors: List[str] = []
-        errors.extend(
-            self._canonicalize_list(output.distributions, "Distribution", schema, view)
-        )
-        errors.extend(
-            self._canonicalize_list(output.moment_targets, "MomentTarget", schema, view)
-        )
-        errors.extend(
-            self._canonicalize_list(output.correlations, "Correlation", schema, view)
-        )
-        errors.extend(
-            self._canonicalize_list(
-                output.structural_constraints, "Structural", schema, view
+        for label, list_name in self._CHECKED_LISTS:
+            errors.extend(
+                self._canonicalize_list(
+                    getattr(output, list_name),
+                    label,
+                    schema,
+                    view,
+                    list_name=list_name,
+                    rejected=rejected,
+                )
             )
-        )
         errors.extend(
-            self._canonicalize_list(output.logic_constraints, "Logic", schema, view)
+            self._check_derived_columns(output.derived_columns, view, rejected)
         )
-        errors.extend(
-            self._canonicalize_list(
-                output.state_sequences, "StateSequence", schema, view
-            )
-        )
-        errors.extend(self._check_derived_columns(output.derived_columns, view))
         return errors
 
-    def _check_derived_columns(self, items: list, view: _SchemaView) -> List[str]:
+    def _check_derived_columns(
+        self,
+        items: list,
+        view: _SchemaView,
+        rejected: Optional[List[RejectedItem]] = None,
+    ) -> List[str]:
         """Validate derived columns against the schema.
 
         DerivedColumnConstraint carries no `on` tree, so it cannot go through
@@ -232,18 +290,32 @@ class DeterministicCheckerLoopAgent(LoopAgent):
         reaches the DOF graph.
         """
         errors: List[str] = []
+
+        def reject(index: int, reason: str) -> None:
+            errors.append(f"DerivedColumn[{index}]: {reason}")
+            if rejected is not None:
+                rejected.append(
+                    RejectedItem(
+                        label="DerivedColumn",
+                        index=index,
+                        list_name="derived_columns",
+                        reason=reason,
+                    )
+                )
+
         for index, item in enumerate(items):
             target = getattr(item, "target_table", None)
             if target and target not in view.tables:
-                errors.append(
-                    f"DerivedColumn[{index}]: target_table '{target}' is not a table "
-                    f"in this shard's schema."
+                reject(
+                    index,
+                    f"target_table '{target}' is not a table in this shard's schema.",
                 )
             for referenced in getattr(item, "referenced_tables", []) or []:
                 if referenced not in view.tables:
-                    errors.append(
-                        f"DerivedColumn[{index}]: referenced_tables names "
-                        f"'{referenced}', which is not a table in this shard's schema."
+                    reject(
+                        index,
+                        f"referenced_tables names '{referenced}', which is not a "
+                        f"table in this shard's schema.",
                     )
         return errors
 
@@ -263,8 +335,9 @@ class DeterministicCheckerLoopAgent(LoopAgent):
             return DetCheckOutput(errors=[]), 0
         if self._pending_output is None:
             return DetCheckOutput(errors=[]), 0
-        errors = self._canonicalize_all(self._pending_output, self._schema)
-        return DetCheckOutput(errors=errors), 0
+        rejected: List[RejectedItem] = []
+        errors = self._canonicalize_all(self._pending_output, self._schema, rejected)
+        return DetCheckOutput(errors=errors, rejected=rejected), 0
 
     def build_context(self, ctx: LoopContext[Stage3ShardContext]) -> str:
         generator_output = ctx.node_outputs.get("generator")
