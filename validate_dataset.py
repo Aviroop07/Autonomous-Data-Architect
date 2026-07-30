@@ -614,6 +614,13 @@ def validate(cases: Iterable[Dict[str, Any]]) -> Findings:
                 where, case.get("ground_truth_distributions"), tables, f
             )
             _check_constraints(where, case.get("ground_truth_constraints"), tables, f)
+            _check_moments(
+                where,
+                case.get("ground_truth_moments"),
+                tables,
+                case.get("nl_description") or "",
+                f,
+            )
 
     for cid, n in ids.items():
         if n > 1:
@@ -654,6 +661,75 @@ def _check_fds(
                     f.error(where, f"{label}.{side} names unknown table '{tbl}'")
                 elif col not in tables[tbl]:
                     f.error(where, f"{label}.{side} names unknown column '{ref}'")
+
+
+_MOMENT_AGGREGATES = {"avg", "sum", "count", "min", "max"}
+
+
+def _check_moments(
+    where: str,
+    moments: Any,
+    tables: Dict[str, Dict[str, str]],
+    nl: str,
+    f: Findings,
+) -> None:
+    """Ground-truth moment targets -- a stated average, total or count.
+
+    Stage 3 emits seven constraint families and the benchmark could previously
+    ground-truth two of them, so moment targets are the largest scoreable gap.
+    They are also the easiest family to INVENT, which is what the `evidence`
+    field is for: every moment must quote the phrase of the specification that
+    states it, verbatim. That turns "did the author make this up" from a matter
+    of trust into a deterministic check, and it is the same device that keeps the
+    cross-column enrichment honest -- refuse to accept anything whose supporting
+    text or whose named column is not really there.
+
+    A moment the prose does not state is worse than a missing one: Stage 3 would
+    be scored on extracting a fact that does not exist in its input.
+    """
+    if moments is None or not tables:
+        return
+    if not isinstance(moments, list):
+        f.error(where, "ground_truth_moments is not a list")
+        return
+
+    normalised_nl = " ".join((nl or "").split()).lower()
+    for i, m in enumerate(moments):
+        label = f"ground_truth_moments[{i}]"
+        if not isinstance(m, dict):
+            f.error(where, f"{label} is not an object")
+            continue
+
+        table, column = m.get("table"), m.get("column")
+        if table not in tables:
+            f.error(where, f"{label} names unknown table {table!r}")
+        elif column not in tables[table]:
+            f.error(where, f"{label} names unknown column '{table}.{column}'")
+
+        agg = m.get("aggregate")
+        if agg not in _MOMENT_AGGREGATES:
+            f.error(
+                where,
+                f"{label}.aggregate {agg!r} is not one of {sorted(_MOMENT_AGGREGATES)}",
+            )
+
+        if not isinstance(m.get("value"), (int, float)) or isinstance(
+            m.get("value"), bool
+        ):
+            f.error(where, f"{label}.value must be a number, got {m.get('value')!r}")
+
+        evidence = m.get("evidence")
+        if not isinstance(evidence, str) or not evidence.strip():
+            f.error(where, f"{label}.evidence must quote the phrase that states it")
+        else:
+            # Whitespace-normalised so a line break inside the quoted phrase is
+            # not treated as invention; everything else must match the source.
+            if " ".join(evidence.split()).lower() not in normalised_nl:
+                f.error(
+                    where,
+                    f"{label}.evidence is not a verbatim phrase of nl_description: "
+                    f"{evidence[:60]!r}",
+                )
 
 
 def coverage(cases: List[Dict[str, Any]]) -> str:
