@@ -232,6 +232,38 @@ def _group_into_segments(
     return [groups[k] for k in sorted(groups, key=lambda k: (k[0], k[1]))]
 
 
+def _pack_segments(
+    segments: List[List[AtomicFact]], limit: int
+) -> List[List[AtomicFact]]:
+    """First-fit pack whole segments into chunks of at most `limit` tokens.
+
+    A segment larger than `limit` on its own is split at FACT boundaries. That
+    was once thought to cut a source span in half, but a segment is a GROUP of
+    facts and each fact keeps its own segment_text/start_char/end_char -- so
+    splitting costs co-location only, while emitting it whole produces a chunk
+    over the limit, the one failure chunking exists to prevent.
+    """
+    chunks: List[List[AtomicFact]] = []
+    current: List[AtomicFact] = []
+    current_tokens = 0
+    for segment in segments:
+        seg_tokens = sum(estimate_fact_tokens(f) for f in segment)
+        if seg_tokens > limit:
+            if current:
+                chunks.append(current)
+                current, current_tokens = [], 0
+            chunks.extend(_split_oversized_segment(segment, limit))
+            continue
+        if current and current_tokens + seg_tokens > limit:
+            chunks.append(current)
+            current, current_tokens = [], 0
+        current.extend(segment)
+        current_tokens += seg_tokens
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 class BudgetChunker:
     """Packs facts into the fewest chunks that each fit the model's context.
 
@@ -339,60 +371,71 @@ class BudgetChunker:
             return ChunkedPlan(core_modeling_facts=list(facts), chunks=[list(facts)])
 
         segments = _group_into_segments(facts)
-        chunks: List[List[AtomicFact]] = []
-        current: List[AtomicFact] = []
-        current_tokens = 0
 
+        # Pack toward an EVEN share rather than greedily filling to the ceiling.
+        # Greedy filling honours "no chunk exceeds the budget" while still leaving
+        # the first chunk pressed against it: 1,128 tokens over a 900 budget gave
+        # [40 facts, 9 facts], so only the 9-fact remainder gained headroom. Now
+        # that this budget represents how much one call can MODEL, headroom is the
+        # entire point and every chunk should have some.
+        #
+        # Packing to a fixed even target does not work either, and a test caught
+        # it: a per-chunk limit leaves unusable slack in each chunk (segments are
+        # indivisible), the slack accumulates, and it reappears as an extra
+        # near-empty chunk -- 49 uniform facts came out [840, 840, 840, 840, 70],
+        # where the 70-token sliver is a whole extraction call for one fact and
+        # cannot be folded back because 840 + 70 exceeds the budget.
+        #
+        # So search for the SMALLEST per-chunk limit that still achieves the
+        # minimum ACHIEVABLE number of chunks. Achievable matters: total/budget is
+        # only a lower bound, and granularity can put it out of reach -- 49 facts
+        # of 70 tokens cannot fit 4 chunks of 900 (4 x 12 facts = 48), so aiming
+        # at the arithmetic bound found no limit at all and fell back to the
+        # lopsided first-fit result. Taking the count from the loosest pack and
+        # then tightening gives [700, 700, 700, 700, 630] where the bound gave
+        # [840, 840, 840, 840, 70].
+        #
+        # Monotone in the limit, so a binary search over integers settles it in
+        # ~10 pure-arithmetic passes -- no extra LLM cost, and the chunk count is
+        # never worse than first-fit would have produced.
+        chunks = _pack_segments(segments, budget)
+        n_chunks = len(chunks)
+        lo, hi = -(-total // n_chunks), budget
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            candidate = _pack_segments(segments, mid)
+            if len(candidate) <= n_chunks:
+                chunks = candidate
+                hi = mid - 1
+            else:
+                lo = mid + 1
+
+        # Reported here rather than inside _pack_segments, which the search above
+        # calls ~10 times and would therefore warn ~10 times for one cause. A
+        # segment exceeding the BUDGET will be split whatever limit the search
+        # settles on, so this is a property of the segments and can be stated once
+        # -- and it keeps the per-segment size, which a mere count would lose.
         for segment in segments:
             seg_tokens = sum(estimate_fact_tokens(f) for f in segment)
-            # A segment bigger than the whole budget is split at FACT
-            # boundaries. The previous behaviour emitted it whole, reasoning
-            # that splitting would cut a source span in half -- but a segment
-            # is a GROUP OF FACTS, and every fact keeps its own segment_text,
-            # start_char and end_char. Splitting the group cuts no span; it
-            # only costs co-location, while emitting it whole produces a chunk
-            # OVER the model's context budget, which is the single failure
-            # chunking exists to prevent.
-            #
-            # It also had a silent path: the old guard was `if seg_tokens >
-            # budget and not current`, so when anything was already pending the
-            # warning never fired and the oversized segment still went out
-            # whole. Measured -- one small segment followed by a 288-token
-            # segment against a 144-token budget produced a 288-token chunk
-            # with no warning at all.
             if seg_tokens > budget:
-                if current:
-                    chunks.append(current)
-                    current, current_tokens = [], 0
-                pieces = _split_oversized_segment(segment, budget)
                 logger.warning(
                     "[BudgetChunker] one segment is ~%d tokens, over the %d "
-                    "budget; split into %d piece(s) at fact boundaries. Facts "
-                    "from one source span are no longer co-located, which is "
-                    "the lesser cost -- the alternative is a chunk that cannot "
-                    "fit its prompt.",
+                    "budget; it is split at fact boundaries. Facts from one source "
+                    "span are no longer co-located, which is the lesser cost -- the "
+                    "alternative is a chunk that cannot fit its prompt.",
                     seg_tokens,
                     budget,
-                    len(pieces),
                 )
-                chunks.extend(pieces)
-                continue
-            if current and current_tokens + seg_tokens > budget:
-                chunks.append(current)
-                current, current_tokens = [], 0
-            current.extend(segment)
-            current_tokens += seg_tokens
 
-        if current:
-            chunks.append(current)
-
+        sizes = [sum(estimate_fact_tokens(f) for f in c) for c in chunks]
         logger.info(
-            "[BudgetChunker] %d facts (~%d tokens) exceed the %d-token budget "
-            "-- packed %d segments into %d chunks.",
+            "[BudgetChunker] %d facts (~%d tokens) exceed the %d-token budget -- "
+            "packed %d segments into %d chunks of ~%s tokens.",
             len(facts),
             total,
             budget,
             len(segments),
             len(chunks),
+            sizes,
         )
         return ChunkedPlan(core_modeling_facts=list(facts), chunks=chunks)

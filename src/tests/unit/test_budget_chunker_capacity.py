@@ -165,3 +165,58 @@ class TestModelPortability:
     def test_the_measured_on_note_names_a_model_and_a_date(self):
         assert any(ch.isdigit() for ch in _MEASURED_ON)
         assert len(_MEASURED_ON) > 10
+
+
+class TestEvenPacking:
+    """Chunks are packed toward an EVEN share, not greedily filled.
+
+    Greedy filling honours "no chunk exceeds the budget" while still leaving the
+    first chunk pressed against it -- 1,128 tokens over a 900 budget gave
+    [40 facts, 9 facts], so only the 9-fact remainder gained headroom. Now that
+    the budget represents how much one call can MODEL, headroom is the point.
+    """
+
+    def test_chunks_are_of_comparable_size(self):
+        facts = _facts(60)
+        chunks = BudgetChunker(provider="nonexistent", model="nonexistent").fit(
+            facts
+        ).chunks
+        sizes = [sum(estimate_fact_tokens(f) for f in c) for c in chunks]
+        assert len(sizes) > 1
+        # No chunk may be more than twice any other. Greedy filling produced a
+        # 40-vs-9 fact split, which this rejects.
+        assert max(sizes) <= 2 * min(sizes)
+
+    def test_no_chunk_exceeds_the_real_budget(self):
+        """The even target is tighter than the budget, so the invariant the
+        budget exists to guarantee must still hold exactly."""
+        facts = _facts(60)
+        chunks = BudgetChunker(budget_tokens=900).fit(facts).chunks
+        for chunk in chunks:
+            total = sum(estimate_fact_tokens(f) for f in chunk)
+            assert total <= 900 or len(chunk) == 1
+
+    def test_a_tiny_remainder_is_folded_back(self):
+        """Segment granularity leaves a tail; a chunk holding almost nothing is a
+        whole extraction call wasted, so it merges when the result still fits."""
+        facts = _facts(49)
+        chunks = BudgetChunker(budget_tokens=900).fit(facts).chunks
+        sizes = [sum(estimate_fact_tokens(f) for f in c) for c in chunks]
+        if len(sizes) > 1:
+            # the smallest chunk must not be a sliver
+            assert min(sizes) > 0.25 * max(sizes)
+
+    def test_coalescing_never_breaks_the_budget(self):
+        for n in (20, 35, 49, 60, 90):
+            facts = _facts(n)
+            chunks = BudgetChunker(budget_tokens=900).fit(facts).chunks
+            for chunk in chunks:
+                total = sum(estimate_fact_tokens(f) for f in chunk)
+                assert total <= 900 or len(chunk) == 1, f"n={n}"
+
+    def test_facts_are_conserved_through_packing_and_coalescing(self):
+        for n in (20, 49, 60):
+            facts = _facts(n)
+            chunks = BudgetChunker(budget_tokens=900).fit(facts).chunks
+            packed = sorted(f.id for c in chunks for f in c)
+            assert packed == [f.id for f in facts], f"n={n}"
