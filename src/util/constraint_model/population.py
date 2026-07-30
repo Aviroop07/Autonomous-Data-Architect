@@ -155,22 +155,59 @@ def compute_population(
         if child_pop is None:
             return None, child_errs
 
-        parent_table = _root_table_name(parent_node)
-        if parent_table is None:
-            return None, ["Join: could not determine the parent side's own table name."]
+        # The parent side needs its OWN population computed, not just its name.
+        # Skipping it used to lose every edge internal to that subtree: for
+        # A JOIN (B JOIN C), the B->C hop simply vanished, so the same
+        # three-table join written left-deep and right-deep produced different
+        # edge sets and therefore compared as different populations.
+        parent_pop, parent_errs = compute_population(parent_node, schema)
+        if parent_pop is None:
+            return None, parent_errs
 
-        fk_nullable = child_eff.columns[child_fk_col].nullable
+        # Identify the traversed edge from the FK column's own PROVENANCE rather
+        # than from the shape of the tree. resolve_join_child has already proved
+        # (via _fk_pk_direction) that this column is a real FK whose
+        # referred_table is the parent side's PK table, so provenance names both
+        # real endpoints -- alias-proof, and identical whichever way the join is
+        # nested. The previous code took child_table from the child side's GRAIN
+        # and parent_table from a tree walk that returned None for a nested join,
+        # which is what rejected right-deep trees outright and misattributed the
+        # FK column to the grain table in the trees it did accept.
+        fk_column = child_eff.columns[child_fk_col]
+        prov = fk_column.provenance
+        if prov is None or prov.referred_table is None:
+            return None, [
+                f"Join: the child side's join column '{child_fk_col}' carries no "
+                "foreign-key provenance, so the traversed edge cannot be identified."
+            ]
+
         edge = FKEdge(
-            child_table=child_pop.table,
-            fk_column=child_fk_col,
-            parent_table=parent_table,
+            child_table=prov.table,
+            fk_column=prov.column,
+            parent_table=prov.referred_table,
         )
-        occurrence = sum(1 for e, _ in child_pop.edges if e == edge) + 1
+        prior_max = max(
+            _max_occurrence(child_pop, edge), _max_occurrence(parent_pop, edge)
+        )
         return (
             child_pop.model_copy(
                 update={
-                    "edges": child_pop.edges | {(edge, occurrence)},
-                    "narrowed": child_pop.narrowed or fk_nullable,
+                    "edges": child_pop.edges
+                    | parent_pop.edges
+                    | {(edge, prior_max + 1)},
+                    "narrowed": (
+                        child_pop.narrowed or parent_pop.narrowed or fk_column.nullable
+                    ),
+                    # A Filter on the parent side narrows the population too, and
+                    # dropping its conditions understates that -- the same class of
+                    # defect as moments.py discarding filter_conditions and then
+                    # reporting mutually exclusive populations as contradictory.
+                    # Order is child-then-parent: deterministic for a given tree,
+                    # though two differently-nested trees carrying filters on
+                    # different sides are genuinely different populations anyway.
+                    "filter_conditions": (
+                        child_pop.filter_conditions + parent_pop.filter_conditions
+                    ),
                 }
             ),
             [],
@@ -234,15 +271,14 @@ def compute_population(
     return None, [f"Unknown Relation node type: {type(node).__name__}"]
 
 
-def _root_table_name(node: "RelationUnion") -> Optional[str]:
-    """The single base table name this Relation ultimately reduces to for
-    edge-recording purposes -- only meaningful for a Join's parent side,
-    which (by construction, via resolve_join_child) is always a relation
-    whose own population is just a bare table/chain rooted at one table."""
-    if isinstance(node, BaseTable):
-        return node.name
-    if isinstance(node, (Project, Filter)):
-        return _root_table_name(node.source)
-    if isinstance(node, Join):
-        return None
-    return None
+def _max_occurrence(pop: Population, edge: FKEdge) -> int:
+    """The highest occurrence index already recorded for `edge` in `pop`, or 0.
+
+    Traversing the same FK twice in one Relation (a self-referencing chain, or
+    two paths converging on the same parent) is legitimate, and each traversal
+    is a distinct edge instance -- so occurrences are numbered rather than
+    collapsed by the frozenset. Taking the max across BOTH sides before
+    numbering a new one is what keeps the count right when two subtrees are
+    merged; counting only the child's would renumber over an existing instance.
+    """
+    return max((occ for e, occ in pop.edges if e == edge), default=0)

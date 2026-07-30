@@ -16,9 +16,12 @@ The analytical goal you are certifying against is:
 
 ## INPUT
 In the message you receive you will be given:
-- **GLOBAL SCHEMA (JSON)** -- the full schema to certify: its tables, their columns and
-  data types, primary keys, unique constraints, and the foreign-key relationships between
-  tables.
+- **GLOBAL SCHEMA** -- the full schema to certify, one section per table: the table name,
+  its primary key, then one line per column giving that column's name, data type and
+  whether it is NULL or NOT NULL, then any unique constraints, then the foreign keys it
+  declares. Every name appearing there is a real table or column of the schema. Column
+  names come only from those per-column lines -- never invent a column name from anything
+  else in this prompt.
 - **SOURCE FACTS** -- the natural-language facts the schema was built from, one per line,
   each formatted as a leading numeric ID, then the fact text, then its tags in brackets.
 

@@ -139,9 +139,55 @@ def _is_new_token(suffix: str, candidate: str) -> bool:
     return bool(set(suffix.split("_")) - set(candidate.split("_")))
 
 
+def _non_distinctive_identifier_names(cm: ConceptualModel) -> Set[str]:
+    """Attribute names that some entity uses as an ORDINARY (non-identifier)
+    attribute, and which are therefore unsafe as a natural primary key.
+
+    A natural key's name has to belong to the key. When it does not -- when the
+    same name is an everyday attribute elsewhere in the model -- choosing it as
+    a primary key poisons everything keyed on names downstream, and the damage
+    is silent. Observed live: the extractor gave Club the identifier `name`, so
+    CLUB's primary key became `name`; wire_orphan_fk_columns' natural-key rule
+    then read EVERY `name` column in the schema as a reference to CLUB and
+    declared ROUTE.name and SEGMENT.name -- each row's OWN name -- as foreign
+    keys to CLUB, which requires a route to be named after a club. Stage 3
+    independently paid for the same choice, rejecting a constraint because
+    `email` (RIDER's natural key, propagated as an FK column) was "ambiguous at
+    grain 'RIDE'".
+
+    Fixing it at the FK-inference end does not work, and that was measured
+    rather than assumed: refusing the inference whenever the name appears
+    elsewhere as a non-key column also refuses the CORRECT
+    RIDE.email -> RIDER and CLUB.region_code -> REGION, because a legitimate FK
+    column is itself a non-key column on another table -- the more tables
+    reference a parent, the less distinctive its key looks. Nor does provenance
+    separate the two cases. So the decision belongs here, at key SELECTION,
+    where the conceptual model still distinguishes "this name identifies an
+    entity" from "this name describes one".
+
+    Computed once from the whole conceptual model, so the result never depends
+    on the order entities are mapped in. Carries no vocabulary of its own: that
+    `name` is generic and `sku` is not is a property of the model at hand, not
+    of English, and a hardcoded word list would be the brittle version of this.
+    """
+    plain: Set[str] = set()
+    for entity in cm.entities:
+        identifiers = {
+            to_snake_case(a).lower() for a in (entity.identifier_attributes or [])
+        }
+        for attr in entity.attributes:
+            if attr.is_derived or attr.is_multivalued:
+                continue
+            name = to_snake_case(attr.name).lower()
+            if name not in identifiers:
+                plain.add(name)
+    return plain
+
+
 def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
     tables: List[Table] = []
     relationships_to_add: List[ForeignKey] = []
+    non_distinctive_ids = _non_distinctive_identifier_names(cm)
 
     entity_tables: Dict[str, Table] = {}
     used_names: Set[str] = set()
@@ -178,8 +224,25 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                 )
 
         # 3. PK Selection
-        if entity.identifier_attributes:
-            pk_cols = [to_snake_case(a).lower() for a in entity.identifier_attributes]
+        declared_ids = [
+            to_snake_case(a).lower() for a in (entity.identifier_attributes or [])
+        ]
+        unsafe_ids = [a for a in declared_ids if a in non_distinctive_ids]
+        if declared_ids and unsafe_ids:
+            logger.info(
+                "  [Mapper] Entity '%s' declares identifier(s) %s, but %s "
+                "%s used as an ordinary attribute elsewhere in the model, so "
+                "it is not a safe natural key; using a surrogate instead. "
+                "Keeping it would make every column of that name across the "
+                "schema look like a reference to %s.",
+                entity.name,
+                declared_ids,
+                unsafe_ids,
+                "is" if len(unsafe_ids) == 1 else "are",
+                t_name,
+            )
+        if declared_ids and not unsafe_ids:
+            pk_cols = declared_ids
         else:
             entity_attr_names = {
                 to_snake_case(a.name).lower()
@@ -486,6 +549,16 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                         Column(
                             name=c_name,
                             data_type=attr.type,
+                            # A relationship attribute is NOT part of the junction's
+                            # primary key (the participant FKs are), so its declared
+                            # nullability is real information and must survive the
+                            # mapping. Omitting it silently defaulted every such
+                            # column to NOT NULL, which cost a membership's optional
+                            # `date_left` and left the schema unable to represent a
+                            # CURRENT member -- an information-capacity loss with no
+                            # error anywhere. The entity-attribute path above already
+                            # passes this through.
+                            is_nullable=attr.is_nullable,
                             source_fact_ids=attr.source_fact_ids,
                         )
                     )

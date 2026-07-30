@@ -140,6 +140,27 @@ class ColumnPatch(BasePatch):
     column_name: str = Field(description="Target column.")
 
 
+def _schema_model_field_names() -> frozenset[str]:
+    """Field names of the schema model itself, minus those that are also
+    plausible domain column names.
+
+    Derived from the models rather than hand-listed, so it cannot drift from
+    them. `name` and `data_type` are excluded deliberately: both are perfectly
+    ordinary column names in a real schema (a catalogue of sensor readings may
+    well have a `data_type` column), and refusing them would cost far more than
+    it saves. What remains -- `is_nullable`, `source_fact_ids`, `primary_key`
+    and friends -- describes the schema rather than any domain, so a patch
+    proposing one as a COLUMN is reporting the serialization it was shown, not
+    a defect in the schema.
+    """
+    from src.util.schema_model.schema import Column, ForeignKey, Schema, Table
+
+    reserved: set[str] = set()
+    for model in (Column, Table, Schema, ForeignKey):
+        reserved.update(model.model_fields.keys())
+    return frozenset(reserved - {"name", "data_type"})
+
+
 class AddColumnPatch(ColumnPatch):
     model_config = _PROVENANCE_REQUIRED_CONFIG
 
@@ -156,6 +177,27 @@ class AddColumnPatch(ColumnPatch):
         ):
             errors.append(
                 f"Column '{self.column_name}' already exists in table '{self.table_name}'."
+            )
+        # A column named after a field of the schema MODEL is metadata leaking
+        # back as content. Seen live: the certifier, which was handed
+        # schema.model_dump_json(), returned
+        # `ADD_COLUMN CLUB_MEMBERSHIP.is_nullable BOOLEAN` -- every column in
+        # that dump carries an `is_nullable` key, and it echoed one back as a
+        # column name. Nothing else rejected it, because adding a column that
+        # does not yet exist is structurally valid.
+        #
+        # The root fix is upstream (that agent is now shown rendered text that
+        # never names a model field -- see util/schema_model/render.py); this is
+        # the backstop for any other producer. Note it deliberately does NOT
+        # reject on missing provenance: this file already records the measured
+        # decision that punishing absent source_fact_ids discards mostly-correct
+        # fixes, and that trade is unchanged. This check fires on a name that
+        # cannot denote a domain column at all, which is a different claim.
+        if self.column_name in _schema_model_field_names():
+            errors.append(
+                f"Column name '{self.column_name}' is a field of the schema model, "
+                "not a domain column -- this looks like schema metadata echoed "
+                "back as content rather than a real column."
             )
         return errors
 

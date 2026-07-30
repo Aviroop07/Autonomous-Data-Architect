@@ -1,4 +1,5 @@
 from pathlib import Path
+from src.util.schema_model.render import schema_to_prompt_text
 from src.util.schema_model.schema import Schema
 from src.util.schema_ops.schema_patch import CritiqueReport
 from src.pipeline.stage1.models.rephrased_nl import AtomicFact
@@ -52,7 +53,14 @@ async def certify_compliance(
         [f"{f.id}. {f.fact} [{', '.join(f.tags)}]" for f in enriched_nl]
     )
 
-    query = f"GLOBAL SCHEMA (JSON):\n{schema.model_dump_json(indent=2)}\n\nSOURCE FACTS:\n{formatted_facts}"
+    # Rendered, NOT model_dump_json: a raw dump names the model's own fields on
+    # every column, and this agent proved it cannot tell those apart from schema
+    # content -- it emitted `ADD_COLUMN CLUB_MEMBERSHIP.is_nullable BOOLEAN`,
+    # inventing a domain column out of a metadata key it had just been shown.
+    rendered_schema = schema_to_prompt_text(
+        schema, heading="## GLOBAL SCHEMA", include_unique=True
+    )
+    query = f"{rendered_schema}\n\nSOURCE FACTS:\n{formatted_facts}"
 
     report, tokens = await get_response(
         agent=agent, output_structure=CritiqueReport, query=query

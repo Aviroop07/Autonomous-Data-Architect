@@ -590,6 +590,17 @@ class Schema(LoopOutputModel):
               sku -> PRODUCT (pk: sku). Skipped if more than one table shares that PK
               name (ambiguous target, do not guess).
 
+        Rule (b) is only as sound as the key it matches, and it CANNOT tell a
+        real reference from a coincidence by itself: refusing the inference
+        whenever the name also appears elsewhere as a non-key column was tried
+        and measured, and it discards the correct RIDE.email -> RIDER and
+        CLUB.region_code -> REGION along with the wrong ROUTE.name -> CLUB,
+        because a legitimate FK column IS a non-key column on another table.
+        Provenance does not separate them either. So the safeguard lives at key
+        SELECTION instead -- relational_mapper._non_distinctive_identifier_names
+        refuses a generic natural key in the first place, which is what stops a
+        bare `name` from ever becoming a table's primary key here.
+
         This repairs the gap where architects include FK columns but omit the explicit
         FK declaration -- including the case where a schema-repair patch (e.g. the
         compliance certifier) adds a correctly-named FK column AFTER the mapper's own
