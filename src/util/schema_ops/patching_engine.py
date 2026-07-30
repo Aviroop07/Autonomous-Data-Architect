@@ -17,6 +17,7 @@ from src.util.schema_ops.schema_patch import (
     DeleteRelationshipPatch,
     UpdatePKPatch,
     UpsertUniquePatch,
+    DeleteUniquePatch,
     DeleteTablePatch,
     RenameTablePatch,
     UpdateColumnTypePatch,
@@ -53,6 +54,8 @@ def apply_patches(
             _update_pk(schema, patch)
         elif isinstance(patch, UpsertUniquePatch):
             _upsert_unique(schema, patch)
+        elif isinstance(patch, DeleteUniquePatch):
+            _delete_unique(schema, patch)
         elif isinstance(patch, DeleteTablePatch):
             _delete_table(schema, patch, registry)
         elif isinstance(patch, RenameTablePatch):
@@ -275,6 +278,15 @@ def _upsert_unique(schema: Schema, patch: UpsertUniquePatch):
                     table.unique = []
                 if not any(set(u.columns) == set(new_uq.columns) for u in table.unique):
                     table.unique.append(new_uq)
+
+
+def _delete_unique(schema: Schema, patch: DeleteUniquePatch) -> None:
+    for table in schema.tables:
+        if table.name == patch.table_name and table.unique:
+            target = set(patch.unique_definition.columns)
+            table.unique = [
+                uq for uq in table.unique if set(uq.columns) != target
+            ] or None
 
 
 def _delete_table(

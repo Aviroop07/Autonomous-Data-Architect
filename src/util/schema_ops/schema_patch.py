@@ -755,7 +755,12 @@ class CritiqueReport(LoopOutputModel):
 
             normalised_patches = []
             for patch in data["patches"]:
-                if patch is None or not isinstance(patch, dict):
+                if patch is None:
+                    continue
+                if not isinstance(patch, dict):
+                    # Pre-constructed model instance (e.g. from a unit test);
+                    # keep it as-is rather than silently dropping it.
+                    normalised_patches.append(patch)
                     continue
 
                 reason_key = next(
@@ -1067,8 +1072,12 @@ class CritiqueReport(LoopOutputModel):
             # CritiqueReport (which previously discarded all valid patches and,
             # for the un-wrapped auditor, aborted Stage 2). Dropped patches are
             # logged so this tolerance does not silently mask regressions.
-            validated: List[dict] = []
+            validated: list = []
             for p in normalised_patches:
+                if not isinstance(p, dict):
+                    # Pre-constructed model instance; keep as-is.
+                    validated.append(p)
+                    continue
                 try:
                     _PATCH_ADAPTER.validate_python(p)
                 except ValidationError as exc:

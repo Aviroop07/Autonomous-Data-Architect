@@ -643,6 +643,21 @@ class Schema(LoopOutputModel):
                 if (candidate, table.name) in existing_directions:
                     continue
 
+                # Do not infer a SECOND reference to a parent this table already
+                # references explicitly. An declared FK is a fact; a name-convention
+                # match is a guess, and guessing on top of a fact is how a junction
+                # carrying its own `student_id` ATTRIBUTE alongside a real
+                # `student_student_id` FK ended up with two FKs to STUDENT and the
+                # attribute silently retyped to match the parent's PK.
+                #
+                # Tradeoff, stated: a table legitimately holding two role-based FKs
+                # to one parent (origin/destination airport) will not get the second
+                # one auto-wired. That case needs an explicit declaration, which is
+                # the right requirement -- inferring which role a bare column plays
+                # is not something a naming convention can decide.
+                if (table.name, candidate) in existing_directions:
+                    continue
+
                 new_fks.append(
                     ForeignKey(
                         referencing_table=table.name,

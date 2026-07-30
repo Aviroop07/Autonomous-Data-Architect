@@ -341,6 +341,16 @@ def merge_all_shards(
                     )
                 )
 
+            existing_attrs_by_name = {a.name: a for a in existing.attributes}
+            for attr in r.attributes:
+                if attr.name not in existing_attrs_by_name:
+                    existing.attributes.append(attr.model_copy(deep=True))
+                else:
+                    existing_attr = existing_attrs_by_name[attr.name]
+                    existing_attr.source_fact_ids = list(
+                        set(existing_attr.source_fact_ids) | set(attr.source_fact_ids)
+                    )
+
             unified_rels_dict[key].source_fact_ids.extend(r.source_fact_ids)
             unified_rels_dict[key].source_fact_ids = list(
                 set(unified_rels_dict[key].source_fact_ids)

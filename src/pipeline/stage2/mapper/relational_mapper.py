@@ -144,6 +144,11 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
     relationships_to_add: List[ForeignKey] = []
 
     entity_tables: Dict[str, Table] = {}
+    used_names: Set[str] = set()
+    # Collect MVA info for processing after the weak-entity pass so MVA tables
+    # see the finalised primary key (including owner PK columns propagated by
+    # the weak pass).
+    pending_mvas: List[tuple] = []
 
     # 1. Entities to tables
     for entity in cm.entities:
@@ -264,67 +269,10 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
         )
         tables.append(table)
         entity_tables[entity.name.lower()] = table
+        used_names.add(t_name)
 
-        # 8. Multivalued attributes
-        for mva in mva_attributes:
-            mva_t_name = f"{t_name}_{to_snake_case(mva.name).upper()}"
-            mva_col_name = to_snake_case(mva.name).lower()
-            mva_cols = [
-                Column(
-                    name=mva_col_name,
-                    data_type=mva.type,
-                    source_fact_ids=mva.source_fact_ids,
-                )
-            ]
-
-            key_eligible = {DataType.INTEGER, DataType.VARCHAR, DataType.UUID}
-            if mva.type in key_eligible:
-                mva_pk_cols = [mva_col_name]
-            else:
-                surrogate = f"{mva_col_name}_id"
-                mva_cols.append(
-                    Column(
-                        name=surrogate,
-                        data_type=DataType.INTEGER,
-                        source_fact_ids=mva.source_fact_ids,
-                    )
-                )
-                mva_pk_cols = [surrogate]
-
-            for pk_c in pk_cols:
-                parent_col = _resolve_pk_column(
-                    columns,
-                    pk_c,
-                    table_name=t_name,
-                    purpose="a multi-valued-attribute table",
-                )
-                if parent_col is None:
-                    continue
-                mva_cols.append(
-                    Column(
-                        name=pk_c,
-                        data_type=parent_col.data_type,
-                        source_fact_ids=mva.source_fact_ids,
-                    )
-                )
-                mva_pk_cols.append(pk_c)
-                relationships_to_add.append(
-                    ForeignKey(
-                        referencing_table=mva_t_name,
-                        referencing_column=pk_c,
-                        referred_table=t_name,
-                        source_fact_ids=mva.source_fact_ids,
-                    )
-                )
-
-            tables.append(
-                Table(
-                    name=mva_t_name,
-                    primary_key=mva_pk_cols,
-                    columns=mva_cols,
-                    source_fact_ids=mva.source_fact_ids,
-                )
-            )
+        if mva_attributes:
+            pending_mvas.append((entity, t_name, columns, pk_cols, mva_attributes))
 
     # Weak entity pass
     for entity in cm.entities:
@@ -359,6 +307,154 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                             source_fact_ids=entity.source_fact_ids,
                         )
                     )
+            else:
+                logger.warning(
+                    "  [Mapper] Weak entity '%s' with owner '%s': could not "
+                    "resolve both tables; no identifying FK was generated. "
+                    "Facts %s are unrepresented.",
+                    entity.name,
+                    entity.owner,
+                    entity.source_fact_ids or "[]",
+                )
+
+    # 8. Multivalued attributes pass (after weak-entity pass so that MVA tables
+    # for weak entities get the full composite key including owner PK columns).
+    #
+    # The saved pk_cols/columns from the entity-to-table pass are the ORIGINAL
+    # values BEFORE the weak-entity pass augmented the child table's PK with
+    # the owner's columns.  We must read the actual table object's PK so the
+    # MVA table receives the full composite key.
+    for entity, t_name, _saved_columns, _saved_pk_cols, mva_attributes in pending_mvas:
+        entity_table = entity_tables.get(entity.name.lower())
+        if entity_table is None:
+            continue
+        columns = entity_table.columns
+        pk_cols = entity_table.primary_key
+        for mva in mva_attributes:
+            mva_t_name = f"{t_name}_{to_snake_case(mva.name).upper()}"
+            if mva_t_name in used_names:
+                i = 2
+                while f"{mva_t_name}_{i}" in used_names:
+                    i += 1
+                logger.info(
+                    "  [Mapper] MVA table name '%s' collided with existing table; "
+                    "using '%s_%d'.",
+                    mva_t_name,
+                    mva_t_name,
+                    i,
+                )
+                mva_t_name = f"{mva_t_name}_{i}"
+            mva_col_name = to_snake_case(mva.name).lower()
+            mva_cols = [
+                Column(
+                    name=mva_col_name,
+                    data_type=mva.type,
+                    source_fact_ids=mva.source_fact_ids,
+                )
+            ]
+
+            key_eligible = {DataType.INTEGER, DataType.VARCHAR, DataType.UUID}
+            if mva.type in key_eligible:
+                mva_pk_cols = [mva_col_name]
+            else:
+                surrogate = f"{mva_col_name}_id"
+                mva_cols.append(
+                    Column(
+                        name=surrogate,
+                        data_type=DataType.INTEGER,
+                        source_fact_ids=mva.source_fact_ids,
+                    )
+                )
+                mva_pk_cols = [surrogate]
+
+            mva_col_names_set = {c.name for c in mva_cols}
+            for pk_c in pk_cols:
+                if pk_c in mva_col_names_set:
+                    # The parent's PK column and the MVA's value column want the
+                    # same name -- e.g. PERSON keyed on `email` that ALSO has
+                    # `email` as a multivalued attribute. They are different
+                    # things: one identifies the parent row, the other holds one
+                    # of that row's many values. Reusing a single column for both
+                    # collapsed them, leaving a table whose only column was its
+                    # own PK, which the validator rejects as hollow and the
+                    # repair loop cannot fix -- so the mapper crashed outright.
+                    # Disambiguate the FK column instead, exactly as the junction
+                    # naming path does for its own participant collisions.
+                    parent_col = _resolve_pk_column(
+                        columns,
+                        pk_c,
+                        table_name=t_name,
+                        purpose="a multi-valued-attribute table",
+                    )
+                    if parent_col is None:
+                        continue
+                    fk_col_name = f"{to_snake_case(t_name).lower()}_{pk_c}"
+                    suffix = 2
+                    while fk_col_name in mva_col_names_set:
+                        fk_col_name = f"{to_snake_case(t_name).lower()}_{pk_c}_{suffix}"
+                        suffix += 1
+                    logger.info(
+                        "  [Mapper] MVA table '%s': parent PK column '%s' collides "
+                        "with the multivalued value column of the same name; the "
+                        "foreign key is named '%s' so both survive.",
+                        mva_t_name,
+                        pk_c,
+                        fk_col_name,
+                    )
+                    mva_cols.append(
+                        Column(
+                            name=fk_col_name,
+                            data_type=parent_col.data_type,
+                            source_fact_ids=mva.source_fact_ids,
+                        )
+                    )
+                    mva_col_names_set.add(fk_col_name)
+                    if fk_col_name not in mva_pk_cols:
+                        mva_pk_cols.append(fk_col_name)
+                    relationships_to_add.append(
+                        ForeignKey(
+                            referencing_table=mva_t_name,
+                            referencing_column=fk_col_name,
+                            referred_table=t_name,
+                            source_fact_ids=mva.source_fact_ids,
+                        )
+                    )
+                    continue
+                parent_col = _resolve_pk_column(
+                    columns,
+                    pk_c,
+                    table_name=t_name,
+                    purpose="a multi-valued-attribute table",
+                )
+                if parent_col is None:
+                    continue
+                mva_cols.append(
+                    Column(
+                        name=pk_c,
+                        data_type=parent_col.data_type,
+                        source_fact_ids=mva.source_fact_ids,
+                    )
+                )
+                mva_col_names_set.add(pk_c)
+                mva_pk_cols.append(pk_c)
+                relationships_to_add.append(
+                    ForeignKey(
+                        referencing_table=mva_t_name,
+                        referencing_column=pk_c,
+                        referred_table=t_name,
+                        source_fact_ids=mva.source_fact_ids,
+                    )
+                )
+
+            tables.append(
+                Table(
+                    name=mva_t_name,
+                    primary_key=mva_pk_cols,
+                    columns=mva_cols,
+                    source_fact_ids=mva.source_fact_ids,
+                )
+            )
+            used_names.add(mva_t_name)
 
     # 4, 5, 6, 7. Relationships
     for rel in cm.relationships:
@@ -376,11 +472,10 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                 continue
 
             # Deterministic, noun-based junction name (avoids verb/plural names like OPERATES).
-            t_name = _derive_junction_name(
-                rel, participant_tables, {t.name for t in tables}
-            )
+            t_name = _derive_junction_name(rel, participant_tables, used_names)
             columns = []
             pk_cols = []
+            fk_names_in_junction: Set[str] = set()
 
             for attr in rel.attributes:
                 if attr.is_derived or attr.is_multivalued:
@@ -420,7 +515,14 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                     # members the inner one, so a name already present can only
                     # have come from a DIFFERENT participant -- i.e. exactly the
                     # self-reference case.
-                    if any(c.name == fk_col_name for c in columns):
+                    #
+                    # HOWEVER: the name could also collide with a RELATIONSHIP
+                    # ATTRIBUTE (e.g. an M:N `ENROLMENT` carrying attribute
+                    # `student_id` whose name matches the FK from STUDENT's PK).
+                    # In that case we must disambiguate by role/position rather
+                    # than silently renaming the FK to a non-position name and
+                    # leaving the attribute looking like an FK for the auto-wirer.
+                    if fk_col_name in fk_names_in_junction:
                         fk_col_name = f"{pk_c}_{position}"
                         logger.info(
                             "  [Mapper] Junction '%s' has two participants resolving "
@@ -429,6 +531,21 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                             "the relationship would give it a meaningful name.",
                             t_name,
                             p_t.name,
+                            fk_col_name,
+                        )
+                    elif any(c.name == fk_col_name for c in columns):
+                        # Relationship attribute owns the name -- prefix by entity
+                        # name so the FK does not clash with the attribute, without
+                        # using the self-reference positional suffix pattern that
+                        # would mislead downstream diagnostic logic.
+                        entity_prefix = to_snake_case(p.entity).lower()
+                        fk_col_name = f"{entity_prefix}_{pk_c}"
+                        logger.info(
+                            "  [Mapper] Junction '%s' FK column '%s' collides with a "
+                            "relationship attribute; naming this FK '%s' by position "
+                            "to disambiguate.",
+                            t_name,
+                            fk_col_name.rsplit("_", 1)[0] if role_prefix else pk_c,
                             fk_col_name,
                         )
                     parent_col = _resolve_pk_column(
@@ -451,6 +568,7 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
 
                     if fk_col_name not in pk_cols:
                         pk_cols.append(fk_col_name)
+                    fk_names_in_junction.add(fk_col_name)
 
                     relationships_to_add.append(
                         ForeignKey(
@@ -469,6 +587,7 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                     source_fact_ids=rel.source_fact_ids,
                 )
             )
+            used_names.add(t_name)
 
         elif rel.kind == "1:N" and len(rel.participants) == 2:
             p1, p2 = rel.participants
@@ -530,6 +649,16 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                             source_fact_ids=rel.source_fact_ids,
                         )
                     )
+            else:
+                logger.warning(
+                    "  [Mapper] 1:N relationship '%s' between '%s' and '%s': "
+                    "could not resolve one or both entity tables; no FK was "
+                    "generated. Facts %s are unrepresented.",
+                    rel.name,
+                    child_p.entity,
+                    parent_p.entity,
+                    rel.source_fact_ids or "[]",
+                )
 
         elif rel.kind == "1:1" and len(rel.participants) == 2:
             p1, p2 = rel.participants
@@ -605,6 +734,16 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                     if child_t.unique is None:
                         child_t.unique = []
                     child_t.unique.append(CompositeUnique(columns=fk_cols_added))
+            else:
+                logger.warning(
+                    "  [Mapper] 1:1 relationship '%s' between '%s' and '%s': "
+                    "could not resolve one or both entity tables; no FK was "
+                    "generated. Facts %s are unrepresented.",
+                    rel.name,
+                    child_p.entity,
+                    parent_p.entity,
+                    rel.source_fact_ids or "[]",
+                )
 
         else:
             # The three branches above cover n-ary/M:N, binary 1:N and binary
@@ -647,6 +786,30 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
         for _ in range(3):
             if not schema._validate():
                 break
+
+            # Column dedup: if a table has duplicate column names, merge them
+            # by keeping the first occurrence and extending its source_fact_ids.
+            # This fixes the case where an MVA table's value column coincides
+            # with a parent PK column name.
+            for table in schema.tables:
+                seen_col_names: Set[str] = set()
+                deduped = []
+                for col in table.columns:
+                    if col.name not in seen_col_names:
+                        seen_col_names.add(col.name)
+                        deduped.append(col)
+                    else:
+                        existing = next(c for c in deduped if c.name == col.name)
+                        existing.source_fact_ids = list(
+                            set(existing.source_fact_ids) | set(col.source_fact_ids)
+                        )
+                if len(deduped) != len(table.columns):
+                    logger.info(
+                        "  [Mapper] Repair: deduplicated %d duplicate column(s) in table '%s'.",
+                        len(table.columns) - len(deduped),
+                        table.name,
+                    )
+                    table.columns = deduped
 
             # FK-target tables are legitimate parent/lookup entities -- never drop them
             # as "hollow" even if they only have a PK (dropping orphans referencing FKs).
@@ -695,12 +858,18 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                     )
                     continue
 
-                # Identify hollow tables (PK-only), exempting composite-PK junctions and
-                # FK-target tables.
+                # Identify hollow tables (PK-only), exempting composite-PK junctions,
+                # FK-target tables, and FK-referencing tables (tables that hold a FK
+                # pointing to another table -- e.g. MVA tables -- serve a structural
+                # purpose even without descriptive columns).
+                fk_referencing = {
+                    r.referencing_table for r in (schema.relationships or [])
+                }
                 non_pk_cols = [c for c in t.columns if c.name not in t.pk_set]
                 if (
                     not t.is_composite_pk
                     and t.name not in referred
+                    and t.name not in fk_referencing
                     and not non_pk_cols
                     and len(schema.tables) > 1
                 ):

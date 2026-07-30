@@ -1,3 +1,4 @@
+import copy
 import logging
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict
@@ -98,7 +99,25 @@ def apply_adjudicator_patches(cm: ConceptualModel, patches: List) -> ConceptualM
             ea = next((e for e in new_cm.entities if e.name == p.entity_a), None)
             eb = next((e for e in new_cm.entities if e.name == p.entity_b), None)
             if ea and eb:
-                ea.name = p.new_name
+                # If new_name collides with an existing third entity, suffix it.
+                # This prevents silent data loss from duplicate entity names.
+                resolved_name = p.new_name
+                existing_names = {
+                    e.name for e in new_cm.entities if e is not ea and e is not eb
+                }
+                if resolved_name in existing_names:
+                    i = 2
+                    while f"{resolved_name}_{i}" in existing_names:
+                        i += 1
+                    logger.warning(
+                        "  [Stage 2] MERGE_ENTITIES new_name '%s' collides with "
+                        "existing entity; using '%s_%d'.",
+                        resolved_name,
+                        resolved_name,
+                        i,
+                    )
+                    resolved_name = f"{resolved_name}_{i}"
+                ea.name = resolved_name
                 existing = {a.name for a in ea.attributes}
                 for a in eb.attributes:
                     if a.name not in existing:
@@ -110,7 +129,10 @@ def apply_adjudicator_patches(cm: ConceptualModel, patches: List) -> ConceptualM
                 for r in new_cm.relationships:
                     for part in r.participants:
                         if part.entity in [p.entity_a, p.entity_b]:
-                            part.entity = p.new_name
+                            part.entity = resolved_name
+                for e in new_cm.entities:
+                    if e.owner in [p.entity_a, p.entity_b]:
+                        e.owner = resolved_name
             else:
                 logger.warning(
                     f"MERGE_ENTITIES patch: could not find entities '{p.entity_a}' or '{p.entity_b}' in model"
@@ -267,6 +289,16 @@ async def orchestrate(
     logger.info(
         f"[Stage 2] Multi-Verse Merging completed. Total entities: {len(combined_cm.entities)}"
     )
+
+    # Validate merged conceptual model
+    merge_errors = combined_cm.get_errors()
+    if merge_errors:
+        logger.warning(
+            "[Stage 2] Merged conceptual model has %d error(s): %s",
+            len(merge_errors),
+            "; ".join(merge_errors[:5]),
+        )
+
     dump_artifact(artifact_dir, "02_merged_conceptual_model", combined_cm)
 
     if flags:
@@ -337,6 +369,15 @@ async def orchestrate(
             f"[Stage 2] Adjudicator returned {len(all_patches)} resolution patches. Applying..."
         )
         combined_cm = apply_adjudicator_patches(combined_cm, all_patches)
+
+        # Validate after adjudication
+        adj_errors = combined_cm.get_errors()
+        if adj_errors:
+            logger.warning(
+                "[Stage 2] Conceptual model after adjudication has %d error(s): %s",
+                len(adj_errors),
+                "; ".join(adj_errors[:5]),
+            )
 
         # Post-merge relationship deduplication
         seen_rel_keys: set = set()
@@ -465,8 +506,61 @@ async def orchestrate(
             )
             from src.util.schema_ops.patching_engine import apply_patches
 
-            apply_patches(global_schema, cert_report.patches, registry=registry)
-            logger.info(f"[Stage 2] Applied {len(cert_report.patches)} patches.")
+            # --- activate the 11 dormant patch validators ---
+            # Every patch class carries a schema-aware _validate() that was
+            # never called. CritiqueReport._validate() also existed but was
+            # dead code. Now we call it and skip failing patches, mirroring
+            # how apply_adjudicator_patches already handles ResolutionAction.
+            validation_results = cert_report._validate(global_schema)
+            skipped: set[int] = set()
+            for vr in validation_results:
+                skipped.add(vr.patch_index)
+                logger.warning(
+                    "[Stage 2] Skipping certifier patch %d (%s): %s",
+                    vr.patch_index,
+                    vr.action.value,
+                    "; ".join(vr.errors),
+                )
+            if skipped:
+                cert_report.patches = [
+                    p for i, p in enumerate(cert_report.patches) if i not in skipped
+                ]
+                logger.info(
+                    "[Stage 2] Skipped %d invalid certifier patch(es); %d remain.",
+                    len(skipped),
+                    len(cert_report.patches),
+                )
+
+            if cert_report.patches:
+                # Snapshot so we can revert if the post-apply schema is
+                # regressed.
+                pre_schema = copy.deepcopy(global_schema)
+                apply_patches(global_schema, cert_report.patches, registry=registry)
+                logger.info(
+                    "[Stage 2] Applied %d certifier patches.", len(cert_report.patches)
+                )
+
+                # Normalize and validate the post-patch schema.
+                # This catches regressions that individual patch validators
+                # cannot (e.g. duplicate-table collisions after rename, or
+                # primary-key-only tables after column deletion).
+                global_schema.normalize()
+                post_errors = global_schema._validate()
+                if post_errors:
+                    logger.warning(
+                        "[Stage 2] Certifier patches introduced %d validation "
+                        "error(s), reverting all patches this round: %s",
+                        len(post_errors),
+                        "; ".join(post_errors[:5]),
+                    )
+                    # Restore the pre-patch schema (deep copy).
+                    global_schema.tables = pre_schema.tables
+                    global_schema.relationships = pre_schema.relationships
+                    global_schema.normalize()
+            else:
+                logger.info(
+                    "[Stage 2] All certifier patches were invalid; none applied."
+                )
 
             # Patches can add tables the provenance pass above never saw, since
             # it ran before certification. Report them rather than leaving the
