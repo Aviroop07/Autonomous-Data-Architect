@@ -74,7 +74,21 @@ PROVIDERS: Dict[str, ProviderSpec] = {
         base_url="https://api.groq.com/openai/v1",
         default_model="llama-3.3-70b-versatile",
         model_env="GROQ_BASE_MODEL",
-        method="function_calling",
+        # MEASURED, 2026-07-30. Under function_calling, llama-3.3-70b returns
+        # "400 Failed to call a function" for this project's real output schemas
+        # -- an unconditional rejection, so groq could not run the pipeline at
+        # all. json_mode clears that. It does not make groq unconditionally
+        # capable: a 121-fact extraction then fails with LengthFinishReasonError
+        # because the model's output limit binds (~8k tokens; a 30-fact chunk
+        # completes at 8,119). But a size limit is something chunking already
+        # solves, whereas the 400 was a wall.
+        #
+        # Unlike Gemini and DeepSeek above, this is NOT a statement about groq's
+        # API -- groq offers function calling, and cerebras uses that path
+        # successfully on the same schemas. It is the MODEL that cannot emit a
+        # valid call for a large recursive schema, and method is per-provider
+        # rather than per-model, so this is the granularity available.
+        method="json_mode",
     ),
     "cerebras": ProviderSpec(
         name="cerebras",

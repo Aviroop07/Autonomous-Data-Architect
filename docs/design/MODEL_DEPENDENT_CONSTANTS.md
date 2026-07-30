@@ -99,19 +99,39 @@ attributes per entity. Essentially the whole 41-table domain, in one call, for
 19k tokens -- against the 5 chunks and 370-450k Stage 2 tokens gemini needs to
 reach the same coverage.
 
-Three conclusions:
+Four conclusions:
 
 1. **The 900-token default is pessimised to the weakest model and would HURT the
    others.** On cerebras or deepseek it splits into 4 calls what one call handles
    better, and splitting is not free -- entities separated across chunks must be
    reunified by the conceptual merger. A fixed constant is the wrong SHAPE for
    this parameter, which promotes adaptive re-chunking from refinement to fix.
-2. **Portability fails before capacity does.** groq cannot run this pipeline at
-   all: its tool-calling path rejects the recursive ConceptualModel schema, the
-   same failure CLAUDE.md documents for vLLM and the reason `PROVIDER=vllm` routes
-   to `json_mode`. Routing groq the same way is the obvious repair. Latency is the
-   other wall -- openrouter's free tier exceeds 7 minutes for one call.
-3. **Cost and speed do not track capability here.** cerebras reached the same
+2. **Portability fails before capacity does -- and one case is now FIXED.** groq
+   could not run this pipeline at all under `function_calling`: a flat
+   "400 Failed to call a function" on the recursive ConceptualModel schema. Note
+   this is the MODEL, not the API -- cerebras uses `function_calling` on the same
+   schemas successfully. Routing groq to `json_mode` clears the wall, and its
+   remaining limit is output SIZE, which chunking already solves:
+
+   | groq, llama-3.3-70b | result |
+   |---|---|
+   | 121 facts, function_calling | 400 Failed to call a function |
+   | 121 facts, json_mode | `LengthFinishReasonError` -- output limit |
+   | 30 facts, json_mode | 8 entities, 8,119 tokens, 7.4s |
+   | 15 facts, json_mode | 3 entities, 6,629 tokens |
+
+   Latency remains a separate wall: openrouter's free tier exceeds 7 minutes for
+   one call.
+
+3. **The chunk budget must model OUTPUT scale, not just input.** groq's ~8k output
+   ceiling caps it near 30 facts per call regardless of how well it models. So the
+   extraction-capacity ceiling has two independent justifications -- modelling
+   quality (gemini collapses at 121) and output limits (groq errors at 121) -- and
+   a budget derived only from input tokens cannot see the second. This is also the
+   case the `finish_reason` truncation warning in `invoke.py` exists for; here the
+   SDK raised outright, but a provider that silently truncates instead would have
+   produced a small schema with no error at all.
+4. **Cost and speed do not track capability here.** cerebras reached the same
    result as deepseek in 57% of the time and 58% of the tokens.
 
 Caveat: one call per provider, extractor only (no auditor rounds, merge or
