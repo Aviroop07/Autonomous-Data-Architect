@@ -46,6 +46,24 @@ Ranked by how hard the failure is to notice.
    *Symptom:* constraints dropped with "not found in schema" / "ambiguous at
    grain". Seen live: 10 of 13 constraints refused on a 16-table shard.
 
+   **Measured, and it is NOT the collapse Stage 2 had.** Same 41-table schema and
+   121 facts, varying only tables-per-shard:
+
+   | cap | shards | constraints | square | loose | tokens |
+   |---|---|---|---|---|---|
+   | 41 | 2 `[2,41]` | 16 | 14 | 2 | 143,526 |
+   | 14 | 4 `[14,14,8,14]` | 21 | 14 | 4 | 298,584 |
+
+   Smaller shards do help -- +31% constraints and two more loose probes -- but a
+   41-table shard still yields a usable contract, where Stage 2 given the whole
+   domain collapsed from 43 tables to 9. So this is an OPTIMIZATION, not a
+   defect, and the default is deliberately left alone: two points at one run each
+   cannot justify doubling the token cost, given this session measured Stage 1
+   variance at 15-vs-121 facts on identical input. Revisit with repeats per point.
+   (A cap of 8 was attempted and the ILP found no feasible sharding -- a
+   harness limitation, `max_shards` was set to exactly `ceil(43/8)` with no slack
+   for the co-location constraints, not a pipeline finding.)
+
 3. **Round counts too low** -- the loop exhausts its budget with unresolved
    findings and ships whatever it has. This one at least logs, loudly, since the
    withholding work landed.
