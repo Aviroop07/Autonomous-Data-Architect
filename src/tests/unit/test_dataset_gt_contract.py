@@ -142,13 +142,30 @@ def test_perfect_data_does_not_score_worst_case(
     assert data is not None
 
     result = evaluate_column(data, spec)
-    assert not (result["distance"] >= 0.99 and result["mre"] >= 0.99), (
+
+    # A column with a FREE parameter has no fidelity number by design: KS tests
+    # the data against the whole distribution, so with a parameter the prose
+    # never states it would be scoring a target the specification did not set.
+    # `None` here is the tier system working, not a failure -- but the tier must
+    # be the reason, so anything reporting None WITHOUT a free parameter still
+    # fails, rather than the check quietly evaporating for every column.
+    if result["distance"] is None:
+        assert result["distance_kind"] == "unscoreable_free_params", (
+            f"case {case_id} {column}: no distance and no free parameter to "
+            f"explain it -- {result}"
+        )
+        assert result.get("n_free", 0) > 0, (
+            f"case {case_id} {column}: marked unscoreable but every parameter "
+            f"is pinned -- {result}"
+        )
+        return
+
+    assert not (result["distance"] >= 0.99 and (result["mre"] or 0.0) >= 0.99), (
         f"case {case_id} column {column} ({family}) scores worst-case on data drawn "
         f"from its own ground truth: {result}"
     )
     assert result["distance"] < 0.5, (
-        f"case {case_id} {column}: {result['distance_kind']}="
-        f"{result['distance']:.3f}"
+        f"case {case_id} {column}: {result['distance_kind']}={result['distance']:.3f}"
     )
 
 

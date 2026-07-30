@@ -41,8 +41,13 @@ def test_mre_missing_pred_key_skipped():
     assert _mre(pred, gt) == 0.0
 
 
-def test_mre_no_common_keys_returns_one():
-    assert _mre({"alpha": 1.0}, {"mean": 5.0}) == 1.0
+def test_mre_no_common_keys_returns_none_not_a_vacuous_worst_score():
+    # Changed deliberately from 1.0. "Nothing was comparable" and "everything
+    # compared badly" are different facts, and once averaged across columns a
+    # vacuous 1.0 is indistinguishable from a real one -- so a column with no
+    # comparable parameter would drag the benchmark down as though the pipeline
+    # had got it wrong. None makes the column excludable from the denominator.
+    assert _mre({"alpha": 1.0}, {"mean": 5.0}) is None
 
 
 def test_mre_gt_param_zero_uses_one_as_denom():

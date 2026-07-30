@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import math
 import warnings
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -54,21 +54,67 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _mre(pred_params: Dict[str, float], gt_params: Dict[str, float]) -> float:
+def _source_param(family: str, key: str) -> str:
+    """Undo _parse_gt_dist's renaming, so a tier can be looked up.
+
+    Tiers are recorded against the vocabulary cases.jsonl is authored in
+    (mean/variance/lambda/min/max), while scoring happens in the vocabulary
+    distributions.py computes with (mu/sigma/rate/low/high). Without this the
+    tier lookup silently misses and every parameter falls back to `point`,
+    which is exactly the behaviour the tiers exist to stop.
+    """
+    if key.startswith("p_"):
+        return "weights"
+    if family == "lognormal":
+        return {"mu": "mean", "sigma": "variance"}.get(key, key)
+    if family == "exponential":
+        return {"rate": "lambda"}.get(key, key)
+    if family == "uniform":
+        return {"low": "min", "high": "max"}.get(key, key)
+    return key
+
+
+def param_tiers(spec: Dict[str, Any]) -> Dict[str, str]:
+    """How each parameter of this ground-truth spec may legitimately be scored.
+
+    A spec with no `scoring` block is treated as entirely `point`, so datasets
+    predating the annotation score exactly as before.
+    """
+    scoring = spec.get("scoring") or {}
+    out: Dict[str, str] = {}
+    for name, entry in scoring.items():
+        if isinstance(entry, dict) and isinstance(entry.get("tier"), str):
+            out[name] = entry["tier"]
+    return out
+
+
+def _mre(
+    pred_params: Dict[str, float],
+    gt_params: Dict[str, float],
+    scoreable: Optional[Callable[[str], bool]] = None,
+) -> Optional[float]:
     """
     Mean Relative Error between predicted and ground-truth distribution params.
 
-    Only numeric (float-valued) parameters that exist in both dicts are compared.
-    Returns 1.0 (worst case) when no common parameters exist.
+    Only numeric parameters present in both dicts are compared, and only those
+    the specification actually PINS. A parameter the prose never states is a
+    free variable -- comparing it to a point target marks the pipeline wrong
+    for a choice it was entitled to make.
+
+    Returns None, not 1.0, when nothing is comparable. A vacuous perfect or
+    vacuous worst score is indistinguishable from a real one once averaged,
+    which is the same trap the IC-Recall and CSR guards exist to close.
     """
     errors: List[float] = []
     for key, gt_val in gt_params.items():
         if key not in pred_params:
             continue
+        if scoreable is not None and not scoreable(key):
+            continue
         pred_val = pred_params[key]
         denom = abs(gt_val) if gt_val != 0.0 else 1.0
         errors.append(abs(pred_val - gt_val) / denom)
-    return float(np.mean(errors)) if errors else 1.0
+    return float(np.mean(errors)) if errors else None
 
 
 def _nll(data: np.ndarray, family: str, gt_params: Dict[str, float]) -> float:
@@ -230,7 +276,7 @@ def _parse_gt_dist(spec: Dict[str, Any]) -> Optional[Tuple[str, Dict[str, float]
 def evaluate_column(
     data: np.ndarray,
     gt_spec: Dict[str, Any],
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
     """
     Compute MRE, NLL, KS, FA for a single column's generated data vs its GT spec.
 
@@ -257,8 +303,20 @@ def evaluate_column(
     # worst-case number. It also routes to total variation distance rather than
     # KS, because KS is a supremum over a CUMULATIVE distribution and nominal
     # labels have no ordering to accumulate along.
+    tiers = param_tiers(gt_spec)
+
+    def _is_point(key: str) -> bool:
+        return tiers.get(_source_param(family, key), "point") == "point"
+
+    # KS and NLL compare the data against the WHOLE ground-truth distribution,
+    # so they are point tests on every parameter at once. If any parameter of
+    # this column is free, the distribution being tested against is partly one
+    # the specification never asked for, and the distance is not a fidelity
+    # measure -- it is reported as unscoreable rather than as a bad score.
+    all_pinned = all(_is_point(k) for k in gt_params)
+
     if family == "categorical":
-        return _evaluate_categorical(data, gt_params)
+        return _evaluate_categorical(data, gt_params, _is_point, all_pinned)
 
     arr = np.asarray(data, dtype=float).ravel()
     arr = arr[np.isfinite(arr)]
@@ -271,19 +329,59 @@ def evaluate_column(
     except Exception:
         return dict(WORST_CASE)
 
-    mre = _mre(pred_params, gt_params)
-    nll = _nll(arr, family, gt_params)
-    ks = _ks(arr, family, gt_params)
-
-    return {
-        "mre": min(mre, 1.0),
-        "nll": max(nll, 0.0),
-        "distance": min(ks, 1.0),
-        "distance_kind": "ks",
+    mre = _mre(pred_params, gt_params, _is_point)
+    out: Dict[str, Any] = {
+        "mre": None if mre is None else min(mre, 1.0),
+        "n_pinned": sum(1 for k in gt_params if _is_point(k)),
+        "n_free": sum(1 for k in gt_params if not _is_point(k)),
     }
+    if all_pinned:
+        out["nll"] = max(_nll(arr, family, gt_params), 0.0)
+        out["distance"] = min(_ks(arr, family, gt_params), 1.0)
+        out["distance_kind"] = "ks"
+    else:
+        out["nll"] = None
+        out["distance"] = None
+        out["distance_kind"] = "unscoreable_free_params"
+    out.update(_score_bands(pred_params, family, gt_spec))
+    return out
 
 
-def _evaluate_categorical(data: Any, gt_params: Dict[str, float]) -> Dict[str, Any]:
+def _score_bands(
+    pred_params: Dict[str, float], family: str, gt_spec: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Plausibility, not fidelity: did an estimated free parameter land in band?
+
+    Reported with its own denominator. Folded into the fidelity average, a
+    case would score well merely for being under-specified, which rewards
+    vague specifications -- the opposite of what this benchmark measures.
+    """
+    bands = gt_spec.get("free_params") or {}
+    if not bands:
+        return {}
+    applicable = satisfied = 0
+    for key, value in pred_params.items():
+        band = bands.get(_source_param(family, key))
+        if not isinstance(band, dict):
+            continue
+        lo, hi = band.get("min"), band.get("max")
+        if not isinstance(lo, (int, float)) or not isinstance(hi, (int, float)):
+            continue
+        # A lognormal's spread is stored as a variance but estimated as sigma.
+        estimated = value * value if (family == "lognormal" and key == "sigma") else value
+        applicable += 1
+        satisfied += 1 if lo <= estimated <= hi else 0
+    if not applicable:
+        return {}
+    return {"band_applicable": applicable, "band_satisfied": satisfied}
+
+
+def _evaluate_categorical(
+    data: Any,
+    gt_params: Dict[str, float],
+    is_point: Optional[Callable[[str], bool]] = None,
+    all_pinned: bool = True,
+) -> Dict[str, Any]:
     """MRE, NLL and TVD for a categorical of any label type."""
     observed = categorical_pmf(data)
     if not observed:
@@ -297,7 +395,7 @@ def _evaluate_categorical(data: Any, gt_params: Dict[str, float]) -> Dict[str, A
     # estimated pmf to the stated pmf IS the parameter comparison here -- a
     # categorical has no parameters other than its category probabilities.
     pred_params = {f"p_{k}": v for k, v in observed.items()}
-    mre = _mre(pred_params, {f"p_{k}": v for k, v in expected.items()})
+    mre = _mre(pred_params, {f"p_{k}": v for k, v in expected.items()}, is_point)
 
     # NLL by label, normalised against the most probable category, mirroring the
     # continuous case where it is normalised against the mode.
@@ -307,13 +405,17 @@ def _evaluate_categorical(data: Any, gt_params: Dict[str, float]) -> Dict[str, A
         nll = 0.0
     else:
         best = max(expected.values())
-        nll = float(np.exp(float(np.mean(finite)) - math.log(best))) if best > 0 else 0.0
+        nll = (
+            float(np.exp(float(np.mean(finite)) - math.log(best))) if best > 0 else 0.0
+        )
 
     return {
-        "mre": min(mre, 1.0),
-        "nll": max(nll, 0.0),
-        "distance": total_variation_distance(observed, expected),
-        "distance_kind": "tvd",
+        "mre": None if mre is None else min(mre, 1.0),
+        "nll": max(nll, 0.0) if all_pinned else None,
+        "distance": total_variation_distance(observed, expected)
+        if all_pinned
+        else None,
+        "distance_kind": "tvd" if all_pinned else "unscoreable_free_params",
     }
 
 
@@ -389,11 +491,43 @@ def evaluate_data(
     )
     n_evaluated = len(scores_list) - n_missing
 
+    def _avg(key: str) -> Optional[float]:
+        """Average over the columns this metric can legitimately score.
+
+        Columns whose parameters the specification never states carry None,
+        and they are EXCLUDED rather than defaulted. Substituting a value --
+        1.0 or 0.0 -- would let a benchmark's score move with how vague its
+        specifications are, in whichever direction the default happened to
+        favour. The denominator is reported alongside so the coverage is
+        visible rather than implied.
+        """
+        vals = [s[key] for s in scores_list if isinstance(s.get(key), (int, float))]
+        return float(np.mean(vals)) if vals else None
+
+    band_applicable = sum(int(s.get("band_applicable", 0) or 0) for s in scores_list)
+    band_satisfied = sum(int(s.get("band_satisfied", 0) or 0) for s in scores_list)
+
     return {
         "column_scores": column_scores,
-        "mre": float(np.mean([s["mre"] for s in scores_list])),
-        "nll": float(np.mean([s["nll"] for s in scores_list])),
-        "distance": float(np.mean([s["distance"] for s in scores_list])),
+        "mre": _avg("mre"),
+        "nll": _avg("nll"),
+        "distance": _avg("distance"),
+        # Fidelity's own denominator: how many columns the specification pinned
+        # tightly enough to score at all.
+        "n_scoreable": sum(
+            1 for s in scores_list if isinstance(s.get("distance"), (int, float))
+        ),
+        "n_unscoreable": sum(
+            1
+            for s in scores_list
+            if s.get("distance_kind") == "unscoreable_free_params"
+        ),
+        # Plausibility is a SEPARATE tier with a separate denominator. Folded
+        # into fidelity, a case would score well for being under-specified.
+        "plausibility_rate": (
+            band_satisfied / band_applicable if band_applicable else None
+        ),
+        "n_band_applicable": band_applicable,
         # Which distance each column used, so a mean over mixed kinds is never
         # reported as if it were homogeneous.
         "distance_kinds": {
