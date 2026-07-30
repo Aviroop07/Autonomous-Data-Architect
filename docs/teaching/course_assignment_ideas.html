@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Course Assignment Ideas -- Database Schema Design &amp; Generation</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161a22;
+    --accent: #5eb0ff;
+    --accent2: #ffb648;
+    --text: #eef1f6;
+    --muted: #9aa4b2;
+    --card: #1c212c;
+    --border: #2a3140;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f5f6f8;
+      --panel: #ffffff;
+      --accent: #1863c9;
+      --accent2: #c9760f;
+      --text: #1b1f27;
+      --muted: #5b6472;
+      --card: #ffffff;
+      --border: #dde2ea;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    overflow: hidden;
+  }
+  #deck { position: relative; width: 100vw; height: 100vh; overflow: hidden; }
+  .slide {
+    position: absolute; inset: 0;
+    display: none;
+    flex-direction: column;
+    padding: 6vh 8vw;
+    overflow-y: auto;
+  }
+  .slide.active { display: flex; }
+  .slide h1 {
+    font-size: clamp(1.8rem, 4vw, 2.8rem);
+    margin: 0 0 0.3em 0;
+    color: var(--text);
+    border-bottom: 3px solid var(--accent);
+    padding-bottom: 0.3em;
+  }
+  .slide h2.kicker {
+    font-size: clamp(0.9rem, 1.6vw, 1.1rem);
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin: 0 0 0.6em 0;
+    font-weight: 600;
+  }
+  .slide p.lede {
+    font-size: clamp(1rem, 1.6vw, 1.25rem);
+    color: var(--muted);
+    max-width: 60ch;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 1.1em 1.4em;
+    margin-bottom: 1em;
+  }
+  .card h3 {
+    margin: 0 0 0.4em 0;
+    font-size: clamp(1.05rem, 2vw, 1.3rem);
+    color: var(--text);
+    display: flex; align-items: center; gap: 0.5em;
+  }
+  .card h3 .num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 1.6em; height: 1.6em; border-radius: 50%;
+    background: var(--accent); color: #0b0e13;
+    font-size: 0.75em; font-weight: 700; flex: none;
+  }
+  .card .label {
+    font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--muted); font-weight: 600; margin-top: 0.5em; margin-bottom: 0.15em;
+  }
+  .card p { margin: 0.15em 0 0.5em 0; line-height: 1.5; font-size: 0.98rem; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.1em; }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+  .track-badge {
+    display: inline-block; padding: 0.25em 0.9em; border-radius: 999px;
+    font-size: 0.8rem; font-weight: 700; letter-spacing: 0.03em;
+    margin-bottom: 0.8em;
+  }
+  .track-badge.undergrad { background: rgba(94,176,255,0.18); color: var(--accent); border: 1px solid var(--accent); }
+  .track-badge.senior { background: rgba(255,182,72,0.18); color: var(--accent2); border: 1px solid var(--accent2); }
+  table.compare {
+    width: 100%; border-collapse: collapse; margin-top: 0.5em;
+  }
+  table.compare th, table.compare td {
+    border: 1px solid var(--border); padding: 0.7em 0.9em; text-align: left;
+    font-size: 0.95rem; vertical-align: top;
+  }
+  table.compare th { background: var(--card); color: var(--accent); }
+  .cover {
+    justify-content: center; align-items: flex-start;
+  }
+  .cover .big { font-size: clamp(2.2rem, 5.5vw, 4rem); margin: 0; line-height: 1.1; }
+  .cover .sub { color: var(--muted); font-size: clamp(1rem, 2vw, 1.4rem); margin-top: 0.6em; max-width: 55ch; }
+  .cover .tracks { display: flex; gap: 1.5em; margin-top: 2.2em; flex-wrap: wrap; }
+  .cover .tracks div {
+    background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+    padding: 1.2em 1.6em; min-width: 220px;
+  }
+  .cover .tracks div b { display:block; font-size:1.1rem; margin-bottom:0.3em; }
+  footer.pageno {
+    position: absolute; bottom: 1.2em; right: 2em; color: var(--muted); font-size: 0.85rem;
+  }
+  #nav {
+    position: fixed; bottom: 1.2em; left: 2em; display: flex; gap: 0.6em; z-index: 10;
+  }
+  #nav button {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 0.5em 0.9em; cursor: pointer; font-size: 0.95rem;
+  }
+  #nav button:hover { border-color: var(--accent); color: var(--accent); }
+  #progress {
+    position: fixed; top: 0; left: 0; height: 4px; background: var(--accent);
+    transition: width 0.25s ease; z-index: 10;
+  }
+  .goal {
+    font-style: normal; color: var(--muted); border-left: 3px solid var(--accent); padding-left: 0.7em;
+  }
+  @media print {
+    #nav, #progress { display: none; }
+    .slide { position: relative; display: flex !important; page-break-after: always; height: auto; min-height: 100vh; }
+    body { overflow: visible; }
+    #deck { overflow: visible; height: auto; }
+  }
+</style>
+</head>
+<body>
+<div id="progress"></div>
+<div id="deck">
+
+  <section class="slide active cover">
+    <h2 class="kicker">Course Assignment Ideas</h2>
+    <p class="big">Database Schema Design &amp; Generation</p>
+    <p class="sub">Two tracks of assignments built around natural-language-to-database generation: one for undergrads who know only schemas and SQL, one for seniors looking for an independent, tangential capstone project.</p>
+    <div class="tracks">
+      <div><b>Track 1</b>Undergrad -- "QA team for an automatic database generator" (4 assignments, SQL/schema only)</div>
+      <div><b>Track 2</b>Senior capstone -- standalone, tangential, research-flavored (4 project ideas)</div>
+    </div>
+  </section>
+
+  <section class="slide">
+    <span class="track-badge undergrad">UNDERGRAD TRACK</span>
+    <h1>Framing: "QA Team for an Automatic Database Generator"</h1>
+    <p class="lede">Every assignment below only requires schema design and SQL knowledge -- no LLM/agent background needed. Students act as a QA team auditing the output of an automatic database generator.</p>
+    <div class="card">
+      <p><b>Why this framing works:</b> it turns familiar SQL/schema exercises into an investigative, gamified activity, while producing genuinely useful adversarial testing on real generator output.</p>
+    </div>
+  </section>
+
+  <section class="slide">
+    <span class="track-badge undergrad">UNDERGRAD -- 1</span>
+    <h1><span class="num" style="display:inline-flex;align-items:center;justify-content:center;width:1.4em;height:1.4em;border-radius:50%;background:var(--accent);color:#0b0e13;font-size:0.6em;font-weight:700;vertical-align:middle;margin-right:0.3em;">1</span>Red-Team the Generator</h1>
+    <div class="card">
+      <p class="label">Given</p>
+      <p>A natural-language specification + the auto-generated relational schema for it.</p>
+      <p class="label">Task</p>
+      <p>Find cases where the schema is <i>structurally</i> valid (FKs/PKs fine) but permits <i>semantically</i> nonsensical data -- e.g. a patient discharged before being admitted, an employee who manages themselves, an order shipped before it's placed.</p>
+      <p class="label">Deliverable</p>
+      <p>(a) An <code>INSERT</code> sequence that exploits the gap. (b) A <code>CHECK</code> constraint / trigger / temporal constraint that fixes it.</p>
+      <p class="goal">Learning goal: distinguishing structural validity (FK/PK) from semantic validity (business rules). Gamified as a bug bounty, scored by genuine flaws found.</p>
+    </div>
+  </section>
+
+  <section class="slide">
+    <span class="track-badge undergrad">UNDERGRAD -- 2</span>
+    <h1>Schema Evolution Under Changing Requirements</h1>
+    <div class="card">
+      <p class="label">Given</p>
+      <p>Spec v1 -> generated schema v1. Then spec v2, where requirements changed (new entity, a relationship became many-to-many, a new business rule on a field).</p>
+      <p class="label">Task</p>
+      <p>Write the <code>ALTER TABLE</code> migration that evolves schema v1 into a schema satisfying v2 without data loss, plus a rollback script.</p>
+      <p class="goal">Learning goal: schemas as living artifacts, not one-shot designs. Also stress-tests whether generated schemas are evolvable in a sane way.</p>
+    </div>
+  </section>
+
+  <section class="slide">
+    <span class="track-badge undergrad">UNDERGRAD -- 3</span>
+    <h1>Build a SQL-Only Schema Critic</h1>
+    <div class="card">
+      <p class="label">Task</p>
+      <p>Write a set of <code>information_schema</code> / <code>pg_catalog</code> introspection queries that automatically detect schema violations: missing FKs implied by naming convention (e.g. a <code>customer_id</code> column with no FK), 2NF/3NF violations via functional-dependency heuristics, naming-convention non-compliance, orphan-prone tables.</p>
+      <p class="label">Deliverable</p>
+      <p>A runnable SQL-based auto-grader, tested against several auto-generated schemas and a few intentionally bad hand-written schemas as a sanity check.</p>
+      <p class="goal">Learning goal: normalization theory made operational -- a scrappy student-built version of an automated schema-quality metric.</p>
+    </div>
+  </section>
+
+  <section class="slide">
+    <span class="track-badge undergrad">UNDERGRAD -- 4</span>
+    <h1>Data Realism Audit</h1>
+    <div class="card">
+      <p class="label">Given</p>
+      <p>A schema with declared distribution constraints (e.g. "80% of loans under $50k", "credit score correlates with approval") + a synthetic dataset generated for it.</p>
+      <p class="label">Task</p>
+      <p>Write analytic SQL (window functions, <code>percentile_cont</code>, <code>GROUP BY</code> correlation checks) to verify the generated data actually matches the declared statistics.</p>
+      <p class="goal">Learning goal: SQL analytics applied to data quality and statistical validation.</p>
+    </div>
+  </section>
+
+  <section class="slide">
+    <span class="track-badge senior">SENIOR CAPSTONE TRACK</span>
+    <h1>Standalone, Tangential, Research-Flavored</h1>
+    <p class="lede">Each project below is a legitimate independent contribution -- gradable and potentially publishable on its own -- that happens to be complementary to database-generation research without depending on it.</p>
+  </section>
+
+  <section class="slide">
+    <span class="track-badge senior">SENIOR -- 1</span>
+    <h1>Schema-Equivalence Engine</h1>
+    <div class="card">
+      <p class="label">Problem</p>
+      <p>Two schemas can encode the same conceptual model under renaming or restructuring -- one normalizes address into its own table, the other doesn't; one uses a junction table, the other an array column.</p>
+      <p class="label">Task</p>
+      <p>Build a matcher combining graph-isomorphism-style structural comparison with name/embedding similarity that scores "are these the same schema conceptually," not just a textual diff.</p>
+      <p class="goal">Positioning: builds on schema/ontology matching literature -- a legitimate standalone contribution with potential publication value.</p>
+    </div>
+  </section>
+
+  <section class="slide">
+    <span class="track-badge senior">SENIOR -- 2</span>
+    <h1>Reverse Pipeline + Round-Trip Consistency Checker</h1>
+    <div class="card">
+      <p class="label">Problem</p>
+      <p>Validating NL-to-schema generation quality is hard without a gold-standard schema.</p>
+      <p class="label">Task</p>
+      <p>Build the reverse direction -- schema + constraints &rarr; natural-language description (schema summarization) -- then feed that description back through a schema generator and diff the result against the original schema.</p>
+      <p class="goal">Positioning: round-trip consistency is a known validation technique in translation and compilers, never applied to NL-schema generation before -- a novel, independent evaluation method.</p>
+    </div>
+  </section>
+
+  <section class="slide">
+    <span class="track-badge senior">SENIOR -- 3</span>
+    <h1>General Constraint-Satisfying Data Generator</h1>
+    <div class="card">
+      <p class="label">Task</p>
+      <p>Given schema + constraints (functional dependencies, <code>CHECK</code> constraints, statistical targets), generate valid synthetic rows at scale using constraint propagation or an SMT backend (e.g. Z3).</p>
+      <p class="label">Deliverable</p>
+      <p>Benchmark against existing tools (Faker, Mockaroo, SDV) on both correctness (constraint satisfaction rate) and throughput.</p>
+      <p class="goal">Positioning: a real systems project, releasable as a standalone open-source package.</p>
+    </div>
+  </section>
+
+  <section class="slide">
+    <span class="track-badge senior">SENIOR -- 4</span>
+    <h1>Cross-Dialect DDL Transpiler with Constraint-Preservation Verification</h1>
+    <div class="card">
+      <p class="label">Task</p>
+      <p>One abstract schema + constraint specification &rarr; DDL for multiple SQL dialects (PostgreSQL, MySQL, SQLite), plus a differential tester proving the constraint semantics (not just syntax) survive translation across dialects.</p>
+      <p class="goal">Positioning: standalone systems project, no NL/AI component at all.</p>
+    </div>
+  </section>
+
+  <section class="slide">
+    <h1>Track Comparison</h1>
+    <table class="compare">
+      <tr><th></th><th>Undergrad Track</th><th>Senior Capstone Track</th></tr>
+      <tr><td><b>Prerequisite knowledge</b></td><td>Schema design + SQL only</td><td>Schema design + SQL, plus independent systems/algorithms work</td></tr>
+      <tr><td><b>Scope</b></td><td>Single assignment, days to ~1-2 weeks</td><td>Semester-long capstone</td></tr>
+      <tr><td><b>Framing</b></td><td>QA team auditing generator output</td><td>Independent research/systems contribution</td></tr>
+      <tr><td><b>Relationship to generation pipeline</b></td><td>Directly audits real generator output</td><td>Tangential -- complementary but standalone</td></tr>
+      <tr><td><b>Payoff</b></td><td>Free adversarial QA + evaluation-metric prototypes</td><td>Potentially publishable, reusable tooling</td></tr>
+    </table>
+  </section>
+
+</div>
+
+<div id="nav">
+  <button id="prevBtn">&larr; Prev</button>
+  <button id="nextBtn">Next &rarr;</button>
+</div>
+
+<script>
+  const slides = document.querySelectorAll('.slide');
+  let idx = 0;
+  const progress = document.getElementById('progress');
+  function show(i) {
+    idx = Math.max(0, Math.min(slides.length - 1, i));
+    slides.forEach((s, j) => s.classList.toggle('active', j === idx));
+    progress.style.width = ((idx + 1) / slides.length * 100) + '%';
+    history.replaceState(null, '', '#' + (idx + 1));
+  }
+  document.getElementById('nextBtn').addEventListener('click', () => show(idx + 1));
+  document.getElementById('prevBtn').addEventListener('click', () => show(idx - 1));
+  window.addEventListener('keydown', (e) => {
+    if (['ArrowRight', 'PageDown', ' '].includes(e.key)) show(idx + 1);
+    if (['ArrowLeft', 'PageUp'].includes(e.key)) show(idx - 1);
+  });
+  const hashIdx = parseInt((location.hash || '#1').slice(1), 10) - 1;
+  show(isNaN(hashIdx) ? 0 : hashIdx);
+</script>
+
+</body>
+</html>

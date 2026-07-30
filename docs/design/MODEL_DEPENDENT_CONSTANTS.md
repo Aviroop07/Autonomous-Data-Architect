@@ -72,6 +72,53 @@ Ranked by how hard the failure is to notice.
    Bounded and unlikely to be catastrophic, since the margins are generous, but
    it silently skews all of the above.
 
+## Measured: the constant was calibrated on the WEAKEST model
+
+One er_extractor call, the SAME 121 facts from a 41-table spec, provider as the
+only variable (`experiments/provider_capacity_probe.py`):
+
+| provider | model | entities | rels | attrs | seconds | tokens |
+|---|---|---:|---:|---:|---:|---:|
+| cerebras | gpt-oss-120b | **38** | 49 | 144 | 82.5 | 18,967 |
+| deepseek | deepseek-v4-flash | **37** | 51 | 136 | 144.2 | 32,966 |
+| gemini | gemini-2.5-flash | **9** | - | - | - | - |
+| openrouter | nemotron-3-super-120b:free | timeout at 420s for one call |||||
+| groq | llama-3.3-70b | **400 Failed to call a function** -- schema unsupported |||||
+| openai | - | probe timeout |||||
+
+**Variance between the two capable models is LOW: 38 vs 37 entities (3%), 49 vs
+51 relationships, 144 vs 136 attributes.** They agree closely on a 121-fact input
+that gemini-2.5-flash reduces to 9 tables -- 4.2x fewer. So this is not general
+cross-model variance; it is gemini-2.5-flash being the weak one at this task, and
+the extraction-capacity constant was calibrated against it.
+
+The outputs are real, not stubs: 28 of cerebras's 38 entity names match a
+ground-truth table exactly and the other 10 are synonyms of one (AuditTrail/
+AUDIT_LOG, Entry/RACE_ENTRY, Order/KIT_ORDER, Upload/RIDE_UPLOAD, ...), at 3.8
+attributes per entity. Essentially the whole 41-table domain, in one call, for
+19k tokens -- against the 5 chunks and 370-450k Stage 2 tokens gemini needs to
+reach the same coverage.
+
+Three conclusions:
+
+1. **The 900-token default is pessimised to the weakest model and would HURT the
+   others.** On cerebras or deepseek it splits into 4 calls what one call handles
+   better, and splitting is not free -- entities separated across chunks must be
+   reunified by the conceptual merger. A fixed constant is the wrong SHAPE for
+   this parameter, which promotes adaptive re-chunking from refinement to fix.
+2. **Portability fails before capacity does.** groq cannot run this pipeline at
+   all: its tool-calling path rejects the recursive ConceptualModel schema, the
+   same failure CLAUDE.md documents for vLLM and the reason `PROVIDER=vllm` routes
+   to `json_mode`. Routing groq the same way is the obvious repair. Latency is the
+   other wall -- openrouter's free tier exceeds 7 minutes for one call.
+3. **Cost and speed do not track capability here.** cerebras reached the same
+   result as deepseek in 57% of the time and 58% of the tokens.
+
+Caveat: one call per provider, extractor only (no auditor rounds, merge or
+mapping), n=1 each. The 9-vs-37/38 gap far exceeds plausible run-to-run variance
+and two independent providers corroborate the high end, but the individual figures
+are single observations.
+
 ## When changing model, do this
 
 1. Set `EXTRACTION_CAPACITY_TOKENS` for the new model, or re-run the sweep:

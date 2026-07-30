@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Finalized Assignment -- Constraints, Triggers &amp; Distribution Checks</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161a22;
+    --accent: #5eb0ff;
+    --accent2: #ffb648;
+    --accent3: #7ee0a8;
+    --text: #eef1f6;
+    --muted: #9aa4b2;
+    --card: #1c212c;
+    --border: #2a3140;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f5f6f8;
+      --panel: #ffffff;
+      --accent: #1863c9;
+      --accent2: #c9760f;
+      --accent3: #1f8a52;
+      --text: #1b1f27;
+      --muted: #5b6472;
+      --card: #ffffff;
+      --border: #dde2ea;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    overflow: hidden;
+  }
+  #deck { position: relative; width: 100vw; height: 100vh; overflow: hidden; }
+  .slide {
+    position: absolute; inset: 0;
+    display: none;
+    flex-direction: column;
+    padding: 6vh 8vw;
+    overflow-y: auto;
+  }
+  .slide.active { display: flex; }
+  .slide h1 {
+    font-size: clamp(1.8rem, 4vw, 2.8rem);
+    margin: 0 0 0.3em 0;
+    color: var(--text);
+    border-bottom: 3px solid var(--accent);
+    padding-bottom: 0.3em;
+  }
+  .slide h2.kicker {
+    font-size: clamp(0.9rem, 1.6vw, 1.1rem);
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin: 0 0 0.6em 0;
+    font-weight: 600;
+  }
+  .slide p.lede {
+    font-size: clamp(1rem, 1.6vw, 1.25rem);
+    color: var(--muted);
+    max-width: 68ch;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 1.1em 1.4em;
+    margin-bottom: 1em;
+  }
+  .card h3 {
+    margin: 0 0 0.4em 0;
+    font-size: clamp(1.05rem, 2vw, 1.3rem);
+    color: var(--text);
+    display: flex; align-items: center; gap: 0.5em;
+  }
+  .card h3 .num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 1.6em; height: 1.6em; border-radius: 50%;
+    background: var(--accent); color: #0b0e13;
+    font-size: 0.75em; font-weight: 700; flex: none;
+  }
+  .card .label {
+    font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--muted); font-weight: 600; margin-top: 0.5em; margin-bottom: 0.15em;
+  }
+  .card p { margin: 0.15em 0 0.5em 0; line-height: 1.5; font-size: 0.98rem; }
+  .card ul { margin: 0.2em 0 0.4em 0; padding-left: 1.3em; }
+  .card li { margin: 0.35em 0; line-height: 1.5; font-size: 0.96rem; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.1em; }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+  .track-badge {
+    display: inline-block; padding: 0.25em 0.9em; border-radius: 999px;
+    font-size: 0.8rem; font-weight: 700; letter-spacing: 0.03em;
+    margin-bottom: 0.8em;
+  }
+  .track-badge.problem { background: rgba(94,176,255,0.18); color: var(--accent); border: 1px solid var(--accent); }
+  .track-badge.challenge { background: rgba(255,182,72,0.18); color: var(--accent2); border: 1px solid var(--accent2); }
+  .track-badge.plan { background: rgba(126,224,168,0.18); color: var(--accent3); border: 1px solid var(--accent3); }
+  table.compare {
+    width: 100%; border-collapse: collapse; margin-top: 0.5em;
+  }
+  table.compare th, table.compare td {
+    border: 1px solid var(--border); padding: 0.7em 0.9em; text-align: left;
+    font-size: 0.93rem; vertical-align: top;
+  }
+  table.compare th { background: var(--card); color: var(--accent); }
+  .cover {
+    justify-content: center; align-items: flex-start;
+  }
+  .cover .big { font-size: clamp(2rem, 5vw, 3.4rem); margin: 0; line-height: 1.15; }
+  .cover .sub { color: var(--muted); font-size: clamp(1rem, 2vw, 1.4rem); margin-top: 0.6em; max-width: 62ch; }
+  .cover .tracks { display: flex; gap: 1.5em; margin-top: 2.2em; flex-wrap: wrap; }
+  .cover .tracks div {
+    background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+    padding: 1.2em 1.6em; min-width: 220px;
+  }
+  .cover .tracks div b { display:block; font-size:1.1rem; margin-bottom:0.3em; }
+  .timeline { display: flex; flex-direction: column; gap: 0.7em; margin-top: 0.5em; }
+  .timeline .week {
+    display: grid; grid-template-columns: 110px 1fr; gap: 1em;
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 0.9em 1.2em; align-items: start;
+  }
+  .timeline .week b { color: var(--accent3); }
+  .timeline .week p { margin: 0.2em 0; font-size: 0.94rem; line-height: 1.45; }
+  footer.pageno {
+    position: absolute; bottom: 1.2em; right: 2em; color: var(--muted); font-size: 0.85rem;
+  }
+  #nav {
+    position: fixed; bottom: 1.2em; left: 2em; display: flex; gap: 0.6em; z-index: 10;
+  }
+  #nav button {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 0.5em 0.9em; cursor: pointer; font-size: 0.95rem;
+  }
+  #nav button:hover { border-color: var(--accent); color: var(--accent); }
+  #progress {
+    position: fixed; top: 0; left: 0; height: 4px; background: var(--accent);
+    transition: width 0.25s ease; z-index: 10;
+  }
+  .goal {
+    font-style: normal; color: var(--muted); border-left: 3px solid var(--accent); padding-left: 0.7em;
+  }
+  @media print {
+    #nav, #progress { display: none; }
+    .slide { position: relative; display: flex !important; page-break-after: always; height: auto; min-height: 100vh; }
+    body { overflow: visible; }
+    #deck { overflow: visible; height: auto; }
+  }
+</style>
+</head>
+<body>
+<div id="progress"></div>
+<div id="deck">
+
+  <section class="slide active cover">
+    <h2 class="kicker">Course Assignment -- Finalized</h2>
+    <p class="big">Constraints, Test Data &amp; Distribution Checks</p>
+    <p class="sub">The single problem statement finalized with Anupam, the three practical challenges it raises, and a concrete plan for running it inside a one-month IIT Hyderabad BTech course taught alongside SQL and normalization theory.</p>
+    <div class="tracks">
+      <div><b>1. Problem statement</b>What every group is asked to do</div>
+      <div><b>2. Three challenges</b>Workload / difficulty / LLM-resistance</div>
+      <div><b>3. Implementation plan</b>Fitting it into a one-month course</div>
+    </div>
+  </section>
+
+  <section class="slide">
+    <span class="track-badge problem">PROBLEM STATEMENT</span>
+    <h1>The Finalized Assignment</h1>
+    <p class="lede">One problem statement, given to the whole class. Each group of 3-4 students receives its own schema + natural-language description -- same task, different instance.</p>
+    <div class="card">
+      <h3><span class="num">1</span>Constraints &amp; Triggers</h3>
+      <p class="label">Given</p>
+      <p>A relational schema + the natural-language description it was built from.</p>
+      <p class="label">Task</p>
+      <p>Identify the business-rule constraints implied by the description that the schema's FKs/PKs do not enforce on their own, and write the <code>CHECK</code> constraints / triggers that enforce them.</p>
+    </div>
+    <div class="card">
+      <h3><span class="num">2</span>Constraint-Exercising Test Data</h3>
+      <p class="label">Task</p>
+      <p>Write <code>INSERT</code>/<code>DELETE</code>/<code>UPDATE</code> sequences that explicitly demonstrate each constraint from Part 1 both firing (rejecting a violation) and passing (accepting valid data) -- i.e. the student's own proof that their triggers actually work.</p>
+    </div>
+    <div class="card">
+      <h3><span class="num">3</span>Distributional Constraint Verification</h3>
+      <p class="label">Given</p>
+      <p>Distributional claims stated in the description (e.g. "80% of loans are under $50k", "credit score correlates with approval").</p>
+      <p class="label">Task</p>
+      <p>Write analytic SQL (window functions, <code>percentile_cont</code>, grouped correlation checks) that verifies whether a supplied dataset actually satisfies these claims.</p>
+    </div>
+  </section>
+
+  <section class="slide">
+    <span class="track-badge challenge">CHALLENGE 1 OF 3</span>
+    <h1>Instructor Workload</h1>
+    <div class="card">
+      <ul>
+        <li>The bottleneck is not writing the assignment text -- it's producing one distinct (schema, description) pair <i>per group</i>, each rich enough to have real semantic constraints and at least one non-trivial distributional claim.</li>
+        <li>Manually authored, this is 2-4 hours per pair with care; for 30-40 groups that is 60-150 hours of prep -- unrealistic inside a one-month course timeline.</li>
+        <li>Every auto-generated pair still needs a manual sanity pass: an ambiguous or ungradeable constraint costs time at grading, which is worse than costing time at authoring.</li>
+        <li>A fixed "difficulty envelope" (schema size, constraint count, number of distributional claims) has to be set once so groups get comparably-sized problems, not tuned per group.</li>
+        <li>Grading itself is recurring workload: each group's triggers, test sequences, and analytic SQL need to be run and checked, not just read.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="slide">
+    <span class="track-badge challenge">CHALLENGE 2 OF 3</span>
+    <h1>Student Difficulty</h1>
+    <div class="card">
+      <ul>
+        <li><b>Constraints/triggers from NL</b> -- moderate. A normal DB-course skill, but harder than usual because it is open-ended: there is no single correct constraint list to match against.</li>
+        <li><b>Test data proving violation/satisfaction</b> -- the most pedagogically valuable part, and the part students chronically underdo, since writing thorough test cases is unglamorous compared to writing the trigger itself.</li>
+        <li><b>Distributional verification via SQL</b> -- the hardest leg for a first-pass BTech course unless window functions and percentile queries have already landed in the syllabus by the time this is assigned.</li>
+        <li>Net effect: the assignment is front-loaded toward constraint-writing and back-loaded toward analytics -- sequencing inside the month matters as much as the content itself.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="slide">
+    <span class="track-badge challenge">CHALLENGE 3 OF 3</span>
+    <h1>LLM-Cheating Resistance</h1>
+    <div class="card">
+      <ul>
+        <li>Be realistic: writing triggers/CHECK constraints from a schema + NL spec is squarely in-distribution for current LLMs. Giving each group a different schema blocks copying between groups, but not LLM-assisted solving within a group.</li>
+        <li>The fix is not preventing LLM use -- it's grading on something a one-shot LLM answer doesn't reliably produce:
+          <ul>
+            <li><b>Hidden mutation-test battery</b>: the instructor holds a private set of insert/delete/update statements per problem (some should be rejected, some should pass). Grade the trigger set by how many it catches, not by reading the SQL.</li>
+            <li><b>Live oral component</b>: pick one trigger, change one requirement on the spot, ask the student to modify it in front of the grader (~5 min/group).</li>
+            <li><b>Cross-check the test-data leg</b> against the instructor's hidden mutations -- if a group's own test suite would not have caught cases they didn't personally author, that is a visible signal, independent of who wrote the SQL.</li>
+          </ul>
+        </li>
+        <li>This reframes grading from "did they cheat" (unenforceable) to "does the delivered artifact demonstrably work and can the student explain it live" (enforceable).</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="slide">
+    <span class="track-badge plan">IMPLEMENTATION PLAN</span>
+    <h1>Fitting This Into a One-Month Course</h1>
+    <p class="lede">Constraints: Anupam teaches SQL + database design + normalization theory to IIT Hyderabad BTech students over one month, and this assignment must run side-by-side with that coursework in the same window. Problem statements (schema + description per group) must be prepared before the month starts.</p>
+  </section>
+
+  <section class="slide">
+    <span class="track-badge plan">IMPLEMENTATION PLAN</span>
+    <h1>Before the Month Starts</h1>
+    <div class="card">
+      <h3>Pre-generate the per-group problem set</h3>
+      <ul>
+        <li>Fix the difficulty envelope first: schema size (e.g. 4-6 tables), 4-6 semantic constraints, 1-2 distributional claims per pair -- small enough that grading 30-40 groups is tractable inside the month.</li>
+        <li>Generate candidate (schema, description) pairs at that envelope size, then have a human pass over each one to confirm the intended constraints are unambiguous and the distributional claims are checkable from a dataset that will actually be supplied.</li>
+        <li>For each pair, author the hidden mutation-test battery and the "intended constraint list" answer key <i>at the same time</i> as the pair itself -- not later, so grading capacity is prepared alongside the problem, not improvised during the busy month.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="slide">
+    <span class="track-badge plan">IMPLEMENTATION PLAN</span>
+    <h1>During the Month -- Sequencing Against the Syllabus</h1>
+    <div class="timeline">
+      <div class="week">
+        <b>Week 1</b>
+        <p>Schema design + normalization theory taught in parallel. Assignment released but idle -- students read their group's schema/description, no deliverable due yet.</p>
+      </div>
+      <div class="week">
+        <b>Week 2</b>
+        <p>Once constraints/triggers and basic DML are covered in lecture: Part 1 (constraints &amp; triggers) opens. Students submit their trigger set for their group's schema.</p>
+      </div>
+      <div class="week">
+        <b>Week 3</b>
+        <p>Once more DML and basic analytic SQL (aggregates, window functions) are covered: Part 2 (test data proving violation/satisfaction) and Part 3 (distributional verification) open together.</p>
+      </div>
+      <div class="week">
+        <b>Week 4</b>
+        <p>Buffer week. Hidden mutation-test grading run against every group's Part 1 submission; live oral/on-the-spot-edit sessions scheduled per group; final scores reconciled.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="slide">
+    <span class="track-badge plan">IMPLEMENTATION PLAN</span>
+    <h1>Why This Sequencing Works</h1>
+    <div class="card">
+      <ul>
+        <li>Each part unlocks only after the SQL/normalization concept it depends on has actually been taught -- students are never asked to use a tool before lecture covers it.</li>
+        <li>Front-loading Part 1 (the moderate-difficulty leg) and back-loading Part 3 (the hardest, analytics-heavy leg) matches the difficulty profile identified in Challenge 2.</li>
+        <li>Preparing the hidden mutation battery and answer key <i>before</i> the month starts turns Week 4 grading into a mostly-mechanical run rather than fresh authoring under time pressure.</li>
+        <li>The one-time difficulty-envelope decision keeps every group's problem comparably sized, so a single hidden-mutation-battery template can be reused with per-group substitution instead of being redesigned 30-40 times.</li>
+      </ul>
+    </div>
+  </section>
+
+</div>
+
+<div id="nav">
+  <button id="prevBtn">&larr; Prev</button>
+  <button id="nextBtn">Next &rarr;</button>
+</div>
+
+<script>
+  const slides = document.querySelectorAll('.slide');
+  let idx = 0;
+  const progress = document.getElementById('progress');
+  function show(i) {
+    idx = Math.max(0, Math.min(slides.length - 1, i));
+    slides.forEach((s, j) => s.classList.toggle('active', j === idx));
+    progress.style.width = ((idx + 1) / slides.length * 100) + '%';
+    history.replaceState(null, '', '#' + (idx + 1));
+  }
+  document.getElementById('nextBtn').addEventListener('click', () => show(idx + 1));
+  document.getElementById('prevBtn').addEventListener('click', () => show(idx - 1));
+  window.addEventListener('keydown', (e) => {
+    if (['ArrowRight', 'PageDown', ' '].includes(e.key)) show(idx + 1);
+    if (['ArrowLeft', 'PageUp'].includes(e.key)) show(idx - 1);
+  });
+  const hashIdx = parseInt((location.hash || '#1').slice(1), 10) - 1;
+  show(isNaN(hashIdx) ? 0 : hashIdx);
+</script>
+
+</body>
+</html>

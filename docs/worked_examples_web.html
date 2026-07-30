@@ -1,0 +1,498 @@
+<title>ScribbleDB - Worked Examples</title>
+<style>
+:root {
+  --ink:      #14181d;
+  --paper:    #fbfcfd;
+  --panel:    #f2f6f8;
+  --rule:     #dbe3e9;
+  --muted:    #5d6b78;
+  --accent:   #0f6f7a;
+  --sans: ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --serif: Charter, "Iowan Old Style", Georgia, Cambria, "Times New Roman", serif;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink:    #e6edf3;
+    --paper:  #10151a;
+    --panel:  #161d24;
+    --rule:   #253039;
+    --muted:  #93a3b1;
+    --accent: #4fc3cf;
+  }
+}
+:root[data-theme="dark"] {
+  --ink: #e6edf3; --paper: #10151a; --panel: #161d24;
+  --rule: #253039; --muted: #93a3b1; --accent: #4fc3cf;
+}
+:root[data-theme="light"] {
+  --ink: #14181d; --paper: #fbfcfd; --panel: #f2f6f8;
+  --rule: #dbe3e9; --muted: #5d6b78; --accent: #0f6f7a;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+main {
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: 3rem 1.5rem 6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+}
+header.doc { display: flex; flex-direction: column; gap: 0.6rem; }
+h1 {
+  font-size: clamp(1.6rem, 1.2rem + 1.6vw, 2.3rem);
+  line-height: 1.15; margin: 0; letter-spacing: -0.02em;
+  text-wrap: balance; font-weight: 650;
+}
+p.lede {
+  margin: 0; max-width: 62ch; color: var(--muted); font-size: 1.02rem;
+}
+.eyebrow {
+  font-size: 0.7rem; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--accent); font-weight: 650;
+}
+
+table.summary {
+  border-collapse: collapse; width: 100%; font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+table.summary th {
+  text-align: left; font-size: 0.68rem; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--muted); font-weight: 650;
+  padding: 0 0.9rem 0.5rem 0; border-bottom: 1px solid var(--ink);
+}
+table.summary td {
+  padding: 0.55rem 0.9rem 0.55rem 0; border-bottom: 1px solid var(--rule);
+}
+table.summary td:last-child, table.summary th:last-child { text-align: right; }
+
+section.case {
+  display: flex; flex-direction: column; gap: 1.1rem;
+  padding-top: 1.6rem; border-top: 2px solid var(--ink);
+}
+section.case h2 {
+  margin: 0; font-size: 1.4rem; letter-spacing: -0.015em; font-weight: 650;
+  text-wrap: balance;
+}
+p.meta { margin: 0; color: var(--muted); font-size: 0.86rem; }
+
+h3.stage {
+  margin: 0.7rem 0 0; font-size: 0.94rem; font-weight: 650;
+  display: flex; align-items: baseline; gap: 0.55rem;
+}
+h3.stage .num {
+  font-family: var(--mono); font-size: 0.78rem; color: var(--accent);
+  border: 1px solid var(--rule); border-radius: 3px;
+  padding: 0.05rem 0.36rem; flex: none;
+}
+h4.family {
+  margin: 1rem 0 0.35rem; font-size: 0.82rem; font-weight: 650;
+  color: var(--muted); letter-spacing: 0.02em;
+}
+
+blockquote.spec {
+  margin: 0; padding: 1rem 1.2rem;
+  background: var(--panel); border-left: 3px solid var(--accent);
+  border-radius: 0 3px 3px 0;
+  font-family: var(--serif); font-size: 0.95rem; line-height: 1.65;
+  white-space: pre-wrap; color: var(--ink);
+}
+pre {
+  margin: 0; padding: 0.9rem 1rem;
+  background: var(--panel); border: 1px solid var(--rule); border-radius: 3px;
+  font-family: var(--mono); font-size: 0.78rem; line-height: 1.55;
+  overflow-x: auto;
+}
+code { font-family: var(--mono); }
+footer.doc {
+  margin-top: 1rem; padding-top: 1.2rem; border-top: 1px solid var(--rule);
+  color: var(--muted); font-size: 0.82rem; max-width: 62ch;
+}
+@media (max-width: 34rem) {
+  main { padding: 2rem 1rem 4rem; }
+  pre { font-size: 0.72rem; }
+}
+</style>
+<main>
+<header class="doc">
+<span class="eyebrow">Natural language to relational database</span>
+<h1>ScribbleDB &mdash; Worked Examples</h1>
+<p class="lede">Three natural-language specifications taken through the pipeline. Facts are extracted from the text, a relational schema is generated from those facts, and constraints are derived from both. For each case: the specification exactly as its author wrote it, the schema the system produced, and the constraints it extracted.</p>
+</header>
+<table class="summary"><thead><tr><th>Domain</th><th>Author's technical background</th><th>Tables generated</th></tr></thead><tbody><tr><td>Solar Farm Generation</td><td>Non-Technical</td><td>6</td></tr><tr><td>Materials Science Experiment Tracking</td><td>Semi-Technical</td><td>9</td></tr><tr><td>Clinical Trial Management</td><td>Technical Expert</td><td>14</td></tr></tbody></table>
+<section class="case">
+<h2>Solar Farm Generation</h2>
+<p class="meta">Author's technical background: Non-Technical &middot; specification 3,705 characters</p>
+<h3 class="stage"><span class="num">1</span>The specification, as written</h3>
+<blockquote class="spec">I run the O and M side for a solar portfolio and honestly the reporting is held together with string, so bear with me.
+
+We've got about 140 plants. People here use plant, site and farm interchangeably, don't read anything into which one you hear. For each one we want a name, roughly where it is, how big it is, when it switched on, and the reference of its grid connection. No two sites share a grid connection reference -- that reference is how the network operator knows which site they're talking about, so it's as good as the name. Site names are unique too, and a site plainly doesn't move, so if you've got the name you've got the site and where it is. They run from about 5 megawatts up to 50 and they're spread pretty evenly across that range -- no clustering at either end, we've got as many little ones as big ones.
+
+Inside a site the thing that matters is the inverters. Who made it, what it's rated at, when it went in, and whether it's behaving. Ratings go from a hundred kilowatts right up to four megawatts depending on the vintage. When we loaded the old spreadsheets we backfilled the missing install dates off the site switch-on date, so nothing is dated earlier than the day its site went live. At any one time about 93 in a hundred are running normally, five in a hundred are running derated for one reason or another, and the odd couple per cent are properly offline.
+
+Every inverter reports in every five minutes -- what it made, the light reading, the panel temperature and the air temperature the same logger picks up. That is the bulk of the data by a mile; across the portfolio it came to something like 60 million rows last month alone. Nothing reports before the inverter was installed. The light readings are the ones the analysts argue about: on a good summer noon we're north of 900, and averaged over daylight it works out somewhere around 340 with a huge amount of scatter, easily 200 either side. Whatever else it is, it can't be negative and we have never recorded above 1200. Generation obviously can't go negative either, and there's a hard ceiling on it that's just arithmetic: five minutes is a twelfth of an hour, so a window can never hold more than a twelfth of the inverter's rating in kilowatt hours. Anything above that is the meter lying to us. On the ones flagged derated the ceiling is tighter still, half of that -- a twenty-fourth of the rating -- because that's what derating means in practice, and when one is properly offline the windows come through as flat zero. Panel temperatures have hit minus fifteen in a cold snap and gone over seventy in a heatwave -- call it minus twenty to eighty-five and you'll cover everything we've ever seen. Whenever there's any light at all the panel is warmer than the air around it; if it isn't, the sensor has come loose.
+
+When something trips we raise a fault against the inverter: when it came in, the code, the wording that goes with that code -- it comes out of the manufacturer's manual and it's the same words every time for a given code, we just print it on the report -- when it cleared, and how long the thing was out for. Nothing is raised before the inverter was installed and nothing clears before it was raised. Most clear inside an hour or two, a few drag on for days, and the average works out around three and a half hours. Anything on an inverter rated over 2 megawatts we have committed contractually to have back inside 48 hours, no excuses.
+
+The bigger jobs go out to the maintenance firm we're contracted to rather than our own techs. We just hold their name and a phone number -- one number per firm, and the names are all different -- and we note against the fault which firm dealt with it.</blockquote>
+<h3 class="stage"><span class="num">2</span>The schema it generated</h3>
+<pre>TABLE SITE
+    name                           VARCHAR  PK
+    location                       VARCHAR
+    size                           FLOAT
+    switch_on_date                 DATE
+    grid_connection_reference      VARCHAR
+
+TABLE INVERTER
+    inverter_id                    UUID  PK
+    manufacturer                   VARCHAR
+    power_rating                   FLOAT
+    install_date                   DATE
+    name                           VARCHAR
+    site_name                      VARCHAR
+    FOREIGN KEY site_name -&gt; SITE
+
+TABLE STATUS_HISTORY
+    status                         VARCHAR
+    effective_at                   DATETIME
+    status_history_id              INTEGER  PK
+    inverter_id                    UUID  PK
+    PRIMARY KEY (status_history_id, inverter_id)
+    FOREIGN KEY inverter_id -&gt; INVERTER
+
+TABLE TELEMETRY
+    reporting_time                 DATETIME
+    generation_amount              FLOAT
+    light_reading                  FLOAT
+    panel_temperature              FLOAT
+    air_temperature                FLOAT
+    telemetry_id                   INTEGER  PK
+    inverter_id                    UUID  PK
+    PRIMARY KEY (telemetry_id, inverter_id)
+    FOREIGN KEY inverter_id -&gt; INVERTER
+
+TABLE FAULT_RECORD
+    creation_time                  DATETIME
+    code                           VARCHAR
+    code_description               TEXT
+    clearing_time                  DATETIME  NULL
+    duration                       FLOAT  NULL
+    fault_record_id                INTEGER  PK
+    inverter_id                    UUID  PK
+    name                           VARCHAR  NULL
+    maintenance_firm_name          VARCHAR
+    PRIMARY KEY (fault_record_id, inverter_id)
+    FOREIGN KEY inverter_id -&gt; INVERTER
+    FOREIGN KEY maintenance_firm_name -&gt; MAINTENANCE_FIRM
+
+TABLE MAINTENANCE_FIRM
+    name                           VARCHAR  PK
+    phone_number                   VARCHAR</pre>
+<h3 class="stage"><span class="num">3</span>The constraints it extracted</h3>
+<h4 class="family">Distributions (3)</h4>
+<pre>SITE.size ~ UNIFORM(min_value=5.0, max_value=50.0)
+STATUS_HISTORY.status ~ CATEGORICAL(categories=['normal', 'derated', 'offline'], probabilities=[0.93, 0.05, 0.02])
+TELEMETRY.light_reading ~ GAUSSIAN(mean=340.0, std_dev=200.0)</pre>
+<h4 class="family">Moment targets (1)</h4>
+<pre>ON AVG(duration) AS avg_duration OVER FAULT_RECORD:  avg_duration = 3.5</pre>
+<h4 class="family">Structural / cardinality (2)</h4>
+<pre>ON fanout SITE -&gt; INVERTER via site_name:  child_count &gt; 1
+ON COUNT(name) AS count OVER SITE:  count = 140</pre>
+<h4 class="family">Logical rules (9)</h4>
+<pre>ON INVERTER JOIN SITE on INVERTER.site_name=SITE.name:  install_date &gt;= switch_on_date
+ON TELEMETRY JOIN INVERTER on TELEMETRY.inverter_id=INVERTER.inverter_id:  reporting_time &gt;= install_date
+ON TELEMETRY:  light_reading &gt;= 0
+ON TELEMETRY:  light_reading &lt;= 1200
+ON TELEMETRY:  generation_amount &gt;= 0
+ON TELEMETRY:  panel_temperature &gt; air_temperature
+ON FAULT_RECORD JOIN INVERTER on FAULT_RECORD.inverter_id=INVERTER.inverter_id:  creation_time &gt;= install_date
+ON FAULT_RECORD:  clearing_time &gt;= creation_time
+ON FAULT_RECORD JOIN INVERTER on FAULT_RECORD.inverter_id=INVERTER.inverter_id:  IF power_rating &gt; 2000 THEN duration &lt;= 48</pre>
+</section>
+<section class="case">
+<h2>Materials Science Experiment Tracking</h2>
+<p class="meta">Author's technical background: Semi-Technical &middot; specification 3,824 characters</p>
+<h3 class="stage"><span class="num">1</span>The specification, as written</h3>
+<blockquote class="spec">Materials lab, mechanical testing group. Right now every test goes into a workbook per project and nobody can answer 'show me all the quench-and-tempered material that failed elongation'. Here is roughly what we hold.
+
+Stock arrives as batches -- supplier, heat number, receipt date, mass in kg -- and each batch is one alloy grade, where the grade record is just the grade code, the alloy family and the nominal density. The grade code is unique and settles the family and the density. The heat number is unique too, because it is the mill's number for that melt, and it tells you which batch and therefore which grade you are looking at.
+
+Batches get heat treated: a process name, a soak temperature, a soak time in minutes, a quench medium and the date it went through the furnace, which is never before the batch arrived. For the study work we deliberately sweep soak temperature uniformly between 820 and 960 C, and the furnaces themselves will not go outside 500 to 1200.
+
+Specimens are machined out of a batch and tagged with the treatment they went through; each one has a specimen code that is unique, a geometry, a gauge diameter between 3 and 25 mm, a gauge length, the machining date, and a stamped condition code. You cannot machine a specimen before the stock arrived, and you cannot machine it before the treatment it is tagged with went through the furnace either, though the old workbooks have both. These are proportional specimens, so the gauge length is always at least four times the gauge diameter.
+
+The stamped condition -- as-received, annealed, or quench-and-tempered -- matters because the acceptance bands differ, and those bands are now their own little table rather than three numbers in a macro: a description, the minimum and maximum yield we will accept for material in that condition, and the minimum elongation. As-received material should yield between 250 and 380 MPa, quench-and-tempered between 400 and 620, and that table is the only place those numbers should live. Across everything we have tested, yield comes out around 345 MPa with sd 22, UTS around 512 with sd 30, and elongation 24.5 percent with sd 4.1, and elongation is physically between 0 and 60.
+
+A tensile test names the specimen, the frame it ran on and the acceptance condition it was judged against -- which is of course the specimen's own stamped condition, so it is derivable, but the report writer wants it on the test row and we have had it disagree -- plus the timestamp, the strain rate, yield, UTS, elongation, the operator's initials and a result status. A test is never run before its specimen was machined, nor before the frame's own last calibration date. Yield and UTS have to sit inside the accepted band for that condition, UTS is by definition never below yield, and anything whose elongation comes in under the minimum elongation for its condition goes to status 'REVIEW' automatically.
+
+The frames are their own record: a name that is unique, a load cell capacity in kN, the manufacturer, the last calibration date and the date the next calibration falls due. Nothing is tested on a frame past its calibration due date -- that is the finding from the last audit. The small frames under 100 kN can only be driven quasi-statically, so a test on one of those runs at 0.001 per second or slower.
+
+Hardness is separate because we take several indents per specimen, numbered from one, so the specimen and the indent number together identify the reading: a method, the indent number, the load in kgf and the value, which sits around 178 with sd 12 and can physically be anywhere from 20 to 950.
+
+Broken tensile specimens sometimes get a fractography write-up against the test -- fracture mode, an image path on the share, and free-text observations. Scale is modest: about 4,200 specimens and 11,000 indents.</blockquote>
+<h3 class="stage"><span class="num">2</span>The schema it generated</h3>
+<pre>TABLE BATCH
+    supplier                       VARCHAR
+    heat_number                    VARCHAR  PK
+    receipt_date                   DATE
+    mass                           FLOAT
+    grade_code                     VARCHAR
+    FOREIGN KEY grade_code -&gt; ALLOY_GRADE
+
+TABLE ALLOY_GRADE
+    grade_code                     VARCHAR  PK
+    alloy_family                   VARCHAR
+    nominal_density                FLOAT
+
+TABLE HEAT_TREATMENT_PROCESS
+    process_name                   VARCHAR  PK
+    soak_temperature               FLOAT
+    soak_time                      INTEGER
+    quench_medium                  VARCHAR
+    furnace_processing_date        DATE
+
+TABLE SPECIMEN
+    specimen_code                  VARCHAR  PK
+    geometry                       VARCHAR
+    gauge_diameter                 FLOAT
+    gauge_length                   FLOAT
+    machining_date                 DATE
+    stamped_condition              VARCHAR
+    heat_number                    VARCHAR  NULL
+    process_name                   VARCHAR  NULL
+    FOREIGN KEY heat_number -&gt; BATCH
+    FOREIGN KEY process_name -&gt; HEAT_TREATMENT_PROCESS
+
+TABLE ACCEPTANCE_BAND
+    description                    VARCHAR  PK
+    min_yield                      DECIMAL
+    max_yield                      DECIMAL
+    min_elongation                 FLOAT
+    stamped_condition              VARCHAR
+    FOREIGN KEY stamped_condition -&gt; SPECIMEN
+
+TABLE TENSILE_TEST
+    timestamp                      DATETIME
+    strain_rate                    FLOAT
+    yield_value                    DECIMAL
+    uts_value                      DECIMAL
+    elongation_value               FLOAT
+    operator_initials              VARCHAR
+    result_status                  VARCHAR
+    tensile_test_id                INTEGER  PK
+    specimen_code                  VARCHAR  NULL
+    name                           VARCHAR  NULL
+    description                    VARCHAR  NULL
+    FOREIGN KEY description -&gt; ACCEPTANCE_BAND
+    FOREIGN KEY name -&gt; FRAME
+    FOREIGN KEY specimen_code -&gt; SPECIMEN
+
+TABLE FRAME
+    name                           VARCHAR  PK
+    load_cell_capacity             FLOAT
+    manufacturer                   VARCHAR
+    last_calibration_date          DATE
+    next_calibration_due_date      DATE
+
+TABLE HARDNESS_READING
+    indent_number                  INTEGER  PK
+    method                         VARCHAR
+    load                           FLOAT
+    value                          FLOAT
+    specimen_code                  VARCHAR  PK
+    PRIMARY KEY (indent_number, specimen_code)
+    FOREIGN KEY specimen_code -&gt; SPECIMEN
+
+TABLE FRACTOGRAPHY_WRITE_UP
+    fracture_mode                  VARCHAR
+    image_path                     VARCHAR
+    observations                   TEXT
+    fractography_write_up_id       INTEGER  PK
+    tensile_test_id                INTEGER  PK
+    PRIMARY KEY (fractography_write_up_id, tensile_test_id)
+    FOREIGN KEY tensile_test_id -&gt; TENSILE_TEST</pre>
+<h3 class="stage"><span class="num">3</span>The constraints it extracted</h3>
+<h4 class="family">Distributions (4)</h4>
+<pre>TENSILE_TEST.yield_value ~ GAUSSIAN(mean=345.0, std_dev=22.0)
+TENSILE_TEST.uts_value ~ GAUSSIAN(mean=512.0, std_dev=30.0)
+TENSILE_TEST.elongation_value ~ GAUSSIAN(mean=24.5, std_dev=4.1)
+HARDNESS_READING.value ~ GAUSSIAN(mean=178.0, std_dev=12.0)</pre>
+<h4 class="family">Logical rules (16)</h4>
+<pre>ON BATCH JOIN SPECIMEN on SPECIMEN.heat_number=BATCH.heat_number:  furnace_processing_date &gt;= receipt_date
+ON HEAT_TREATMENT_PROCESS:  soak_temperature BETWEEN 820 AND 960
+ON SPECIMEN:  gauge_diameter BETWEEN 3 AND 25
+ON BATCH JOIN SPECIMEN on SPECIMEN.heat_number=BATCH.heat_number:  machining_date &gt;= receipt_date
+ON HEAT_TREATMENT_PROCESS JOIN SPECIMEN on SPECIMEN.process_name=HEAT_TREATMENT_PROCESS.process_name:  machining_date &gt;= furnace_processing_date
+ON SPECIMEN:  gauge_length &gt;= (gauge_diameter * 4)
+ON SPECIMEN:  stamped_condition IN ('as-received', 'annealed', 'quench-and-tempered')
+ON TENSILE_TEST:  elongation_value &gt;= 0
+ON TENSILE_TEST:  elongation_value &lt;= 60
+ON SPECIMEN JOIN TENSILE_TEST on TENSILE_TEST.specimen_code=SPECIMEN.specimen_code:  timestamp &gt;= machining_date
+ON FRAME JOIN TENSILE_TEST on TENSILE_TEST.name=FRAME.name:  timestamp &gt;= last_calibration_date
+ON TENSILE_TEST:  uts_value &gt;= yield_value
+ON FRAME JOIN TENSILE_TEST on TENSILE_TEST.name=FRAME.name:  timestamp &lt;= next_calibration_due_date
+ON FRAME JOIN TENSILE_TEST on TENSILE_TEST.name=FRAME.name:  IF load_cell_capacity &lt; 100 THEN strain_rate &lt;= 0.001
+ON HARDNESS_READING:  value BETWEEN 20 AND 950
+ON HEAT_TREATMENT_PROCESS:  soak_temperature BETWEEN 500 AND 1200</pre>
+</section>
+<section class="case">
+<h2>Clinical Trial Management</h2>
+<p class="meta">Author's technical background: Technical Expert &middot; specification 5,166 characters</p>
+<h3 class="stage"><span class="num">1</span>The specification, as written</h3>
+<blockquote class="spec">Data model for the EDC back end of a phase III oncology programme; I am specifying it, not asking whether we need it. One row per protocol at the top, with its code, title, phase and therapeutic area -- the protocol code is unique and is what the sponsor's systems key on, so the code alone hands you the trial row, its phase and its therapeutic area. Every activated site hangs off exactly one protocol: ninety-odd sites across fourteen countries, each with a site name, a country, an activation date, the enrolment cap we agreed with the site, and a running enrolled count that must never overtake that cap. A site has one principal investigator who, in this system, never appears at more than one site, so the site pins the investigator as tightly as the investigator pins the site. Arms belong to the protocol rather than to a shared lookup, because the dose text is protocol-specific; there are two per protocol, treatment and control, randomised 2:1, so allocation lands at 0.667 treatment / 0.333 control and the arm row carries that weight along with the planned dose in mg per cycle.
+
+Roughly 42,000 subjects, each pinned to one site and one arm, carrying consent date, age at consent (INTEGER, protocol window 18 to 89), sex, baseline ECOG performance status on the usual 0-4 integer scale, baseline weight in kg -- normal, mean 71.4, sd 14.8 -- and the number of days from consent to first dose, which is exponential with rate about 0.11. Nobody consents at a site before that site is activated. Visits are child rows on the subject: cycle number 1 through 12, protocol nominal day, actual date, completion status. Nothing about a subject predates consent, so a visit's actual date is never earlier than the subject's consent date. The nominal day is not per-subject data at all -- the protocol schedule fixes it from the cycle number, and every visit at cycle 3 anywhere in the programme carries the same nominal day -- but it is written on the visit row because that is what the CRF exports.
+
+Dosing is recorded per visit: the visit, the arm the dose was given under, the administered dose in mg, the timestamp, and a reduction reason. No dose is stamped before the visit it belongs to. A dose never exceeds the planned dose on that arm, and where it comes in under the planned dose there has to be a reduction reason recorded. Toxicity reductions in this programme are floored, so an administered dose is also never below half the arm's planned dose -- anything lower is a discontinuation, not a reduction.
+
+A visit may collect specimens with a collection timestamp and a draw volume in mL; a specimen is never stamped before the visit it was taken at. Specimen types are a small reference list -- blood, biopsy, urine -- each with a description and the nominal volume in mL for that type of draw, and a draw is never more than the nominal volume for its type nor less than a tenth of it. Specimens fan out to assay results -- analyte code, numeric value, unit, lab flag -- and each result names the central laboratory that produced it, since we use three of them and audit needs the lab's accreditation on file; lab names are unique, so the name is as good a key as the id. Each result also names the reference range it was read against -- always the range for that same analyte at that same laboratory, the analyte code and the lab id sit on both rows and they have to agree -- and those ranges are held per laboratory per analyte with a lower limit and an upper limit, the upper always above the lower. A value above its range's upper limit is flagged HIGH and one below the lower limit is flagged LOW; that is arithmetic the extract should not be re-deriving at query time. Note the unit is a property of the analyte at a given laboratory rather than of the individual measurement, even though it is written on every result row. Result values are log-normal, log mean 1.1 and log variance 0.8. That table is the volume driver: about 4.6 million rows.
+
+Safety data attaches to the subject, not the visit. Adverse events carry a MedDRA preferred term, the system organ class that term rolls up into -- the preferred term determines the class, MedDRA is a fixed hierarchy and we do not get to choose -- a CTCAE grade 1-5, onset and resolution dates, a seriousness boolean and an outcome; observed grade mix is 46 / 31 / 15 / 6 / 2 percent from grade 1 upward. An event never resolves before it onset, and never onsets before the subject consented. Grade 5 means death, so grade = 5 forces outcome 'FATAL'. Separately, a grade 3 or worse event in a subject who was 75 or older at consent sets the geriatric dose-review flag. Concomitant medications are also per subject: drug name as free text, indication, start and stop, and a stop that is populated is never before the start; we only hold medications from consent onward, so no start date precedes the consent date either. Protocol deviations are recorded against the visit where they happened, with a category, a narrative and a report date that is never earlier than the visit's actual date; a deviation on a visit whose completion status came back 'MISSED' always takes category 'VISIT_NOT_DONE'.</blockquote>
+<h3 class="stage"><span class="num">2</span>The schema it generated</h3>
+<pre>TABLE PROTOCOL
+    code                           VARCHAR  PK
+    title                          VARCHAR
+    phase                          VARCHAR
+    therapeutic_area               VARCHAR
+
+TABLE SITE
+    name                           VARCHAR  PK
+    country                        VARCHAR
+    activation_date                DATE
+    enrolment_cap                  INTEGER
+    running_enrolled_count         INTEGER
+    code                           VARCHAR
+    FOREIGN KEY code -&gt; PROTOCOL
+    FOREIGN KEY name -&gt; PRINCIPAL_INVESTIGATOR
+
+TABLE PRINCIPAL_INVESTIGATOR
+    name                           VARCHAR  PK
+
+TABLE ARM
+    name                           VARCHAR  PK
+    dose_text                      TEXT
+    allocation_weight              FLOAT
+    planned_dose                   FLOAT
+    code                           VARCHAR
+    FOREIGN KEY code -&gt; PROTOCOL
+
+TABLE SUBJECT
+    subject_id                     UUID  PK
+    consent_date                   DATE
+    age_at_consent                 INTEGER
+    sex                            VARCHAR
+    baseline_ecog                  INTEGER
+    baseline_weight                FLOAT
+    days_to_first_dose             INTEGER
+    site_name                      VARCHAR
+    arm_name                       VARCHAR
+    FOREIGN KEY arm_name -&gt; ARM
+    FOREIGN KEY site_name -&gt; SITE
+
+TABLE VISIT
+    visit_id                       UUID  PK
+    cycle_number                   INTEGER
+    nominal_day                    INTEGER
+    actual_date                    DATE
+    completion_status              VARCHAR
+    subject_id                     UUID
+    FOREIGN KEY subject_id -&gt; SUBJECT
+
+TABLE DOSE
+    dose_id                        UUID  PK
+    administered_amount            FLOAT
+    timestamp                      TIMESTAMP
+    reduction_reason               TEXT  NULL
+    visit_id                       UUID
+    name                           VARCHAR
+    FOREIGN KEY name -&gt; ARM
+    FOREIGN KEY visit_id -&gt; VISIT
+
+TABLE SPECIMEN
+    specimen_id                    UUID  PK
+    collection_timestamp           TIMESTAMP
+    draw_volume                    FLOAT
+    type                           VARCHAR
+    visit_id                       UUID  NULL
+    FOREIGN KEY visit_id -&gt; VISIT
+
+TABLE ASSAY_RESULT
+    result_id                      UUID  PK
+    analyte_code                   VARCHAR
+    value                          FLOAT
+    unit                           VARCHAR
+    lab_flag                       VARCHAR  NULL
+    specimen_id                    UUID
+    name                           VARCHAR
+    FOREIGN KEY name -&gt; LABORATORY
+    FOREIGN KEY specimen_id -&gt; SPECIMEN
+
+TABLE LABORATORY
+    name                           VARCHAR  PK
+    accreditation                  VARCHAR
+
+TABLE REFERENCE_RANGE
+    analyte_code                   VARCHAR  PK
+    lower_limit                    FLOAT
+    upper_limit                    FLOAT
+    name                           VARCHAR  PK
+    PRIMARY KEY (analyte_code, name)
+    FOREIGN KEY name -&gt; LABORATORY
+
+TABLE ADVERSE_EVENT
+    ae_id                          UUID  PK
+    meddra_term                    VARCHAR
+    soc                            VARCHAR
+    ctcae_grade                    INTEGER
+    onset_date                     DATE
+    resolution_date                DATE  NULL
+    seriousness                    BOOLEAN
+    outcome                        VARCHAR
+    geriatric_dose_review          BOOLEAN  NULL
+    subject_id                     UUID  NULL
+    FOREIGN KEY subject_id -&gt; SUBJECT
+
+TABLE CONCOMITANT_MEDICATION
+    med_id                         UUID  PK
+    drug_name                      VARCHAR
+    indication                     VARCHAR
+    start_date                     DATE
+    stop_date                      DATE  NULL
+    subject_id                     UUID  NULL
+    FOREIGN KEY subject_id -&gt; SUBJECT
+
+TABLE PROTOCOL_DEVIATION
+    dev_id                         UUID  PK
+    category                       VARCHAR
+    narrative                      TEXT
+    report_date                    DATE
+    visit_id                       UUID  NULL
+    FOREIGN KEY visit_id -&gt; VISIT</pre>
+<h3 class="stage"><span class="num">3</span>The constraints it extracted</h3>
+<h4 class="family">Distributions (3)</h4>
+<pre>SUBJECT.baseline_weight ~ GAUSSIAN(mean=71.4, std_dev=14.8)
+ASSAY_RESULT.value ~ LOG_NORMAL(mean=1.1, std_dev=0.8944)
+ADVERSE_EVENT.ctcae_grade ~ CATEGORICAL(categories=[1.0, 2.0, 3.0, 4.0, 5.0], probabilities=[0.46, 0.31, 0.15, 0.06, 0.02])</pre>
+<h4 class="family">Structural / cardinality (2)</h4>
+<pre>ON COUNT(name) AS arm_count OVER ARM GROUP BY code:  arm_count = 2
+ON SITE:  running_enrolled_count &lt;= enrolment_cap</pre>
+<h4 class="family">Logical rules (6)</h4>
+<pre>ON DOSE JOIN ARM on DOSE.name=ARM.name:  IF administered_amount &lt; planned_dose THEN NOT (reduction_reason = 'N/A')
+ON DOSE JOIN VISIT on DOSE.visit_id=VISIT.visit_id JOIN ARM on DOSE.name=ARM.name:  IF administered_amount &lt; (planned_dose / 2) THEN completion_status = 'DISCONTINUED'
+ON SPECIMEN:  type IN ('blood', 'biopsy', 'urine')
+ON ADVERSE_EVENT:  IF ctcae_grade = 5 THEN outcome = 'FATAL'
+ON REFERENCE_RANGE:  upper_limit &gt; lower_limit
+ON ADVERSE_EVENT:  resolution_date &gt;= onset_date</pre>
+</section>
+<footer class="doc">Every schema and constraint on this page is read directly from the pipeline's run artifacts. Constraints are rendered from the typed objects the system emits, not hand-written. This is an early system: the schemas are correct in outline with known naming and completeness gaps.</footer>
+</main>
