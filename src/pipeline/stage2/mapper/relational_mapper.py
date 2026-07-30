@@ -139,7 +139,7 @@ def _is_new_token(suffix: str, candidate: str) -> bool:
     return bool(set(suffix.split("_")) - set(candidate.split("_")))
 
 
-def _non_distinctive_identifier_names(cm: ConceptualModel) -> Set[str]:
+def _non_distinctive_identifier_names(cm: ConceptualModel) -> Dict[str, Set[str]]:
     """Attribute names that some entity uses as an ORDINARY (non-identifier)
     attribute, and which are therefore unsafe as a natural primary key.
 
@@ -169,8 +169,16 @@ def _non_distinctive_identifier_names(cm: ConceptualModel) -> Set[str]:
     on the order entities are mapped in. Carries no vocabulary of its own: that
     `name` is generic and `sku` is not is a property of the model at hand, not
     of English, and a hardcoded word list would be the brittle version of this.
+
+    Returns name -> the entities that use it as an ordinary attribute, rather than
+    a flat set, because the question is always "does some OTHER entity use this
+    name descriptively". An entity's own attributes must not disqualify its own
+    key: an entity that declares NO identifier has every attribute counted as
+    ordinary, so a flat set made the FD path unable to ever choose a key -- which
+    is the one thing that path exists to do. Caught by a test where Product with
+    the dependency sku -> title got a surrogate instead of sku.
     """
-    plain: Set[str] = set()
+    owners: Dict[str, Set[str]] = {}
     for entity in cm.entities:
         identifiers = {
             to_snake_case(a).lower() for a in (entity.identifier_attributes or [])
@@ -180,8 +188,15 @@ def _non_distinctive_identifier_names(cm: ConceptualModel) -> Set[str]:
                 continue
             name = to_snake_case(attr.name).lower()
             if name not in identifiers:
-                plain.add(name)
-    return plain
+                owners.setdefault(name, set()).add(entity.name)
+    return owners
+
+
+def _unsafe_key_columns(
+    candidate: List[str], entity_name: str, owners: Dict[str, Set[str]]
+) -> List[str]:
+    """Which of `candidate` are used descriptively by some OTHER entity."""
+    return [col for col in candidate if owners.get(col, set()) - {entity_name}]
 
 
 def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
@@ -227,7 +242,7 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
         declared_ids = [
             to_snake_case(a).lower() for a in (entity.identifier_attributes or [])
         ]
-        unsafe_ids = [a for a in declared_ids if a in non_distinctive_ids]
+        unsafe_ids = _unsafe_key_columns(declared_ids, entity.name, non_distinctive_ids)
         if declared_ids and unsafe_ids:
             logger.info(
                 "  [Mapper] Entity '%s' declares identifier(s) %s, but %s "
@@ -273,6 +288,33 @@ def map_conceptual_to_relational(cm: ConceptualModel) -> Schema:
                         and dep.split(".", 1)[0].lower() == entity.name.lower()
                     ]
                     if set(det_cols).union(set(dep_cols)) == entity_attr_names:
+                        # The distinctiveness rule applies to a key inferred from
+                        # a functional dependency exactly as it does to a declared
+                        # identifier -- the risk is a property of the NAME, not of
+                        # how the name was chosen. Missing this made the guard
+                        # above look like it worked while changing nothing:
+                        # rejecting Club's declared identifier ['name'] fell
+                        # through to here, where the FD "Club.name ->
+                        # Club.founding_year" covers Club's whole attribute set
+                        # and re-selected 'name' anyway. Live evidence was a run
+                        # that logged the surrogate substitution for Club and
+                        # still emitted CLUB with primary_key=['name'] and five
+                        # `.name -> CLUB` foreign keys.
+                        unsafe_fd = _unsafe_key_columns(
+                            det_cols, entity.name, non_distinctive_ids
+                        )
+                        if unsafe_fd:
+                            logger.info(
+                                "  [Mapper] Entity '%s' has a functional dependency "
+                                "determined by %s, but %s also serve(s) as an "
+                                "ordinary attribute elsewhere in the model, so it is "
+                                "not a safe natural key either; continuing to a "
+                                "surrogate.",
+                                entity.name,
+                                det_cols,
+                                unsafe_fd,
+                            )
+                            continue
                         candidate_fd_det = det_cols
                         break
 

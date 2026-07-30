@@ -27,6 +27,7 @@ from src.pipeline.stage2.mapper.conceptual_model import (
     CMAttribute,
     ConceptualModel,
     Entity,
+    FunctionalDependency,
     Participant,
     Relationship,
 )
@@ -205,3 +206,75 @@ class TestJunctionAttributeNullability:
         for col in junction.columns:
             if col.name in junction.pk_set:
                 assert col.is_nullable is False
+
+
+class TestFunctionalDependencyKeysAreAlsoChecked:
+    """The distinctiveness rule must apply to a key inferred from a functional
+    dependency, not only to a declared identifier.
+
+    Missing this made the guard look like it worked while changing nothing.
+    Rejecting Club's declared identifier ['name'] fell through to the FD path,
+    where "Club.name -> Club.founding_year" covers Club's whole attribute set and
+    re-selected 'name' anyway. Live evidence: a run that LOGGED the surrogate
+    substitution for Club and still emitted CLUB with primary_key=['name'] plus
+    five `.name -> CLUB` foreign keys.
+    """
+
+    def _model(self) -> ConceptualModel:
+        return ConceptualModel(
+            entities=[
+                Entity(
+                    name="Club",
+                    attributes=[_attr("name"), _attr("founding_year", DataType.INTEGER)],
+                    identifier_attributes=["name"],
+                ),
+                Entity(
+                    name="Route",
+                    attributes=[_attr("route_id", DataType.INTEGER), _attr("name")],
+                    identifier_attributes=["route_id"],
+                ),
+            ],
+            relationships=[],
+            functional_dependencies=[
+                FunctionalDependency(
+                    determinant=["Club.name"], dependent=["Club.founding_year"]
+                )
+            ],
+        )
+
+    def test_an_fd_cannot_reinstate_a_generic_key(self):
+        schema = map_conceptual_to_relational(self._model())
+        club = next(t for t in schema.tables if t.name == "CLUB")
+        assert club.primary_key == ["club_id"]
+
+    def test_the_generic_name_is_not_wired_as_an_fk(self):
+        """The harm, end to end: with CLUB on a surrogate, no table has a
+        single-column PK named `name`, so nothing can infer ROUTE.name -> CLUB."""
+        schema = map_conceptual_to_relational(self._model())
+        schema.wire_orphan_fk_columns()
+        wired = {
+            (r.referencing_table, r.referencing_column, r.referred_table)
+            for r in schema.relationships or []
+        }
+        assert ("ROUTE", "name", "CLUB") not in wired
+
+    def test_a_distinctive_fd_key_is_still_honoured(self):
+        """The rule must not reject every FD-derived key -- only unsafe ones."""
+        model = ConceptualModel(
+            entities=[
+                Entity(
+                    name="Product",
+                    attributes=[_attr("sku"), _attr("title")],
+                    identifier_attributes=[],
+                )
+            ],
+            relationships=[],
+            functional_dependencies=[
+                FunctionalDependency(
+                    determinant=["Product.sku"], dependent=["Product.title"]
+                )
+            ],
+        )
+        schema = map_conceptual_to_relational(model)
+        product = next(t for t in schema.tables if t.name == "PRODUCT")
+        assert product.primary_key == ["sku"]
